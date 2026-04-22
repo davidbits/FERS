@@ -1,8 +1,10 @@
 {
     "name": "fers-monorepo",
     "private": true,
-    "version": "0.1.0",
-    "workspaces": ["packages/*"],
+    "version": "0.2.0",
+    "workspaces": [
+        "packages/*"
+    ],
     "scripts": {
         "prepare": "husky",
         "ui:dev": "bun run --filter fers-ui tauri dev --no-watch",
