@@ -1,0 +1,365 @@
+---
+name: Release
+
+on:
+    push:
+        branches: ['master']
+    workflow_dispatch:
+
+permissions:
+    contents: write
+    pull-requests: write
+
+jobs:
+    release-please:
+        name: Release Please
+        runs-on: ubuntu-latest
+        outputs:
+            release_created: ${{ steps.release.outputs.release_created }}
+            tag_name: ${{ steps.release.outputs.tag_name }}
+        steps:
+            - name: Run release-please
+              id: release
+              uses: googleapis/release-please-action@v4
+              with:
+                  config-file: release-please-config.json
+                  manifest-file: .release-please-manifest.json
+                  target-branch: master
+
+    verify-release:
+        name: Verify release metadata
+        runs-on: ubuntu-latest
+        needs: release-please
+        if: needs.release-please.outputs.release_created == 'true'
+        steps:
+            - name: Checkout release tag
+              uses: actions/checkout@v6
+              with:
+                  ref: ${{ needs.release-please.outputs.tag_name }}
+
+            - name: Verify shared versions
+              run: python3 scripts/verify_versions.py
+
+    release-cli:
+        name: Release CLI (${{ matrix.asset_id }})
+        runs-on: ${{ matrix.os }}
+        needs: [release-please, verify-release]
+        if: needs.release-please.outputs.release_created == 'true'
+        timeout-minutes: 60
+        strategy:
+            fail-fast: false
+            matrix:
+                include:
+                    - os: ubuntu-24.04
+                      asset_id: linux-x64
+                      vcpkg_triplet: x64-linux
+                    - os: ubuntu-24.04-arm
+                      asset_id: linux-arm64
+                      vcpkg_triplet: arm64-linux
+                    - os: macos-26-intel
+                      asset_id: macos-x64
+                      vcpkg_triplet: x64-osx
+                    - os: macos-26
+                      asset_id: macos-arm64
+                      vcpkg_triplet: arm64-osx
+                    - os: windows-2025
+                      asset_id: windows-x64
+                      vcpkg_triplet: x64-windows-static-md
+                      msvc_arch: x64
+                    - os: windows-11-arm
+                      asset_id: windows-arm64
+                      vcpkg_triplet: arm64-windows-static-md
+                      msvc_arch: arm64
+        env:
+            GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+            TAG_NAME: ${{ needs.release-please.outputs.tag_name }}
+            VCPKG_DEFAULT_TRIPLET: ${{ matrix.vcpkg_triplet }}
+            VCPKG_TARGET_TRIPLET: ${{ matrix.vcpkg_triplet }}
+        steps:
+            - name: Checkout release tag
+              uses: actions/checkout@v6
+              with:
+                  ref: ${{ needs.release-please.outputs.tag_name }}
+
+            - name: Verify shared versions
+              run: python3 scripts/verify_versions.py
+
+            - name: Install Linux dependencies
+              if: runner.os == 'Linux'
+              run: |
+                  sudo apt-get update
+                  sudo apt-get install -y pkg-config build-essential
+
+            - name: Get CMake
+              uses: lukka/get-cmake@latest
+
+            - name: Setup MSVC
+              if: runner.os == 'Windows'
+              uses: ilammy/msvc-dev-cmd@v1
+              with:
+                  arch: ${{ matrix.msvc_arch }}
+
+            - name: Force MSVC compilers
+              if: runner.os == 'Windows'
+              shell: pwsh
+              run: |
+                  "CC=cl" >> $env:GITHUB_ENV
+                  "CXX=cl" >> $env:GITHUB_ENV
+                  "VCPKG_ROOT=${{ github.workspace }}\vcpkg" >> $env:GITHUB_ENV
+
+            - name: Configure vcpkg downloads
+              shell: bash
+              run: |
+                  echo "VCPKG_DOWNLOADS=${{ github.workspace }}/.cache/vcpkg/downloads" >> "$GITHUB_ENV"
+                  mkdir -p "${{ github.workspace }}/.cache/vcpkg/downloads"
+
+            - name: Configure Windows vcpkg binary cache
+              if: runner.os == 'Windows'
+              shell: pwsh
+              run: |
+                  $binaryCache = "${{ github.workspace }}/.cache/vcpkg/binary-cache/${{ matrix.vcpkg_triplet }}" -replace '\\', '/'
+                  New-Item -ItemType Directory -Force -Path $binaryCache | Out-Null
+                  "VCPKG_BINARY_SOURCES=clear;files,$binaryCache,readwrite" >> $env:GITHUB_ENV
+
+            - name: Cache vcpkg downloads
+              uses: actions/cache@v5
+              with:
+                  path: ${{ github.workspace }}/.cache/vcpkg/downloads
+                  key: release-${{ runner.os }}-vcpkg-downloads-${{ hashFiles('vcpkg.json') }}
+                  restore-keys: |
+                      release-${{ runner.os }}-vcpkg-downloads-
+
+            - name: Cache Windows vcpkg binary packages
+              if: runner.os == 'Windows'
+              uses: actions/cache@v5
+              with:
+                  path: ${{ github.workspace }}/.cache/vcpkg/binary-cache/${{ matrix.vcpkg_triplet }}
+                  key: release-${{ runner.os }}-vcpkg-binary-${{ matrix.vcpkg_triplet }}-${{ hashFiles('vcpkg.json') }}
+                  restore-keys: |
+                      release-${{ runner.os }}-vcpkg-binary-${{ matrix.vcpkg_triplet }}-
+
+            - name: Setup vcpkg
+              uses: lukka/run-vcpkg@v11
+              with:
+                  vcpkgDirectory: ${{ github.workspace }}/vcpkg
+                  vcpkgJsonGlob: 'vcpkg.json'
+                  runVcpkgInstall: true
+                  doNotCache: true
+
+            - name: Build and upload CLI archive (Unix)
+              if: runner.os != 'Windows'
+              shell: bash
+              run: |
+                  cmake --fresh --preset=release -DVCPKG_TARGET_TRIPLET="${{ matrix.vcpkg_triplet }}"
+                  cmake --build --preset=release --parallel
+                  archive_stem="fers-${TAG_NAME}-cli-${{ matrix.asset_id }}"
+                  install_root="${RUNNER_TEMP}/${archive_stem}"
+                  cmake --install build/release --prefix "${install_root}"
+                  tar -C "${RUNNER_TEMP}" -czf "${RUNNER_TEMP}/${archive_stem}.tar.gz" "${archive_stem}"
+                  gh release upload "${TAG_NAME}" "${RUNNER_TEMP}/${archive_stem}.tar.gz" --clobber
+
+            - name: Build and upload CLI archive (Windows)
+              if: runner.os == 'Windows'
+              shell: pwsh
+              run: |
+                  cmake --fresh --preset=release -DVCPKG_TARGET_TRIPLET="${{ matrix.vcpkg_triplet }}"
+                  cmake --build --preset=release --parallel
+                  $archiveStem = "fers-$env:TAG_NAME-cli-${{ matrix.asset_id }}"
+                  $installRoot = Join-Path $env:RUNNER_TEMP $archiveStem
+                  cmake --install build/release --prefix $installRoot
+                  $archivePath = Join-Path $env:RUNNER_TEMP "$archiveStem.zip"
+                  Compress-Archive -Path $installRoot -DestinationPath $archivePath -Force
+                  gh release upload $env:TAG_NAME $archivePath --clobber
+
+    release-ui:
+        name: Release UI (${{ matrix.asset_id }})
+        runs-on: ${{ matrix.os }}
+        needs: [release-please, verify-release]
+        if: needs.release-please.outputs.release_created == 'true'
+        timeout-minutes: 60
+        strategy:
+            fail-fast: false
+            matrix:
+                include:
+                    - os: ubuntu-24.04
+                      asset_id: linux-x64
+                      vcpkg_triplet: x64-linux
+                      rust_target: x86_64-unknown-linux-gnu
+                    - os: ubuntu-24.04-arm
+                      asset_id: linux-arm64
+                      vcpkg_triplet: arm64-linux
+                      rust_target: aarch64-unknown-linux-gnu
+                    - os: macos-26-intel
+                      asset_id: macos-x64
+                      vcpkg_triplet: x64-osx
+                      rust_target: x86_64-apple-darwin
+                    - os: macos-26
+                      asset_id: macos-arm64
+                      vcpkg_triplet: arm64-osx
+                      rust_target: aarch64-apple-darwin
+                    - os: windows-2025
+                      asset_id: windows-x64
+                      vcpkg_triplet: x64-windows-static-md
+                      rust_target: x86_64-pc-windows-msvc
+                      msvc_arch: x64
+                    - os: windows-11-arm
+                      asset_id: windows-arm64
+                      vcpkg_triplet: arm64-windows-static-md
+                      rust_target: aarch64-pc-windows-msvc
+                      msvc_arch: arm64
+        env:
+            GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+            TAG_NAME: ${{ needs.release-please.outputs.tag_name }}
+            VCPKG_DEFAULT_TRIPLET: ${{ matrix.vcpkg_triplet }}
+            VCPKG_TARGET_TRIPLET: ${{ matrix.vcpkg_triplet }}
+        steps:
+            - name: Checkout release tag
+              uses: actions/checkout@v6
+              with:
+                  ref: ${{ needs.release-please.outputs.tag_name }}
+
+            - name: Verify shared versions
+              run: python3 scripts/verify_versions.py
+
+            - name: Install Linux dependencies
+              if: runner.os == 'Linux'
+              run: |
+                  sudo apt-get update
+                  sudo apt-get install -y pkg-config build-essential curl wget file libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev libwebkit2gtk-4.1-dev xdg-utils
+
+            - name: Get CMake
+              uses: lukka/get-cmake@latest
+
+            - name: Setup MSVC
+              if: runner.os == 'Windows'
+              uses: ilammy/msvc-dev-cmd@v1
+              with:
+                  arch: ${{ matrix.msvc_arch }}
+
+            - name: Force MSVC compilers
+              if: runner.os == 'Windows'
+              shell: pwsh
+              run: |
+                  $linker = (where.exe link.exe | Select-Object -First 1)
+                  if (-not $linker) {
+                      throw "MSVC link.exe not found"
+                  }
+
+                  "CC=cl" >> $env:GITHUB_ENV
+                  "CXX=cl" >> $env:GITHUB_ENV
+                  "VCPKG_ROOT=${{ github.workspace }}\vcpkg" >> $env:GITHUB_ENV
+                  "CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER=$linker" >> $env:GITHUB_ENV
+                  "CARGO_TARGET_AARCH64_PC_WINDOWS_MSVC_LINKER=$linker" >> $env:GITHUB_ENV
+
+            - name: Configure vcpkg downloads
+              shell: bash
+              run: |
+                  echo "VCPKG_DOWNLOADS=${{ github.workspace }}/.cache/vcpkg/downloads" >> "$GITHUB_ENV"
+                  mkdir -p "${{ github.workspace }}/.cache/vcpkg/downloads"
+
+            - name: Configure Windows vcpkg binary cache
+              if: runner.os == 'Windows'
+              shell: pwsh
+              run: |
+                  $binaryCache = "${{ github.workspace }}/.cache/vcpkg/binary-cache/${{ matrix.vcpkg_triplet }}" -replace '\\', '/'
+                  New-Item -ItemType Directory -Force -Path $binaryCache | Out-Null
+                  "VCPKG_BINARY_SOURCES=clear;files,$binaryCache,readwrite" >> $env:GITHUB_ENV
+
+            - name: Cache vcpkg downloads
+              uses: actions/cache@v5
+              with:
+                  path: ${{ github.workspace }}/.cache/vcpkg/downloads
+                  key: release-ui-${{ runner.os }}-vcpkg-downloads-${{ hashFiles('vcpkg.json') }}
+                  restore-keys: |
+                      release-ui-${{ runner.os }}-vcpkg-downloads-
+
+            - name: Cache Windows vcpkg binary packages
+              if: runner.os == 'Windows'
+              uses: actions/cache@v5
+              with:
+                  path: ${{ github.workspace }}/.cache/vcpkg/binary-cache/${{ matrix.vcpkg_triplet }}
+                  key: release-ui-${{ runner.os }}-vcpkg-binary-${{ matrix.vcpkg_triplet }}-${{ hashFiles('vcpkg.json') }}
+                  restore-keys: |
+                      release-ui-${{ runner.os }}-vcpkg-binary-${{ matrix.vcpkg_triplet }}-
+
+            - name: Setup vcpkg
+              uses: lukka/run-vcpkg@v11
+              with:
+                  vcpkgDirectory: ${{ github.workspace }}/vcpkg
+                  vcpkgJsonGlob: 'vcpkg.json'
+                  doNotCache: true
+
+            - name: Setup Bun
+              uses: oven-sh/setup-bun@v2
+              with:
+                  bun-version: latest
+
+            - name: Cache Bun dependencies
+              uses: actions/cache@v5
+              with:
+                  path: ~/.bun/install/cache
+                  key: release-ui-${{ runner.os }}-bun-${{ hashFiles('**/bun.lock') }}
+                  restore-keys: |
+                      release-ui-${{ runner.os }}-bun-
+
+            - name: Install Rust toolchain
+              run: rustup show
+
+            - name: Install Windows Rust target
+              if: runner.os == 'Windows'
+              run: rustup target add ${{ matrix.rust_target }}
+
+            - name: Rust Cache
+              uses: Swatinem/rust-cache@v2
+              with:
+                  workspaces: 'packages/fers-ui/src-tauri -> target'
+
+            - name: Install JS dependencies
+              run: bun install
+
+            - name: Build UI (Unix)
+              if: runner.os != 'Windows'
+              env:
+                  CMAKE_GENERATOR: Ninja
+                  VCPKG_ROOT: ${{ github.workspace }}/vcpkg
+              shell: bash
+              run: bun run ui:build
+
+            - name: Upload UI bundles (Unix)
+              if: runner.os != 'Windows'
+              shell: bash
+              run: |
+                  bundle_dir="packages/fers-ui/src-tauri/target/release/bundle"
+                  files=()
+                  while IFS= read -r -d '' file; do
+                      case "${file}" in
+                          *.AppImage|*.deb|*.rpm|*.dmg|*.app.tar.gz)
+                              files+=("${file}")
+                              ;;
+                      esac
+                  done < <(find "${bundle_dir}" -type f ! -name '*.sig' -print0)
+                  if [ "${#files[@]}" -eq 0 ]; then
+                      echo "No UI bundles found in ${bundle_dir}" >&2
+                      exit 1
+                  fi
+                  gh release upload "${TAG_NAME}" "${files[@]}" --clobber
+
+            - name: Build UI (Windows)
+              if: runner.os == 'Windows'
+              env:
+                  CMAKE_GENERATOR: Ninja
+                  VCPKG_ROOT: ${{ github.workspace }}\vcpkg
+              shell: pwsh
+              run: bun run ui:build
+
+            - name: Upload UI bundles (Windows)
+              if: runner.os == 'Windows'
+              shell: pwsh
+              run: |
+                  $files = Get-ChildItem "packages/fers-ui/src-tauri/target/release/bundle" -Recurse -File |
+                      Where-Object { $_.Extension -in @(".msi", ".exe") } |
+                      Select-Object -ExpandProperty FullName
+                  if ($files.Count -eq 0) {
+                      throw "No UI bundles found."
+                  }
+                  gh release upload $env:TAG_NAME $files --clobber

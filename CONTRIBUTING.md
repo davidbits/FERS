@@ -68,6 +68,9 @@ For complete instructions on installing prerequisites (CMake, vcpkg, Bun, Rust) 
 
 Continuous Integration (CI) workflows run on every pull request and push to the `master` branch to verify the core build and tests, as well as the UI build. Please ensure your code passes locally before submitting a PR.
 
+Version drift is checked in CI. If you touch release metadata, run `python3 scripts/verify_versions.py` locally before pushing.
+Release PRs additionally regenerate `bun.lock` and tracked license files automatically via `python3 scripts/refresh_release_pr_artifacts.py`.
+
 ## Pull Request Process
 
 1. Fork the repository and create your branch from `master`.
@@ -130,3 +133,5 @@ and allows editing of properties for the selected antenna element.
 
 Closes #42
 ```
+
+Release notes and version bumps are generated from merged Conventional Commits by `release-please`. Use `feat` for minor releases, `fix` for patch releases, and add `!` or a `BREAKING CHANGE:` footer for major releases.

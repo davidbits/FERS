@@ -1,0 +1,65 @@
+---
+name: Refresh Release PR Artifacts
+
+on:
+    pull_request_target:
+        types: [opened, reopened, synchronize]
+        branches: ['master']
+
+permissions:
+    contents: write
+
+concurrency:
+    group: release-pr-artifacts-${{ github.event.pull_request.number }}
+    cancel-in-progress: true
+
+jobs:
+    refresh:
+        name: Refresh generated files
+        runs-on: ubuntu-24.04
+        if: |
+            github.event.pull_request.head.repo.full_name == github.repository &&
+            startsWith(github.event.pull_request.head.ref, 'release-please--branches--')
+        steps:
+            - name: Checkout release PR branch
+              uses: actions/checkout@v6
+              with:
+                  ref: ${{ github.event.pull_request.head.ref }}
+                  fetch-depth: 0
+
+            - name: Setup Bun
+              uses: oven-sh/setup-bun@v2
+              with:
+                  bun-version: latest
+
+            - name: Cache Bun dependencies
+              uses: actions/cache@v5
+              with:
+                  path: ~/.bun/install/cache
+                  key: release-pr-${{ runner.os }}-bun-${{ hashFiles('**/bun.lock') }}
+                  restore-keys: |
+                      release-pr-${{ runner.os }}-bun-
+
+            - name: Install Rust toolchain
+              run: rustup show
+
+            - name: Install cargo-about
+              uses: taiki-e/install-action@v2
+              with:
+                  tool: cargo-about
+
+            - name: Refresh release PR artifacts
+              run: python3 scripts/refresh_release_pr_artifacts.py
+
+            - name: Commit refreshed artifacts
+              shell: bash
+              run: |
+                  if git diff --quiet -- bun.lock THIRD_PARTY_LICENSES/js-licenses.txt THIRD_PARTY_LICENSES/rust-licenses.html; then
+                      exit 0
+                  fi
+
+                  git config user.name "github-actions[bot]"
+                  git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+                  git add bun.lock THIRD_PARTY_LICENSES/js-licenses.txt THIRD_PARTY_LICENSES/rust-licenses.html
+                  git commit -m "chore(release): refresh generated artifacts"
+                  git push

@@ -203,6 +203,16 @@ We welcome contributions to the FERS project! Please read our [CONTRIBUTING.md](
 
 Note that this repository uses **Husky** to enforce code quality with pre-commit hooks. When you commit, your staged files will be automatically formatted and linted.
 
+## Releases
+
+FERS now uses a single repo-wide semantic version across the C++ core, CLI, UI, and release metadata.
+
+- `version.txt` is the single source of truth for the managed release version.
+- `CHANGELOG.md` at the repository root is the canonical changelog for monorepo releases.
+- GitHub Releases and `vX.Y.Z` tags are created by `release-please` from Conventional Commit history after a release PR is merged into `master`.
+- Release PRs automatically refresh `bun.lock` and tracked license reports before merge.
+- Release artifacts currently ship as unsigned CLI install archives and unsigned Tauri bundles for supported platforms.
+
 ## License
 
 - Copyright (C) 2006-2008 Marc Brooker and Michael Inggs.
