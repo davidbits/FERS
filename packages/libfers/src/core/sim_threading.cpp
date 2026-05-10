@@ -39,6 +39,7 @@
 #include "radar/receiver.h"
 #include "radar/target.h"
 #include "radar/transmitter.h"
+#include "serial/hdf5_output_sink.h"
 #include "serial/response.h"
 #include "serial/vita49/vita49_output_sink.h"
 #include "signal/if_resampler.h"
@@ -572,11 +573,10 @@ namespace core
 	SimulationEngine::SimulationEngine(World* world, pool::ThreadPool& pool, std::shared_ptr<ProgressReporter> reporter,
 									   std::string output_dir,
 									   std::shared_ptr<OutputMetadataCollector> metadata_collector,
-									   ReceiverOutputSink* output_sink, const bool live_output) :
+									   ReceiverOutputSink* output_sink) :
 		_world(world), _pool(pool), _reporter(std::move(reporter)), _metadata_collector(std::move(metadata_collector)),
-		_output_sink(output_sink), _live_output(output_sink != nullptr && live_output),
-		_last_report_time(std::chrono::steady_clock::now()), _next_context_heartbeat_time(params::startTime() + 1.0),
-		_output_dir(std::move(output_dir))
+		_output_sink(output_sink), _last_report_time(std::chrono::steady_clock::now()),
+		_next_context_heartbeat_time(params::startTime() + 1.0), _output_dir(std::move(output_dir))
 	{
 		_streaming_tracker_caches.resize(_world->getReceivers().size());
 		_if_pulse_tracker_caches.resize(_world->getReceivers().size());
@@ -608,7 +608,7 @@ namespace core
 		}
 
 		initializeFmcwIfResamplers();
-		if (_live_output)
+		if (_output_sink != nullptr)
 		{
 			for (const auto& receiver_ptr : _world->getReceivers())
 			{
@@ -754,6 +754,10 @@ namespace core
 
 	void SimulationEngine::initializeFinalizers()
 	{
+		if (_output_sink == nullptr)
+		{
+			return;
+		}
 		for (const auto& receiver_ptr : _world->getReceivers())
 		{
 			if (receiver_ptr->getMode() == OperationMode::PULSED_MODE)
@@ -790,7 +794,7 @@ namespace core
 			const RealType over_render =
 				plan.group_delay_seconds + 1.0 / plan.actual_output_sample_rate_hz + block_time;
 			_internal_stop_time = std::max(_internal_stop_time, params::endTime() + over_render);
-			if (_live_output)
+			if (_output_sink != nullptr)
 			{
 				receiver_ptr->setFmcwIfOutputCallback(
 					[this, receiver_index](const std::span<const ComplexType> samples, const std::uint64_t sample_start)
@@ -946,7 +950,7 @@ namespace core
 						{
 							appendFmcwIfSample(receiver_index, t_step, sample);
 						}
-						else if (_live_output)
+						else if (_output_sink != nullptr)
 						{
 							appendStreamingOutputSample(receiver_index, sample_index, t_step, sample);
 						}
@@ -1013,7 +1017,7 @@ namespace core
 
 	void SimulationEngine::flushStreamingOutputBlock(const std::size_t receiver_index)
 	{
-		if (!_live_output || _output_sink == nullptr || receiver_index >= _world->getReceivers().size())
+		if (_output_sink == nullptr || receiver_index >= _world->getReceivers().size())
 		{
 			return;
 		}
@@ -1056,8 +1060,7 @@ namespace core
 													const std::span<const ComplexType> samples,
 													const std::uint64_t sample_start)
 	{
-		if (!_live_output || _output_sink == nullptr || samples.empty() ||
-			receiver_index >= _world->getReceivers().size())
+		if (_output_sink == nullptr || samples.empty() || receiver_index >= _world->getReceivers().size())
 		{
 			return;
 		}
@@ -1586,7 +1589,7 @@ namespace core
 		{
 			rx->endFmcwIfResamplingSegment();
 		}
-		if (_live_output && _output_sink != nullptr && receiver_it != _world->getReceivers().end())
+		if (_output_sink != nullptr && receiver_it != _world->getReceivers().end())
 		{
 			const auto receiver_index = static_cast<std::size_t>(receiver_it - _world->getReceivers().begin());
 			if (_streaming_output_stream_open[receiver_index])
@@ -1667,14 +1670,13 @@ namespace core
 			_reporter->report("Main simulation finished. Waiting for data export...", 100, 100);
 		}
 
-		const auto streaming_sources = collectStreamingSourcesForWindow(params::startTime(), params::endTime());
 		for (std::size_t receiver_index = 0; receiver_index < _world->getReceivers().size(); ++receiver_index)
 		{
 			const auto& receiver_ptr = _world->getReceivers()[receiver_index];
 			if (receiver_ptr->getMode() == OperationMode::CW_MODE ||
 				receiver_ptr->getMode() == OperationMode::FMCW_MODE)
 			{
-				if (_live_output)
+				if (_output_sink != nullptr)
 				{
 					flushFmcwIfBlock(receiver_index);
 					receiver_ptr->flushFmcwIfResampling();
@@ -1685,11 +1687,6 @@ namespace core
 						_streaming_output_stream_open[receiver_index] = false;
 					}
 					receiver_ptr->releaseStreamingData();
-				}
-				else
-				{
-					_pool.enqueue(processing::finalizeStreamingReceiver, receiver_ptr.get(), &_pool, _reporter,
-								  _output_dir, _metadata_collector, streaming_sources, _output_sink);
 				}
 			}
 			else if (receiver_ptr->getMode() == OperationMode::PULSED_MODE)
@@ -1724,20 +1721,18 @@ namespace core
 		auto reporter = std::make_shared<ProgressReporter>(progress_callback);
 		auto metadata_collector = std::make_shared<OutputMetadataCollector>(output_dir);
 		std::unique_ptr<ReceiverOutputSink> output_sink;
-		bool live_output = false;
 		if (isVita49Enabled(output_config))
 		{
 			output_sink = serial::vita49::makeVita49OutputSink();
 			output_sink->initializeRun(output_config, params::params.simulation_name);
-			live_output = true;
 		}
 		else
 		{
-			output_sink = processing::makeHdf5OutputSink(output_dir, metadata_collector);
+			output_sink = serial::makeHdf5OutputSink(output_dir, metadata_collector);
 			output_sink->initializeRun(output_config, params::params.simulation_name);
 		}
 
-		SimulationEngine engine(world, pool, reporter, output_dir, metadata_collector, output_sink.get(), live_output);
+		SimulationEngine engine(world, pool, reporter, output_dir, metadata_collector, output_sink.get());
 		engine.run();
 		const auto stats = output_sink->finalize();
 		auto metadata = metadata_collector->snapshot();

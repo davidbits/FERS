@@ -116,7 +116,7 @@ namespace core
 		 */
 		SimulationEngine(World* world, pool::ThreadPool& pool, std::shared_ptr<ProgressReporter> reporter,
 						 std::string output_dir, std::shared_ptr<OutputMetadataCollector> metadata_collector = nullptr,
-						 ReceiverOutputSink* output_sink = nullptr, bool live_output = true);
+						 ReceiverOutputSink* output_sink = nullptr);
 
 		/**
 		 * @brief Starts and runs the main simulation loop until completion.
@@ -288,7 +288,6 @@ namespace core
 		std::vector<std::jthread> _finalizer_threads; ///< Collection of dedicated pulsed finalizer threads.
 		std::shared_ptr<OutputMetadataCollector> _metadata_collector; ///< Collector for generated output metadata.
 		ReceiverOutputSink* _output_sink = nullptr; ///< Selected receiver output sink.
-		bool _live_output = false; ///< True when samples are emitted during streaming physics.
 
 		std::chrono::steady_clock::time_point _last_report_time; ///< Timestamp of the last progress report.
 		int _last_reported_percent = -1; ///< The last reported percentage to prevent redundant updates.

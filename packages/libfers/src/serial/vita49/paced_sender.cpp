@@ -7,9 +7,14 @@
 #include "serial/vita49/paced_sender.h"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <iterator>
 #include <stdexcept>
+
+#if defined(__i386__) || defined(__x86_64__)
+#include <immintrin.h>
+#endif
 
 namespace serial::vita49
 {
@@ -17,6 +22,17 @@ namespace serial::vita49
 	{
 		constexpr auto kCoarsePacingSleep = std::chrono::milliseconds(1);
 		constexpr auto kFinePacingSpin = std::chrono::microseconds(200);
+
+		void cpuPause() noexcept
+		{
+#if defined(__i386__) || defined(__x86_64__)
+			_mm_pause();
+#elif defined(__aarch64__) || defined(__arm__)
+			__builtin_arm_yield();
+#else
+			std::atomic_signal_fence(std::memory_order_seq_cst);
+#endif
+		}
 	}
 
 	PacedSender::PacedSender(std::unique_ptr<DatagramSender> sender, const std::size_t queue_depth) :
@@ -247,7 +263,7 @@ namespace serial::vita49
 			lock.unlock();
 			while (std::chrono::steady_clock::now() < due)
 			{
-				std::this_thread::yield();
+				cpuPause();
 			}
 			lock.lock();
 		}

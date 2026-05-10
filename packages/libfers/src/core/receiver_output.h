@@ -15,11 +15,12 @@
 
 #include "core/config.h"
 #include "core/output_config.h"
-#include "core/output_metadata.h"
 #include "core/sim_id.h"
 
 namespace core
 {
+	struct OutputFileMetadata;
+
 	struct ReceiverStreamDescriptor
 	{
 		SimId receiver_id = 0;

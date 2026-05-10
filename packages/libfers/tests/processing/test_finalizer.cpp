@@ -25,6 +25,7 @@
 #include "radar/receiver.h"
 #include "radar/target.h"
 #include "radar/transmitter.h"
+#include "serial/hdf5_output_sink.h"
 #include "serial/response.h"
 #include "signal/if_resampler.h"
 #include "signal/radar_signal.h"
@@ -166,6 +167,13 @@ namespace
 		return nlohmann::json::parse(metadata_json);
 	}
 
+	std::unique_ptr<core::ReceiverOutputSink> makeTestHdf5Sink(const std::filesystem::path& out_dir)
+	{
+		auto sink = serial::makeHdf5OutputSink(out_dir.string());
+		sink->initializeRun(core::OutputConfig{}, "sim");
+		return sink;
+	}
+
 	struct ProgressCall
 	{
 		std::string message;
@@ -236,7 +244,7 @@ TEST_CASE("Hdf5OutputSink writes streaming blocks through the receiver output co
 	const auto output_path = resultPath(out_dir, receiver_name);
 	removeIfExists(output_path);
 
-	processing::Hdf5OutputSink sink(out_dir.string());
+	serial::Hdf5OutputSink sink(out_dir.string());
 	sink.initializeRun(core::OutputConfig{}, "sim");
 
 	const core::ReceiverStreamDescriptor stream{.receiver_id = 42,
@@ -287,7 +295,9 @@ TEST_CASE("finalizeStreamingReceiver exits cleanly when no streaming samples wer
 		std::make_shared<core::ProgressReporter>([&progress_calls](const std::string& msg, int current, int total)
 												 { progress_calls.push_back({msg, current, total}); });
 
-	processing::finalizeStreamingReceiver(&receiver, nullptr, reporter, out_dir.string());
+	auto hdf5_sink = makeTestHdf5Sink(out_dir);
+	processing::finalizeStreamingReceiver(&receiver, nullptr, reporter, out_dir.string(), nullptr, {}, hdf5_sink.get());
+	hdf5_sink->finalize();
 
 	REQUIRE_FALSE(std::filesystem::exists(output_path));
 	REQUIRE(progress_calls.empty());
@@ -405,7 +415,9 @@ TEST_CASE("finalizeStreamingReceiver adds logged pulsed interference without rot
 		std::make_shared<core::ProgressReporter>([&progress_calls](const std::string& msg, int current, int total)
 												 { progress_calls.push_back({msg, current, total}); });
 
-	processing::finalizeStreamingReceiver(&receiver, nullptr, reporter, out_dir.string());
+	auto hdf5_sink = makeTestHdf5Sink(out_dir);
+	processing::finalizeStreamingReceiver(&receiver, nullptr, reporter, out_dir.string(), nullptr, {}, hdf5_sink.get());
+	hdf5_sink->finalize();
 
 	{
 		HighFive::File file(output_path.string(), HighFive::File::ReadOnly);
@@ -474,7 +486,9 @@ TEST_CASE("finalizeStreamingReceiver accepts oversampled pulsed interference for
 						  {ComplexType{1.0, 0.0}, ComplexType{1.0, 0.0}, ComplexType{1.0, 0.0}, ComplexType{1.0, 0.0}},
 						  params::rate(), 0.25));
 
-	processing::finalizeStreamingReceiver(&receiver, nullptr, nullptr, out_dir.string());
+	auto hdf5_sink = makeTestHdf5Sink(out_dir);
+	processing::finalizeStreamingReceiver(&receiver, nullptr, nullptr, out_dir.string(), nullptr, {}, hdf5_sink.get());
+	hdf5_sink->finalize();
 
 	{
 		HighFive::File file(output_path.string(), HighFive::File::ReadOnly);
@@ -523,7 +537,9 @@ TEST_CASE("finalizeStreamingReceiver labels FMCW receiver progress distinctly", 
 		std::make_shared<core::ProgressReporter>([&progress_calls](const std::string& msg, int current, int total)
 												 { progress_calls.push_back({msg, current, total}); });
 
-	processing::finalizeStreamingReceiver(&receiver, nullptr, reporter, out_dir.string());
+	auto hdf5_sink = makeTestHdf5Sink(out_dir);
+	processing::finalizeStreamingReceiver(&receiver, nullptr, reporter, out_dir.string(), nullptr, {}, hdf5_sink.get());
+	hdf5_sink->finalize();
 
 	REQUIRE(std::filesystem::exists(output_path));
 	REQUIRE(progress_calls.size() == 5u);
@@ -563,7 +579,10 @@ TEST_CASE("finalizeStreamingReceiver records FMCW source metadata for detached r
 	FmcwTxFixture source_fixture("DetachedTx", 901, 902, 200.0, 0.001, 0.002, 5.0, std::size_t{4});
 	const auto source = core::makeActiveSource(&source_fixture.transmitter, 0.0, params::endTime());
 
-	processing::finalizeStreamingReceiver(&receiver, nullptr, nullptr, out_dir.string(), nullptr, {source});
+	auto hdf5_sink = makeTestHdf5Sink(out_dir);
+	processing::finalizeStreamingReceiver(&receiver, nullptr, nullptr, out_dir.string(), nullptr, {source},
+										  hdf5_sink.get());
+	hdf5_sink->finalize();
 
 	{
 		HighFive::File file(output_path.string(), HighFive::File::ReadOnly);
@@ -642,7 +661,10 @@ TEST_CASE("finalizeStreamingReceiver writes IF-rate FMCW metadata", "[processing
 	const std::vector<ComplexType> high_rate_iq(4096, ComplexType{1.0, 0.0});
 	receiver.consumeFmcwIfBlock(high_rate_iq, params::startTime());
 
-	processing::finalizeStreamingReceiver(&receiver, nullptr, nullptr, out_dir.string(), nullptr, {source});
+	auto hdf5_sink = makeTestHdf5Sink(out_dir);
+	processing::finalizeStreamingReceiver(&receiver, nullptr, nullptr, out_dir.string(), nullptr, {source},
+										  hdf5_sink.get());
+	hdf5_sink->finalize();
 
 	{
 		HighFive::File file(output_path.string(), HighFive::File::ReadOnly);
@@ -713,9 +735,12 @@ TEST_CASE("finalizeStreamingReceiver keeps multiple FMCW sources unambiguous",
 	FmcwTxFixture first_source("FirstTx", 911, 912, 200.0, 0.001, 0.002, 0.0, std::size_t{4});
 	FmcwTxFixture second_source("SecondTx", 921, 922, 300.0, 0.0015, 0.003, 10.0, std::size_t{2});
 
+	auto hdf5_sink = makeTestHdf5Sink(out_dir);
 	processing::finalizeStreamingReceiver(&receiver, nullptr, nullptr, out_dir.string(), nullptr,
 										  {core::makeActiveSource(&first_source.transmitter, 0.0, params::endTime()),
-										   core::makeActiveSource(&second_source.transmitter, 0.0, params::endTime())});
+										   core::makeActiveSource(&second_source.transmitter, 0.0, params::endTime())},
+										  hdf5_sink.get());
+	hdf5_sink->finalize();
 
 	{
 		HighFive::File file(output_path.string(), HighFive::File::ReadOnly);
@@ -781,14 +806,16 @@ TEST_CASE("runPulsedFinalizer writes jittered chunks and emits completion progre
 		std::make_shared<core::ProgressReporter>([&progress_calls](const std::string& msg, int current, int total)
 												 { progress_calls.push_back({msg, current, total}); });
 
+	auto hdf5_sink = makeTestHdf5Sink(out_dir);
 	std::jthread worker(processing::runPulsedFinalizer, &receiver, &targets, reporter, out_dir.string(), nullptr,
-						nullptr);
+						hdf5_sink.get());
 	receiver.enqueueFinalizerJob(std::move(first_job));
 	receiver.enqueueFinalizerJob(std::move(second_job));
 	core::RenderingJob shutdown_job{};
 	shutdown_job.duration = -1.0;
 	receiver.enqueueFinalizerJob(std::move(shutdown_job));
 	worker.join();
+	hdf5_sink->finalize();
 
 	{
 		HighFive::File file(output_path.string(), HighFive::File::ReadOnly);
