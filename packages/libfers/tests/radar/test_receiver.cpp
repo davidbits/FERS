@@ -3,7 +3,9 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 #include <cmath>
+#include <cstdint>
 #include <memory>
+#include <span>
 #include <vector>
 
 #include "antenna/antenna_factory.h"
@@ -207,6 +209,51 @@ TEST_CASE("Receiver IF resampling preserves absolute output positions across sch
 	REQUIRE_THAT(samples[5].real(), WithinAbs(0.0, 1e-12));
 	REQUIRE_THAT(samples[6].real(), WithinAbs(3.0, 1e-12));
 	REQUIRE_THAT(samples[7].real(), WithinAbs(0.0, 1e-12));
+}
+
+TEST_CASE("Receiver IF live output reports absolute sample positions without growing the HDF5 buffer",
+		  "[radar][receiver][fmcw][vita49]")
+{
+	ParamGuard guard;
+	params::setTime(0.0, 1.0);
+	params::setRate(10.0);
+	params::setOversampleRatio(1);
+
+	radar::Platform platform("RxPlatform");
+	radar::Receiver rx(&platform, "IfLiveRx", 15, radar::OperationMode::FMCW_MODE);
+	rx.setDechirpMode(radar::Receiver::DechirpMode::Physical);
+
+	std::vector<std::uint64_t> sample_starts;
+	std::vector<std::vector<ComplexType>> emitted_blocks;
+	rx.setFmcwIfOutputCallback(
+		[&](const std::span<const ComplexType> samples, const std::uint64_t sample_start)
+		{
+			sample_starts.push_back(sample_start);
+			emitted_blocks.emplace_back(samples.begin(), samples.end());
+		});
+
+	const fers_signal::FmcwIfResamplerRequest request{.input_sample_rate_hz = 10.0,
+													  .output_sample_rate_hz = 10.0,
+													  .filter_bandwidth_hz = 2.0,
+													  .filter_transition_width_hz = 1.0};
+	rx.initializeFmcwIfResampling(fers_signal::planFmcwIfResampler(request));
+
+	const std::array first_segment{ComplexType{1.0, 0.0}, ComplexType{2.0, 0.0}};
+	const std::array second_segment{ComplexType{3.0, 0.0}};
+	rx.beginFmcwIfResamplingSegment(0.2);
+	rx.consumeFmcwIfBlock(first_segment, 0.2);
+	rx.endFmcwIfResamplingSegment();
+	rx.beginFmcwIfResamplingSegment(0.6);
+	rx.consumeFmcwIfBlock(second_segment, 0.6);
+	rx.endFmcwIfResamplingSegment();
+	rx.flushFmcwIfResampling();
+
+	REQUIRE(rx.getStreamingData().empty());
+	REQUIRE(sample_starts == std::vector<std::uint64_t>{2u, 6u});
+	REQUIRE(emitted_blocks.size() == 2u);
+	REQUIRE_THAT(emitted_blocks[0][0].real(), WithinAbs(1.0, 1e-12));
+	REQUIRE_THAT(emitted_blocks[0][1].real(), WithinAbs(2.0, 1e-12));
+	REQUIRE_THAT(emitted_blocks[1][0].real(), WithinAbs(3.0, 1e-12));
 }
 
 TEST_CASE("Receiver IF resampling aligns off-grid segments to the global IF grid", "[radar][receiver][fmcw]")

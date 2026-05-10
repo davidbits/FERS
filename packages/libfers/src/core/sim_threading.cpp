@@ -34,6 +34,8 @@
 #include "memory_projection.h"
 #include "parameters.h"
 #include "processing/finalizer.h"
+#include "processing/finalizer_pipeline.h"
+#include "processing/signal_processor.h"
 #include "radar/receiver.h"
 #include "radar/target.h"
 #include "radar/transmitter.h"
@@ -57,6 +59,7 @@ namespace core
 	namespace
 	{
 		constexpr std::size_t fmcw_if_block_size = 1024;
+		constexpr std::size_t streaming_output_block_size = 4096;
 
 		[[nodiscard]] Vita49StreamMetadata streamStatsToMetadata(const ReceiverStreamStats& stats)
 		{
@@ -578,6 +581,12 @@ namespace core
 		_if_pulse_tracker_caches.resize(_world->getReceivers().size());
 		_fmcw_if_block_buffers.resize(_world->getReceivers().size());
 		_fmcw_if_block_start_times.resize(_world->getReceivers().size(), params::startTime());
+		_streaming_output_block_buffers.resize(_world->getReceivers().size());
+		_streaming_output_block_start_times.resize(_world->getReceivers().size(), params::startTime());
+		_streaming_output_block_start_indices.resize(_world->getReceivers().size(), 0);
+		_streaming_output_sample_cursors.resize(_world->getReceivers().size(), 0);
+		_streaming_output_stream_ids.resize(_world->getReceivers().size(), 0);
+		_streaming_output_stream_open.resize(_world->getReceivers().size(), false);
 		_internal_stop_time = params::endTime();
 	}
 
@@ -589,6 +598,16 @@ namespace core
 		}
 
 		initializeFmcwIfResamplers();
+		if (_output_sink != nullptr)
+		{
+			for (const auto& receiver_ptr : _world->getReceivers())
+			{
+				if (isStreamingReceiver(receiver_ptr.get()))
+				{
+					receiver_ptr->releaseStreamingData();
+				}
+			}
+		}
 
 		logSimulationMemoryProjection(*_world);
 
@@ -608,6 +627,7 @@ namespace core
 
 			processStreamingPhysics(event.timestamp);
 			flushFmcwIfBlocks();
+			flushStreamingOutputBlocks();
 
 			state.t_current = event.timestamp;
 
@@ -627,6 +647,7 @@ namespace core
 			processStreamingPhysics(end_time);
 		}
 		flushFmcwIfBlocks();
+		flushStreamingOutputBlocks();
 
 		shutdown();
 	}
@@ -741,8 +762,9 @@ namespace core
 	void SimulationEngine::initializeFmcwIfResamplers()
 	{
 		_internal_stop_time = params::endTime();
-		for (const auto& receiver_ptr : _world->getReceivers())
+		for (std::size_t receiver_index = 0; receiver_index < _world->getReceivers().size(); ++receiver_index)
 		{
+			const auto& receiver_ptr = _world->getReceivers()[receiver_index];
 			if (!receiver_ptr->isDechirpEnabled() || !receiver_ptr->hasFmcwIfSampleRate())
 			{
 				continue;
@@ -762,6 +784,23 @@ namespace core
 			const RealType over_render =
 				plan.group_delay_seconds + 1.0 / plan.actual_output_sample_rate_hz + block_time;
 			_internal_stop_time = std::max(_internal_stop_time, params::endTime() + over_render);
+			if (_output_sink != nullptr)
+			{
+				receiver_ptr->setFmcwIfOutputCallback(
+					[this, receiver_index](const std::span<const ComplexType> samples, const std::uint64_t sample_start)
+					{
+						const auto& receiver = _world->getReceivers()[receiver_index];
+						const auto& if_plan = receiver->getFmcwIfResamplerPlan();
+						if (!if_plan.has_value())
+						{
+							return;
+						}
+						const RealType first_sample_time = params::startTime() +
+							static_cast<RealType>(sample_start) / if_plan->actual_output_sample_rate_hz;
+						emitStreamingOutputBlock(receiver_index, first_sample_time,
+												 if_plan->actual_output_sample_rate_hz, samples, sample_start);
+					});
+			}
 			receiver_ptr->initializeFmcwIfResampling(std::move(plan));
 			LOG(Level::INFO,
 				"Receiver '{}' enabled FMCW IF resampling: input_rate={} Hz requested_output_rate={} Hz "
@@ -901,6 +940,10 @@ namespace core
 						{
 							appendFmcwIfSample(receiver_index, t_step, sample);
 						}
+						else if (_output_sink != nullptr)
+						{
+							appendStreamingOutputSample(receiver_index, sample_index, t_step, sample);
+						}
 						else
 						{
 							receiver_ptr->setStreamingSample(sample_index, sample);
@@ -931,6 +974,103 @@ namespace core
 		{
 			flushFmcwIfBlock(receiver_index);
 		}
+	}
+
+	void SimulationEngine::appendStreamingOutputSample(const std::size_t receiver_index, const std::size_t sample_index,
+													   const RealType t_step, const ComplexType sample)
+	{
+		auto& block = _streaming_output_block_buffers[receiver_index];
+		if (block.empty())
+		{
+			_streaming_output_block_start_times[receiver_index] = t_step;
+			_streaming_output_block_start_indices[receiver_index] = static_cast<std::uint64_t>(sample_index);
+		}
+		block.push_back(sample);
+		if (block.size() >= streaming_output_block_size)
+		{
+			flushStreamingOutputBlock(receiver_index);
+		}
+	}
+
+	void SimulationEngine::flushStreamingOutputBlocks()
+	{
+		for (std::size_t receiver_index = 0; receiver_index < _streaming_output_block_buffers.size(); ++receiver_index)
+		{
+			flushStreamingOutputBlock(receiver_index);
+		}
+	}
+
+	void SimulationEngine::flushStreamingOutputBlock(const std::size_t receiver_index)
+	{
+		if (_output_sink == nullptr || receiver_index >= _world->getReceivers().size())
+		{
+			return;
+		}
+
+		auto& block = _streaming_output_block_buffers[receiver_index];
+		if (block.empty())
+		{
+			return;
+		}
+
+		auto& receiver = _world->getReceivers()[receiver_index];
+		const bool dechirped = receiver->isDechirpEnabled();
+		const RealType input_sample_rate = params::rate() * static_cast<RealType>(params::oversampleRatio());
+		const RealType block_start_time = _streaming_output_block_start_times[receiver_index];
+		const auto input_start_index = _streaming_output_block_start_indices[receiver_index];
+
+		applyPulsedInterferenceToStreamingBlock(receiver_index, block, block_start_time, input_sample_rate, dechirped);
+
+		RealType output_sample_rate = input_sample_rate;
+		RealType output_start_time = block_start_time;
+		std::uint64_t output_sample_start = input_start_index;
+		if (!dechirped)
+		{
+			processing::pipeline::applyDownsampling(block);
+			output_sample_rate = params::rate();
+			output_sample_start =
+				static_cast<std::uint64_t>(input_start_index / std::max<unsigned>(1, params::oversampleRatio()));
+			output_start_time = params::startTime() + static_cast<RealType>(output_sample_start) / output_sample_rate;
+		}
+
+		if (!block.empty())
+		{
+			emitStreamingOutputBlock(receiver_index, output_start_time, output_sample_rate, block, output_sample_start);
+		}
+		block.clear();
+	}
+
+	void SimulationEngine::emitStreamingOutputBlock(const std::size_t receiver_index, const RealType first_sample_time,
+													const RealType sample_rate,
+													const std::span<const ComplexType> samples,
+													const std::uint64_t sample_start)
+	{
+		if (_output_sink == nullptr || samples.empty() || receiver_index >= _world->getReceivers().size())
+		{
+			return;
+		}
+
+		auto& receiver = _world->getReceivers()[receiver_index];
+		std::vector<ComplexType> processed(samples.begin(), samples.end());
+		processing::applyThermalNoiseAtSampleRate(processed, receiver->getNoiseTemperature(), receiver->getRngEngine(),
+												  sample_rate);
+
+		if (_streaming_output_stream_ids[receiver_index] == 0)
+		{
+			_streaming_output_stream_ids[receiver_index] =
+				_output_sink->registerStream(processing::buildReceiverStreamDescriptor(receiver.get(), sample_rate));
+		}
+		const auto stream_id = _streaming_output_stream_ids[receiver_index];
+		if (!_streaming_output_stream_open[receiver_index])
+		{
+			_output_sink->openStream(stream_id, first_sample_time);
+			_streaming_output_stream_open[receiver_index] = true;
+		}
+
+		const auto block = processing::buildReceiverSampleBlock(receiver.get(), first_sample_time, sample_rate,
+																processed, sample_start);
+		_output_sink->submitBlock(block);
+		_streaming_output_sample_cursors[receiver_index] = sample_start + static_cast<std::uint64_t>(processed.size());
 	}
 
 	void SimulationEngine::flushFmcwIfBlocks()
@@ -968,13 +1108,26 @@ namespace core
 																std::span<ComplexType> block,
 																const RealType block_start_time)
 	{
+		applyPulsedInterferenceToStreamingBlock(receiver_index, block, block_start_time,
+												params::rate() * static_cast<RealType>(params::oversampleRatio()),
+												true);
+	}
+
+	void SimulationEngine::applyPulsedInterferenceToStreamingBlock(const std::size_t receiver_index,
+																   std::span<ComplexType> block,
+																   const RealType block_start_time,
+																   const RealType sample_rate, const bool dechirp_mix)
+	{
 		if (block.empty() || receiver_index >= _world->getReceivers().size())
 		{
 			return;
 		}
 
 		auto& receiver = _world->getReceivers()[receiver_index];
-		const RealType sample_rate = params::rate() * static_cast<RealType>(params::oversampleRatio());
+		if (!std::isfinite(sample_rate) || sample_rate <= 0.0)
+		{
+			return;
+		}
 		const RealType block_end_time = block_start_time + static_cast<RealType>(block.size()) / sample_rate;
 		auto& tracker_cache = _if_pulse_tracker_caches[receiver_index];
 
@@ -1021,13 +1174,20 @@ namespace core
 				{
 					continue;
 				}
-				const auto mixer = calculateDechirpMixer(receiver.get(), t_sample, tracker_cache);
-				if (!mixer.has_value())
+				if (dechirp_mix)
 				{
-					continue;
+					const auto mixer = calculateDechirpMixer(receiver.get(), t_sample, tracker_cache);
+					if (!mixer.has_value())
+					{
+						continue;
+					}
+					block[static_cast<std::size_t>(dest)] +=
+						*mixer * std::conj(rendered_pulse[static_cast<std::size_t>(source_index)]);
 				}
-				block[static_cast<std::size_t>(dest)] +=
-					*mixer * std::conj(rendered_pulse[static_cast<std::size_t>(source_index)]);
+				else
+				{
+					block[static_cast<std::size_t>(dest)] += rendered_pulse[static_cast<std::size_t>(source_index)];
+				}
 			}
 		}
 	}
@@ -1387,7 +1547,9 @@ namespace core
 													  { return receiver_ptr.get() == rx; });
 		if (receiver_it != _world->getReceivers().end())
 		{
-			flushFmcwIfBlock(static_cast<std::size_t>(receiver_it - _world->getReceivers().begin()));
+			const auto receiver_index = static_cast<std::size_t>(receiver_it - _world->getReceivers().begin());
+			flushFmcwIfBlock(receiver_index);
+			flushStreamingOutputBlock(receiver_index);
 		}
 		if (rx->hasFmcwIfResamplingSink() && _world->getSimulationState().t_current >= params::endTime() &&
 			_world->getSimulationState().t_current < _internal_stop_time && activePastUserEnd(rx))
@@ -1397,6 +1559,15 @@ namespace core
 		if (rx->hasFmcwIfResamplingSink())
 		{
 			rx->endFmcwIfResamplingSegment();
+		}
+		if (_output_sink != nullptr && receiver_it != _world->getReceivers().end())
+		{
+			const auto receiver_index = static_cast<std::size_t>(receiver_it - _world->getReceivers().begin());
+			if (_streaming_output_stream_open[receiver_index])
+			{
+				_output_sink->closeStream(_streaming_output_stream_ids[receiver_index]);
+				_streaming_output_stream_open[receiver_index] = false;
+			}
 		}
 		rx->setActive(false);
 	}
@@ -1471,13 +1642,29 @@ namespace core
 		}
 
 		const auto streaming_sources = collectStreamingSourcesForWindow(params::startTime(), params::endTime());
-		for (const auto& receiver_ptr : _world->getReceivers())
+		for (std::size_t receiver_index = 0; receiver_index < _world->getReceivers().size(); ++receiver_index)
 		{
+			const auto& receiver_ptr = _world->getReceivers()[receiver_index];
 			if (receiver_ptr->getMode() == OperationMode::CW_MODE ||
 				receiver_ptr->getMode() == OperationMode::FMCW_MODE)
 			{
-				_pool.enqueue(processing::finalizeStreamingReceiver, receiver_ptr.get(), &_pool, _reporter, _output_dir,
-							  _metadata_collector, streaming_sources, _output_sink);
+				if (_output_sink != nullptr)
+				{
+					flushFmcwIfBlock(receiver_index);
+					receiver_ptr->flushFmcwIfResampling();
+					flushStreamingOutputBlock(receiver_index);
+					if (_streaming_output_stream_open[receiver_index])
+					{
+						_output_sink->closeStream(_streaming_output_stream_ids[receiver_index]);
+						_streaming_output_stream_open[receiver_index] = false;
+					}
+					receiver_ptr->releaseStreamingData();
+				}
+				else
+				{
+					_pool.enqueue(processing::finalizeStreamingReceiver, receiver_ptr.get(), &_pool, _reporter,
+								  _output_dir, _metadata_collector, streaming_sources, _output_sink);
+				}
 			}
 			else if (receiver_ptr->getMode() == OperationMode::PULSED_MODE)
 			{

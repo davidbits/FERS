@@ -660,8 +660,11 @@ namespace processing
 
 			std::vector<ComplexType> window_buffer(window_samples);
 
-			applyThermalNoise(window_buffer, receiver->getNoiseTemperature(receiver->getRotation(actual_start)),
-							  receiver->getRngEngine());
+			if (!route_to_sink)
+			{
+				applyThermalNoise(window_buffer, receiver->getNoiseTemperature(receiver->getRotation(actual_start)),
+								  receiver->getRngEngine());
+			}
 
 			pipeline::applyStreamingInterference(window_buffer, actual_start, dt, receiver,
 												 job.active_streaming_sources, targets, streaming_tracker_cache);
@@ -676,6 +679,9 @@ namespace processing
 			if (route_to_sink)
 			{
 				pipeline::applyDownsampling(window_buffer);
+				applyThermalNoiseAtSampleRate(window_buffer,
+											  receiver->getNoiseTemperature(receiver->getRotation(actual_start)),
+											  receiver->getRngEngine(), params::rate());
 				if (!sink_stream_open)
 				{
 					output_sink->openStream(sink_stream_id, actual_start);

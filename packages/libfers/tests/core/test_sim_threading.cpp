@@ -2,6 +2,7 @@
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 #include <catch2/matchers/catch_matchers_string.hpp>
 #include <complex>
+#include <cstdint>
 #include <iostream>
 #include <memory>
 #include <optional>
@@ -13,6 +14,7 @@
 #include "core/config.h"
 #include "core/logging.h"
 #include "core/parameters.h"
+#include "core/receiver_output.h"
 #include "core/sim_events.h"
 #include "core/sim_threading.h"
 #include "core/thread_pool.h"
@@ -60,6 +62,43 @@ namespace
 	{
 		explicit LogLevelGuard(const logging::Level level) { logging::logger.setLevel(level); }
 		~LogLevelGuard() { logging::logger.setLevel(logging::Level::INFO); }
+	};
+
+	class RecordingOutputSink final : public core::ReceiverOutputSink
+	{
+	public:
+		void initializeRun(const core::OutputConfig&, std::string) override {}
+		std::uint32_t registerStream(const core::ReceiverStreamDescriptor& stream) override
+		{
+			descriptor = stream;
+			return stream_id;
+		}
+		void openStream(std::uint32_t id, RealType first_sample_time) override
+		{
+			opened_streams.push_back(id);
+			open_times.push_back(first_sample_time);
+		}
+		void submitBlock(const core::ReceiverSampleBlock& block) override
+		{
+			first_sample_times.push_back(block.first_sample_time);
+			sample_starts.push_back(block.sample_start);
+			sample_rates.push_back(block.sample_rate);
+			blocks.emplace_back(block.samples.begin(), block.samples.end());
+		}
+		void emitContextHeartbeat(RealType simulation_time) override { heartbeat_times.push_back(simulation_time); }
+		void closeStream(std::uint32_t id) override { closed_streams.push_back(id); }
+		core::OutputStats finalize() override { return {}; }
+
+		std::uint32_t stream_id = 0x12345678u;
+		core::ReceiverStreamDescriptor descriptor;
+		std::vector<std::uint32_t> opened_streams;
+		std::vector<std::uint32_t> closed_streams;
+		std::vector<RealType> open_times;
+		std::vector<RealType> first_sample_times;
+		std::vector<std::uint64_t> sample_starts;
+		std::vector<RealType> sample_rates;
+		std::vector<RealType> heartbeat_times;
+		std::vector<std::vector<ComplexType>> blocks;
 	};
 
 	/// Initializes a platform with constant position and zero rotation.
@@ -620,6 +659,39 @@ TEST_CASE("SimulationEngine processStreamingPhysics steps through time and updat
 		// Sample 3 should be untouched (0.0)
 		REQUIRE(std::abs(buffer[3]) == 0.0);
 	}
+}
+
+TEST_CASE("SimulationEngine live streaming output emits bounded CW blocks without receiver buffer accumulation",
+		  "[core][threading][vita49][bounded]")
+{
+	ParamGuard guard;
+	params::setRate(1000.0);
+	params::setOversampleRatio(1);
+	params::setTime(0.0, 10.0);
+
+	auto world = createPhysicsWorld();
+	pool::ThreadPool pool(1);
+	RecordingOutputSink sink;
+	core::SimulationEngine engine(world.get(), pool, nullptr, ".", nullptr, &sink);
+
+	auto* tx = world->getTransmitters().front().get();
+	auto* rx = world->getReceivers().front().get();
+
+	rx->prepareStreamingData(100000);
+	rx->releaseStreamingData();
+	rx->setActive(true);
+	world->getSimulationState().t_current = 0.0;
+	engine.handleTxStreamingStart(core::makeActiveSource(tx, params::startTime(), params::endTime()));
+
+	engine.processStreamingPhysics(8.192);
+
+	REQUIRE(rx->getStreamingData().empty());
+	REQUIRE(sink.blocks.size() == 2u);
+	REQUIRE(sink.sample_starts == std::vector<std::uint64_t>{0u, 4096u});
+	REQUIRE(sink.sample_rates == std::vector<RealType>{1000.0, 1000.0});
+	REQUIRE(sink.blocks.front().size() == 4096u);
+	REQUIRE(sink.blocks.back().size() == 4096u);
+	REQUIRE(sink.opened_streams.size() == 1u);
 }
 
 TEST_CASE("SimulationEngine keeps streaming source through propagation tail after transmit end", "[core][threading]")

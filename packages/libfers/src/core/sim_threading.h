@@ -16,6 +16,7 @@
 #pragma once
 
 #include <chrono>
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -206,6 +207,20 @@ namespace core
 		/// Adds one high-rate sample to a receiver's IF-resampling block buffer.
 		void appendFmcwIfSample(std::size_t receiver_index, RealType t_step, ComplexType sample);
 
+		/// Adds one raw streaming sample to the live output block buffer.
+		void appendStreamingOutputSample(std::size_t receiver_index, std::size_t sample_index, RealType t_step,
+										 ComplexType sample);
+
+		/// Flushes all pending live streaming output blocks.
+		void flushStreamingOutputBlocks();
+
+		/// Flushes one receiver's pending live streaming output block.
+		void flushStreamingOutputBlock(std::size_t receiver_index);
+
+		/// Emits an already processed streaming block to the selected output sink.
+		void emitStreamingOutputBlock(std::size_t receiver_index, RealType first_sample_time, RealType sample_rate,
+									  std::span<const ComplexType> samples, std::uint64_t sample_start);
+
 		/// Returns the latest conservative receive time at which an ended source must still be retained.
 		[[nodiscard]] std::optional<RealType> streamingSourceCleanupDeadline(const ActiveStreamingSource& source,
 																			 RealType from_time) const;
@@ -225,6 +240,10 @@ namespace core
 		/// Adds pulsed interference into a completed high-rate IF block before resampling.
 		void applyPulsedInterferenceToFmcwIfBlock(std::size_t receiver_index, std::span<ComplexType> block,
 												  RealType block_start_time);
+
+		/// Adds pulsed interference into a live streaming block before final noise/scaling.
+		void applyPulsedInterferenceToStreamingBlock(std::size_t receiver_index, std::span<ComplexType> block,
+													 RealType block_start_time, RealType sample_rate, bool dechirp_mix);
 
 		/// Emits summary logs for streaming receiver buffers.
 		void logStreamingSummaries() const;
@@ -276,6 +295,12 @@ namespace core
 		std::vector<ReceiverTrackerCache> _if_pulse_tracker_caches; ///< Per-receiver dechirp trackers for pulse blocks.
 		std::vector<std::vector<ComplexType>> _fmcw_if_block_buffers; ///< Pending high-rate IF blocks.
 		std::vector<RealType> _fmcw_if_block_start_times; ///< Start time for each pending IF block.
+		std::vector<std::vector<ComplexType>> _streaming_output_block_buffers; ///< Pending live CW/FMCW output blocks.
+		std::vector<RealType> _streaming_output_block_start_times; ///< Start time for pending live output blocks.
+		std::vector<std::uint64_t> _streaming_output_block_start_indices; ///< High-rate sample index for each block.
+		std::vector<std::uint64_t> _streaming_output_sample_cursors; ///< Output sample cursor per receiver.
+		std::vector<std::uint32_t> _streaming_output_stream_ids; ///< Registered VRT stream IDs for live receivers.
+		std::vector<bool> _streaming_output_stream_open; ///< Live receiver stream lifecycle state.
 		RealType _internal_stop_time = 0.0; ///< Physics stop time including IF over-render margin.
 	};
 

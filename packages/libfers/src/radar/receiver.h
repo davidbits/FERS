@@ -14,6 +14,7 @@
 
 #include <condition_variable>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -45,6 +46,8 @@ namespace radar
 	class Receiver final : public Radar
 	{
 	public:
+		using FmcwIfOutputCallback = std::function<void(std::span<const ComplexType>, std::uint64_t)>;
+
 		/**
 		 * @enum RecvFlag
 		 * @brief Enumeration for receiver configuration flags.
@@ -286,6 +289,9 @@ namespace radar
 		/// Feeds one completed high-rate dechirped block into the online IF sink.
 		void consumeFmcwIfBlock(std::span<const ComplexType> block, RealType block_start_time);
 
+		/// Routes emitted IF samples to a live consumer instead of the HDF5 accumulation buffer.
+		void setFmcwIfOutputCallback(FmcwIfOutputCallback callback);
+
 		/// Marks the current scheduled IF segment inactive.
 		void endFmcwIfResamplingSegment();
 
@@ -356,6 +362,9 @@ namespace radar
 		 * @param numSamples The total number of samples to allocate memory for.
 		 */
 		void prepareStreamingData(size_t numSamples);
+
+		/// Releases the complete-run streaming I/Q buffer when live output does not need it.
+		void releaseStreamingData();
 
 		/**
 		 * @brief Sets a single IQ sample at a specific index for streaming simulation.
@@ -446,6 +455,7 @@ namespace radar
 		FmcwIfChainRequest _fmcw_if_chain{}; ///< Optional receiver-local IF-chain request.
 		std::optional<fers_signal::FmcwIfResamplerPlan> _fmcw_if_plan; ///< Active IF resampling plan.
 		std::unique_ptr<fers_signal::FmcwIfResamplingSink> _fmcw_if_sink; ///< Online IF resampling state.
+		FmcwIfOutputCallback _fmcw_if_output_callback; ///< Optional live IF-output consumer.
 		std::uint64_t _fmcw_if_samples_to_discard = 0; ///< Remaining startup IF samples to suppress.
 		std::size_t _fmcw_if_input_cursor = 0; ///< Absolute high-rate input samples consumed by the IF sink.
 		std::size_t _fmcw_if_output_cursor = 0; ///< Absolute output-sample cursor for IF insertion.

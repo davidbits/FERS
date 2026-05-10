@@ -219,12 +219,15 @@ namespace radar
 
 	void Receiver::initializeFmcwIfResampling(fers_signal::FmcwIfResamplerPlan plan)
 	{
-		_streaming_iq_data.clear();
+		releaseStreamingData();
 		_fmcw_if_plan = std::move(plan);
-		const auto expected_samples =
-			static_cast<std::size_t>(std::ceil(std::max<RealType>(0.0, params::endTime() - params::startTime()) *
-											   _fmcw_if_plan->actual_output_sample_rate_hz));
-		_streaming_iq_data.reserve(expected_samples);
+		if (!_fmcw_if_output_callback)
+		{
+			const auto expected_samples =
+				static_cast<std::size_t>(std::ceil(std::max<RealType>(0.0, params::endTime() - params::startTime()) *
+												   _fmcw_if_plan->actual_output_sample_rate_hz));
+			_streaming_iq_data.reserve(expected_samples);
+		}
 		_fmcw_if_samples_to_discard = _fmcw_if_plan->warmup_discard_samples;
 		_fmcw_if_sink = std::make_unique<fers_signal::FmcwIfResamplingSink>(*_fmcw_if_plan);
 		_fmcw_if_input_cursor = 0;
@@ -264,6 +267,15 @@ namespace radar
 		appendFmcwIfOutput(std::move(emitted));
 	}
 
+	void Receiver::setFmcwIfOutputCallback(FmcwIfOutputCallback callback)
+	{
+		_fmcw_if_output_callback = std::move(callback);
+		if (_fmcw_if_output_callback)
+		{
+			releaseStreamingData();
+		}
+	}
+
 	void Receiver::appendFmcwIfOutput(std::vector<ComplexType> emitted)
 	{
 		if (_fmcw_if_samples_to_discard > 0)
@@ -276,17 +288,25 @@ namespace radar
 		{
 			return;
 		}
-		if (_streaming_iq_data.size() < _fmcw_if_output_cursor)
+		const auto output_start = static_cast<std::uint64_t>(_fmcw_if_output_cursor);
+		if (_fmcw_if_output_callback)
 		{
-			_streaming_iq_data.resize(_fmcw_if_output_cursor);
+			_fmcw_if_output_callback(std::span<const ComplexType>(emitted.data(), emitted.size()), output_start);
 		}
-		if (_streaming_iq_data.size() < _fmcw_if_output_cursor + emitted.size())
+		else
 		{
-			_streaming_iq_data.resize(_fmcw_if_output_cursor + emitted.size());
-		}
-		for (std::size_t i = 0; i < emitted.size(); ++i)
-		{
-			_streaming_iq_data[_fmcw_if_output_cursor + i] += emitted[i];
+			if (_streaming_iq_data.size() < _fmcw_if_output_cursor)
+			{
+				_streaming_iq_data.resize(_fmcw_if_output_cursor);
+			}
+			if (_streaming_iq_data.size() < _fmcw_if_output_cursor + emitted.size())
+			{
+				_streaming_iq_data.resize(_fmcw_if_output_cursor + emitted.size());
+			}
+			for (std::size_t i = 0; i < emitted.size(); ++i)
+			{
+				_streaming_iq_data[_fmcw_if_output_cursor + i] += emitted[i];
+			}
 		}
 		_fmcw_if_output_cursor += emitted.size();
 	}
@@ -303,7 +323,7 @@ namespace radar
 		{
 			return;
 		}
-		if (_streaming_iq_data.size() < _fmcw_if_output_cursor + sample_count)
+		if (!_fmcw_if_output_callback && _streaming_iq_data.size() < _fmcw_if_output_cursor + sample_count)
 		{
 			_streaming_iq_data.resize(_fmcw_if_output_cursor + sample_count);
 		}
@@ -337,13 +357,16 @@ namespace radar
 			const auto expected_samples =
 				static_cast<std::size_t>(std::ceil(std::max<RealType>(0.0, params::endTime() - params::startTime()) *
 												   _fmcw_if_plan->actual_output_sample_rate_hz));
-			if (_streaming_iq_data.size() > expected_samples)
+			if (!_fmcw_if_output_callback)
 			{
-				_streaming_iq_data.resize(expected_samples);
-			}
-			else if (_streaming_iq_data.size() < expected_samples)
-			{
-				_streaming_iq_data.resize(expected_samples);
+				if (_streaming_iq_data.size() > expected_samples)
+				{
+					_streaming_iq_data.resize(expected_samples);
+				}
+				else if (_streaming_iq_data.size() < expected_samples)
+				{
+					_streaming_iq_data.resize(expected_samples);
+				}
 			}
 		}
 		_fmcw_if_sink.reset();
@@ -401,7 +424,20 @@ namespace radar
 	void Receiver::prepareStreamingData(const size_t numSamples)
 	{
 		std::scoped_lock lock(_cw_mutex);
+		if (numSamples == 0)
+		{
+			_streaming_iq_data.clear();
+			_streaming_iq_data.shrink_to_fit();
+			return;
+		}
 		_streaming_iq_data.resize(numSamples);
+	}
+
+	void Receiver::releaseStreamingData()
+	{
+		std::scoped_lock lock(_cw_mutex);
+		_streaming_iq_data.clear();
+		_streaming_iq_data.shrink_to_fit();
 	}
 
 	void Receiver::setStreamingSample(const size_t index, const ComplexType sample)
