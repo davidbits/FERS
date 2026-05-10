@@ -694,6 +694,34 @@ TEST_CASE("SimulationEngine live streaming output emits bounded CW blocks withou
 	REQUIRE(sink.opened_streams.size() == 1u);
 }
 
+TEST_CASE("SimulationEngine emits output heartbeats on streaming simulation time", "[core][threading][vita49]")
+{
+	ParamGuard guard;
+	params::setRate(10.0);
+	params::setOversampleRatio(1);
+	params::setTime(0.0, 5.0);
+
+	auto world = createPhysicsWorld();
+	pool::ThreadPool pool(1);
+	RecordingOutputSink sink;
+	core::SimulationEngine engine(world.get(), pool, nullptr, ".", nullptr, &sink);
+
+	auto* tx = world->getTransmitters().front().get();
+	auto* rx = world->getReceivers().front().get();
+
+	rx->releaseStreamingData();
+	rx->setActive(true);
+	world->getSimulationState().t_current = 0.0;
+	engine.handleTxStreamingStart(core::makeActiveSource(tx, params::startTime(), params::endTime()));
+
+	engine.processStreamingPhysics(3.25);
+
+	REQUIRE(sink.heartbeat_times.size() == 3u);
+	REQUIRE_THAT(sink.heartbeat_times[0], WithinAbs(1.0, 1e-12));
+	REQUIRE_THAT(sink.heartbeat_times[1], WithinAbs(2.0, 1e-12));
+	REQUIRE_THAT(sink.heartbeat_times[2], WithinAbs(3.0, 1e-12));
+}
+
 TEST_CASE("SimulationEngine keeps streaming source through propagation tail after transmit end", "[core][threading]")
 {
 	ParamGuard guard;

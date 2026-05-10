@@ -24,7 +24,16 @@ namespace serial::vita49
 {
 	namespace
 	{
+		constexpr int kRequestedUdpSendBufferBytes = 4 * 1024 * 1024;
+
 		void freeAddress(void* address) noexcept { delete[] static_cast<std::byte*>(address); }
+
+		void tuneSendBuffer(const int socket_fd) noexcept
+		{
+			const int send_buffer_bytes = kRequestedUdpSendBufferBytes;
+			(void)::setsockopt(socket_fd, SOL_SOCKET, SO_SNDBUF, reinterpret_cast<const char*>(&send_buffer_bytes),
+							   sizeof(send_buffer_bytes));
+		}
 	}
 
 	UdpSender::~UdpSender() { close(); }
@@ -91,6 +100,7 @@ namespace serial::vita49
 				continue;
 			}
 
+			tuneSendBuffer(fd);
 			_socket = fd;
 			_address_size = candidate->ai_addrlen;
 			auto* storage = new std::byte[_address_size];

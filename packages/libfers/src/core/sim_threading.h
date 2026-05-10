@@ -116,7 +116,7 @@ namespace core
 		 */
 		SimulationEngine(World* world, pool::ThreadPool& pool, std::shared_ptr<ProgressReporter> reporter,
 						 std::string output_dir, std::shared_ptr<OutputMetadataCollector> metadata_collector = nullptr,
-						 ReceiverOutputSink* output_sink = nullptr);
+						 ReceiverOutputSink* output_sink = nullptr, bool live_output = true);
 
 		/**
 		 * @brief Starts and runs the main simulation loop until completion.
@@ -221,6 +221,9 @@ namespace core
 		void emitStreamingOutputBlock(std::size_t receiver_index, RealType first_sample_time, RealType sample_rate,
 									  std::span<const ComplexType> samples, std::uint64_t sample_start);
 
+		/// Emits sink heartbeats on the continuous simulation clock up to the given time.
+		void emitContextHeartbeatsThrough(RealType simulation_time);
+
 		/// Returns the latest conservative receive time at which an ended source must still be retained.
 		[[nodiscard]] std::optional<RealType> streamingSourceCleanupDeadline(const ActiveStreamingSource& source,
 																			 RealType from_time) const;
@@ -284,10 +287,12 @@ namespace core
 		std::shared_ptr<ProgressReporter> _reporter; ///< Shared progress reporter instance.
 		std::vector<std::jthread> _finalizer_threads; ///< Collection of dedicated pulsed finalizer threads.
 		std::shared_ptr<OutputMetadataCollector> _metadata_collector; ///< Collector for generated output metadata.
-		ReceiverOutputSink* _output_sink = nullptr; ///< Optional live receiver output sink.
+		ReceiverOutputSink* _output_sink = nullptr; ///< Selected receiver output sink.
+		bool _live_output = false; ///< True when samples are emitted during streaming physics.
 
 		std::chrono::steady_clock::time_point _last_report_time; ///< Timestamp of the last progress report.
 		int _last_reported_percent = -1; ///< The last reported percentage to prevent redundant updates.
+		RealType _next_context_heartbeat_time = 0.0; ///< Next one-second sink heartbeat on simulation clock.
 
 		std::string _output_dir; ///< Output directory for the simulation files.
 		std::unique_ptr<simulation::CwPhaseNoiseLookup> _cw_phase_noise_lookup; ///< Cached CW phase-noise lookup.
@@ -296,6 +301,7 @@ namespace core
 		std::vector<std::vector<ComplexType>> _fmcw_if_block_buffers; ///< Pending high-rate IF blocks.
 		std::vector<RealType> _fmcw_if_block_start_times; ///< Start time for each pending IF block.
 		std::vector<std::vector<ComplexType>> _streaming_output_block_buffers; ///< Pending live CW/FMCW output blocks.
+		std::vector<std::vector<ComplexType>> _streaming_output_processed_buffers; ///< Reused post-noise output blocks.
 		std::vector<RealType> _streaming_output_block_start_times; ///< Start time for pending live output blocks.
 		std::vector<std::uint64_t> _streaming_output_block_start_indices; ///< High-rate sample index for each block.
 		std::vector<std::uint64_t> _streaming_output_sample_cursors; ///< Output sample cursor per receiver.

@@ -7,6 +7,7 @@
 #pragma once
 
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <span>
 #include <string>
@@ -14,6 +15,7 @@
 
 #include "core/config.h"
 #include "core/output_config.h"
+#include "core/output_metadata.h"
 #include "core/sim_id.h"
 
 namespace core
@@ -42,6 +44,7 @@ namespace core
 		bool valid_data = true;
 		bool calibrated_time = true;
 		bool reference_lock = true;
+		std::shared_ptr<const OutputFileMetadata> file_metadata = nullptr;
 	};
 
 	struct ReceiverStreamStats

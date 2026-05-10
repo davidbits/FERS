@@ -7,10 +7,18 @@
 #include "serial/vita49/paced_sender.h"
 
 #include <algorithm>
+#include <chrono>
+#include <iterator>
 #include <stdexcept>
 
 namespace serial::vita49
 {
+	namespace
+	{
+		constexpr auto kCoarsePacingSleep = std::chrono::milliseconds(1);
+		constexpr auto kFinePacingSpin = std::chrono::microseconds(200);
+	}
+
 	PacedSender::PacedSender(std::unique_ptr<DatagramSender> sender, const std::size_t queue_depth) :
 		_sender(std::move(sender)), _queue_depth(queue_depth)
 	{
@@ -82,11 +90,19 @@ namespace serial::vita49
 			}
 
 			_queue.push_back(std::move(packet));
+			if (_queue.back().data_packet)
+			{
+				_queued_data_packets.push_back(std::prev(_queue.end()));
+			}
 			_cv.notify_one();
 			return EnqueueResult{.enqueued = true, .dropped = dropped};
 		}
 
 		_queue.push_back(std::move(packet));
+		if (_queue.back().data_packet)
+		{
+			_queued_data_packets.push_back(std::prev(_queue.end()));
+		}
 		_cv.notify_one();
 		return EnqueueResult{.enqueued = true, .dropped = std::nullopt};
 	}
@@ -97,6 +113,10 @@ namespace serial::vita49
 		while (!_queue.empty())
 		{
 			auto packet = std::move(_queue.front());
+			if (packet.data_packet && !_queued_data_packets.empty() && _queued_data_packets.front() == _queue.begin())
+			{
+				_queued_data_packets.pop_front();
+			}
 			_queue.pop_front();
 			const auto now = std::chrono::steady_clock::now();
 			lock.unlock();
@@ -139,6 +159,7 @@ namespace serial::vita49
 				}
 			}
 			_queue.clear();
+			_queued_data_packets.clear();
 			_started = false;
 		}
 
@@ -179,16 +200,55 @@ namespace serial::vita49
 			}
 
 			const auto due = dueTime(_queue.front());
-			if (_cv.wait_until(lock, due, [this] { return _stopping; }))
+			if (waitUntilDue(lock, due))
 			{
 				return;
 			}
 
 			auto packet = std::move(_queue.front());
+			if (packet.data_packet && !_queued_data_packets.empty() && _queued_data_packets.front() == _queue.begin())
+			{
+				_queued_data_packets.pop_front();
+			}
 			_queue.pop_front();
 			const auto now = std::chrono::steady_clock::now();
 			lock.unlock();
 			sendOneUnlocked(std::move(packet), now);
+			lock.lock();
+		}
+	}
+
+	bool PacedSender::waitUntilDue(std::unique_lock<std::mutex>& lock, const std::chrono::steady_clock::time_point due)
+	{
+		while (true)
+		{
+			if (_stopping)
+			{
+				return true;
+			}
+
+			const auto now = std::chrono::steady_clock::now();
+			if (now >= due)
+			{
+				return false;
+			}
+
+			const auto remaining = due - now;
+			if (remaining > kCoarsePacingSleep)
+			{
+				const auto coarse_sleep =
+					std::chrono::duration_cast<std::chrono::steady_clock::duration>(kCoarsePacingSleep);
+				const auto fine_spin = std::chrono::duration_cast<std::chrono::steady_clock::duration>(kFinePacingSpin);
+				const auto wait_duration = std::min(remaining - fine_spin, coarse_sleep);
+				_cv.wait_for(lock, wait_duration, [this] { return _stopping; });
+				continue;
+			}
+
+			lock.unlock();
+			while (std::chrono::steady_clock::now() < due)
+			{
+				std::this_thread::yield();
+			}
 			lock.lock();
 		}
 	}
@@ -214,13 +274,18 @@ namespace serial::vita49
 
 	std::optional<DroppedDatagram> PacedSender::dropQueuedDataPacketUnlocked()
 	{
-		const auto found = std::find_if(_queue.begin(), _queue.end(),
-										[](const SerializedPacket& packet) { return packet.data_packet; });
-		if (found == _queue.end())
+		while (!_queued_data_packets.empty() && !_queued_data_packets.front()->data_packet)
+		{
+			_queued_data_packets.pop_front();
+		}
+
+		if (_queued_data_packets.empty())
 		{
 			return std::nullopt;
 		}
 
+		const auto found = _queued_data_packets.front();
+		_queued_data_packets.pop_front();
 		DroppedDatagram dropped{.stream_id = found->stream_id,
 								.sample_count = found->sample_count,
 								.data_packet = found->data_packet,

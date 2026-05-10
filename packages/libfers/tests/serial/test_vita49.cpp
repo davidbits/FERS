@@ -225,6 +225,23 @@ TEST_CASE("VITA queue overflow drops data and loss flags appear in next packet/c
 	REQUIRE(second_result.dropped->stream_id == 9u);
 	REQUIRE(second_result.dropped->sample_count == 12u);
 
+	auto context_recording = std::make_unique<RecordingSender>();
+	PacedSender context_sender(std::move(context_recording), 1);
+	context_sender.open("127.0.0.1", 1);
+	const SerializedPacket context_packet{.bytes = {0, 0, 0, 3},
+										  .stream_id = 9,
+										  .sample_count = 0,
+										  .first_sample_time = 1000.2,
+										  .data_packet = false,
+										  .context_packet = true,
+										  .timestamp = Timestamp{}};
+	REQUIRE(context_sender.enqueue(first).enqueued);
+	const auto context_result = context_sender.enqueue(context_packet);
+	REQUIRE(context_result.enqueued);
+	REQUIRE(context_result.dropped);
+	REQUIRE(context_result.dropped->data_packet);
+	REQUIRE(context_result.dropped->sample_count == 10u);
+
 	Vita49Packetizer packetizer(1'700'000'000'000'000'000ull, 1.0, 1400);
 	std::vector<ComplexType> samples{ComplexType(0.0, 0.0)};
 	const core::ReceiverStreamDescriptor stream{

@@ -572,9 +572,10 @@ namespace core
 	SimulationEngine::SimulationEngine(World* world, pool::ThreadPool& pool, std::shared_ptr<ProgressReporter> reporter,
 									   std::string output_dir,
 									   std::shared_ptr<OutputMetadataCollector> metadata_collector,
-									   ReceiverOutputSink* output_sink) :
+									   ReceiverOutputSink* output_sink, const bool live_output) :
 		_world(world), _pool(pool), _reporter(std::move(reporter)), _metadata_collector(std::move(metadata_collector)),
-		_output_sink(output_sink), _last_report_time(std::chrono::steady_clock::now()),
+		_output_sink(output_sink), _live_output(output_sink != nullptr && live_output),
+		_last_report_time(std::chrono::steady_clock::now()), _next_context_heartbeat_time(params::startTime() + 1.0),
 		_output_dir(std::move(output_dir))
 	{
 		_streaming_tracker_caches.resize(_world->getReceivers().size());
@@ -582,11 +583,20 @@ namespace core
 		_fmcw_if_block_buffers.resize(_world->getReceivers().size());
 		_fmcw_if_block_start_times.resize(_world->getReceivers().size(), params::startTime());
 		_streaming_output_block_buffers.resize(_world->getReceivers().size());
+		_streaming_output_processed_buffers.resize(_world->getReceivers().size());
 		_streaming_output_block_start_times.resize(_world->getReceivers().size(), params::startTime());
 		_streaming_output_block_start_indices.resize(_world->getReceivers().size(), 0);
 		_streaming_output_sample_cursors.resize(_world->getReceivers().size(), 0);
 		_streaming_output_stream_ids.resize(_world->getReceivers().size(), 0);
 		_streaming_output_stream_open.resize(_world->getReceivers().size(), false);
+		for (auto& block : _streaming_output_block_buffers)
+		{
+			block.reserve(streaming_output_block_size);
+		}
+		for (auto& block : _streaming_output_processed_buffers)
+		{
+			block.reserve(streaming_output_block_size);
+		}
 		_internal_stop_time = params::endTime();
 	}
 
@@ -598,7 +608,7 @@ namespace core
 		}
 
 		initializeFmcwIfResamplers();
-		if (_output_sink != nullptr)
+		if (_live_output)
 		{
 			for (const auto& receiver_ptr : _world->getReceivers())
 			{
@@ -632,10 +642,6 @@ namespace core
 			state.t_current = event.timestamp;
 
 			processEvent(event);
-			if (_output_sink != nullptr)
-			{
-				_output_sink->emitContextHeartbeat(state.t_current);
-			}
 			updateProgress();
 		}
 
@@ -784,7 +790,7 @@ namespace core
 			const RealType over_render =
 				plan.group_delay_seconds + 1.0 / plan.actual_output_sample_rate_hz + block_time;
 			_internal_stop_time = std::max(_internal_stop_time, params::endTime() + over_render);
-			if (_output_sink != nullptr)
+			if (_live_output)
 			{
 				receiver_ptr->setFmcwIfOutputCallback(
 					[this, receiver_index](const std::span<const ComplexType> samples, const std::uint64_t sample_start)
@@ -940,7 +946,7 @@ namespace core
 						{
 							appendFmcwIfSample(receiver_index, t_step, sample);
 						}
-						else if (_output_sink != nullptr)
+						else if (_live_output)
 						{
 							appendStreamingOutputSample(receiver_index, sample_index, t_step, sample);
 						}
@@ -950,6 +956,10 @@ namespace core
 						}
 					}
 				}
+				if (_output_sink != nullptr && t_step >= _next_context_heartbeat_time)
+				{
+					emitContextHeartbeatsThrough(t_step);
+				}
 				if (((sample_index - first_index) % progress_report_stride) == 0 || sample_index + 1 == final_index)
 				{
 					reportSimulationProgress(t_step);
@@ -957,6 +967,7 @@ namespace core
 			}
 
 			t_current = chunk_end;
+			emitContextHeartbeatsThrough(t_current);
 		}
 		cleanupInactiveStreamingSources(t_current);
 	}
@@ -1002,7 +1013,7 @@ namespace core
 
 	void SimulationEngine::flushStreamingOutputBlock(const std::size_t receiver_index)
 	{
-		if (_output_sink == nullptr || receiver_index >= _world->getReceivers().size())
+		if (!_live_output || _output_sink == nullptr || receiver_index >= _world->getReceivers().size())
 		{
 			return;
 		}
@@ -1045,13 +1056,15 @@ namespace core
 													const std::span<const ComplexType> samples,
 													const std::uint64_t sample_start)
 	{
-		if (_output_sink == nullptr || samples.empty() || receiver_index >= _world->getReceivers().size())
+		if (!_live_output || _output_sink == nullptr || samples.empty() ||
+			receiver_index >= _world->getReceivers().size())
 		{
 			return;
 		}
 
 		auto& receiver = _world->getReceivers()[receiver_index];
-		std::vector<ComplexType> processed(samples.begin(), samples.end());
+		auto& processed = _streaming_output_processed_buffers[receiver_index];
+		processed.assign(samples.begin(), samples.end());
 		processing::applyThermalNoiseAtSampleRate(processed, receiver->getNoiseTemperature(), receiver->getRngEngine(),
 												  sample_rate);
 
@@ -1071,6 +1084,19 @@ namespace core
 																processed, sample_start);
 		_output_sink->submitBlock(block);
 		_streaming_output_sample_cursors[receiver_index] = sample_start + static_cast<std::uint64_t>(processed.size());
+	}
+
+	void SimulationEngine::emitContextHeartbeatsThrough(const RealType simulation_time)
+	{
+		if (_output_sink == nullptr)
+		{
+			return;
+		}
+		while (_next_context_heartbeat_time <= simulation_time)
+		{
+			_output_sink->emitContextHeartbeat(_next_context_heartbeat_time);
+			_next_context_heartbeat_time += 1.0;
+		}
 	}
 
 	void SimulationEngine::flushFmcwIfBlocks()
@@ -1560,7 +1586,7 @@ namespace core
 		{
 			rx->endFmcwIfResamplingSegment();
 		}
-		if (_output_sink != nullptr && receiver_it != _world->getReceivers().end())
+		if (_live_output && _output_sink != nullptr && receiver_it != _world->getReceivers().end())
 		{
 			const auto receiver_index = static_cast<std::size_t>(receiver_it - _world->getReceivers().begin());
 			if (_streaming_output_stream_open[receiver_index])
@@ -1648,7 +1674,7 @@ namespace core
 			if (receiver_ptr->getMode() == OperationMode::CW_MODE ||
 				receiver_ptr->getMode() == OperationMode::FMCW_MODE)
 			{
-				if (_output_sink != nullptr)
+				if (_live_output)
 				{
 					flushFmcwIfBlock(receiver_index);
 					receiver_ptr->flushFmcwIfResampling();
@@ -1698,28 +1724,38 @@ namespace core
 		auto reporter = std::make_shared<ProgressReporter>(progress_callback);
 		auto metadata_collector = std::make_shared<OutputMetadataCollector>(output_dir);
 		std::unique_ptr<ReceiverOutputSink> output_sink;
+		bool live_output = false;
 		if (isVita49Enabled(output_config))
 		{
 			output_sink = serial::vita49::makeVita49OutputSink();
 			output_sink->initializeRun(output_config, params::params.simulation_name);
+			live_output = true;
+		}
+		else
+		{
+			output_sink = processing::makeHdf5OutputSink(output_dir, metadata_collector);
+			output_sink->initializeRun(output_config, params::params.simulation_name);
 		}
 
-		SimulationEngine engine(world, pool, reporter, output_dir, metadata_collector, output_sink.get());
+		SimulationEngine engine(world, pool, reporter, output_dir, metadata_collector, output_sink.get(), live_output);
 		engine.run();
+		const auto stats = output_sink->finalize();
 		auto metadata = metadata_collector->snapshot();
 		if (output_sink)
 		{
-			auto vita49_metadata = vita49MetadataFromConfig(output_config.vita49);
-			const auto stats = output_sink->finalize();
-			if (stats.epoch_unix_nanoseconds.has_value())
+			if (isVita49Enabled(output_config))
 			{
-				vita49_metadata.epoch_unix_nanoseconds = *stats.epoch_unix_nanoseconds;
+				auto vita49_metadata = vita49MetadataFromConfig(output_config.vita49);
+				if (stats.epoch_unix_nanoseconds.has_value())
+				{
+					vita49_metadata.epoch_unix_nanoseconds = *stats.epoch_unix_nanoseconds;
+				}
+				for (const auto& stream : stats.streams)
+				{
+					vita49_metadata.streams.push_back(streamStatsToMetadata(stream));
+				}
+				metadata.vita49 = std::move(vita49_metadata);
 			}
-			for (const auto& stream : stats.streams)
-			{
-				vita49_metadata.streams.push_back(streamStatsToMetadata(stream));
-			}
-			metadata.vita49 = std::move(vita49_metadata);
 		}
 		return metadata;
 	}

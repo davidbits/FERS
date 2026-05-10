@@ -13,9 +13,13 @@
 #include <filesystem>
 #include <format>
 #include <highfive/highfive.hpp>
+#include <iterator>
 #include <limits>
+#include <mutex>
 #include <optional>
 #include <span>
+#include <stdexcept>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -562,7 +566,8 @@ namespace processing
 	core::ReceiverSampleBlock buildReceiverSampleBlock(const radar::Receiver* receiver,
 													   const RealType first_sample_time, const RealType sample_rate,
 													   const std::span<const ComplexType> samples,
-													   const std::uint64_t sample_start)
+													   const std::uint64_t sample_start,
+													   std::shared_ptr<const core::OutputFileMetadata> file_metadata)
 	{
 		return core::ReceiverSampleBlock{.stream = buildReceiverStreamDescriptor(receiver, sample_rate),
 										 .first_sample_time = first_sample_time,
@@ -571,7 +576,313 @@ namespace processing
 										 .sample_start = sample_start,
 										 .valid_data = true,
 										 .calibrated_time = true,
-										 .reference_lock = true};
+										 .reference_lock = true,
+										 .file_metadata = std::move(file_metadata)};
+	}
+
+	struct Hdf5OutputSink::Impl
+	{
+		struct StreamState
+		{
+			core::ReceiverStreamDescriptor descriptor;
+			core::OutputFileMetadata metadata;
+			std::vector<ComplexType> streaming_buffer;
+			std::optional<core::OutputFileMetadata> streaming_metadata;
+			std::unique_ptr<HighFive::File> pulsed_file;
+			std::uint64_t next_sample_start = 0;
+			unsigned next_chunk_index = 0;
+			bool opened = false;
+			bool closed = false;
+		};
+
+		Impl(std::string out_dir, std::shared_ptr<core::OutputMetadataCollector> collector) :
+			output_dir(std::move(out_dir)), metadata_collector(std::move(collector))
+		{
+		}
+
+		void initializeRun(const core::OutputConfig& config, std::string /*simulation_name*/)
+		{
+			if (config.mode != core::OutputMode::Hdf5)
+			{
+				throw std::invalid_argument("Hdf5OutputSink requires HDF5 output mode");
+			}
+			std::scoped_lock lock(mutex);
+			std::filesystem::create_directories(output_dir);
+			finalized = false;
+		}
+
+		std::uint32_t registerStream(const core::ReceiverStreamDescriptor& stream)
+		{
+			std::scoped_lock lock(mutex);
+			const auto key = streamKey(stream);
+			if (const auto found = stream_ids.find(key); found != stream_ids.end())
+			{
+				return found->second;
+			}
+
+			const auto stream_id = next_stream_id++;
+			StreamState state;
+			state.descriptor = stream;
+			state.metadata = core::OutputFileMetadata{.receiver_id = stream.receiver_id,
+													  .receiver_name = stream.receiver_name,
+													  .mode = stream.mode,
+													  .path = outputPath(stream.receiver_name),
+													  .sampling_rate = stream.sample_rate};
+			stream_ids.emplace(key, stream_id);
+			streams.emplace(stream_id, std::move(state));
+			return stream_id;
+		}
+
+		void openStream(const std::uint32_t stream_id, const RealType /*first_sample_time*/)
+		{
+			std::scoped_lock lock(mutex);
+			auto& state = stateFor(stream_id);
+			if (state.opened)
+			{
+				return;
+			}
+			std::filesystem::create_directories(output_dir);
+			if (isPulsed(state))
+			{
+				std::scoped_lock hdf5_lock(serial::hdf5_global_mutex);
+				state.pulsed_file = std::make_unique<HighFive::File>(state.metadata.path, HighFive::File::Truncate);
+			}
+			state.opened = true;
+			state.closed = false;
+		}
+
+		void submitBlock(const core::ReceiverSampleBlock& block)
+		{
+			std::scoped_lock lock(mutex);
+			const auto stream_id = registerStream(block.stream);
+			auto& state = stateFor(stream_id);
+			if (!state.opened)
+			{
+				openStream(stream_id, block.first_sample_time);
+			}
+			if (block.file_metadata)
+			{
+				state.streaming_metadata = *block.file_metadata;
+			}
+
+			if (isPulsed(state))
+			{
+				writePulsedBlock(state, block);
+				return;
+			}
+			appendStreamingBlock(state, block);
+		}
+
+		void closeStream(const std::uint32_t stream_id)
+		{
+			std::scoped_lock lock(mutex);
+			auto& state = stateFor(stream_id);
+			if (state.closed)
+			{
+				return;
+			}
+
+			if (isPulsed(state))
+			{
+				closePulsedStream(state);
+			}
+			else
+			{
+				closeStreamingStream(state);
+			}
+			state.closed = true;
+		}
+
+		core::OutputStats finalize()
+		{
+			std::scoped_lock lock(mutex);
+			if (!finalized)
+			{
+				std::vector<std::uint32_t> ids;
+				ids.reserve(streams.size());
+				for (const auto& [stream_id, state] : streams)
+				{
+					if (state.opened && !state.closed)
+					{
+						ids.push_back(stream_id);
+					}
+				}
+				for (const auto stream_id : ids)
+				{
+					closeStream(stream_id);
+				}
+				finalized = true;
+			}
+			return core::OutputStats{.mode = core::OutputMode::Hdf5, .streams = {}};
+		}
+
+		static bool isPulsed(const StreamState& state) { return state.descriptor.mode == "pulsed"; }
+
+		static std::string streamKey(const core::ReceiverStreamDescriptor& stream)
+		{
+			return std::format("{}:{}:{}", stream.receiver_id, stream.receiver_name, stream.mode);
+		}
+
+		[[nodiscard]] std::string outputPath(const std::string& receiver_name) const
+		{
+			const std::filesystem::path out_path(output_dir);
+			return (out_path / std::format("{}_results.h5", receiver_name)).string();
+		}
+
+		StreamState& stateFor(const std::uint32_t stream_id)
+		{
+			const auto found = streams.find(stream_id);
+			if (found == streams.end())
+			{
+				throw std::out_of_range("Unknown HDF5 output stream ID");
+			}
+			return found->second;
+		}
+
+		void writePulsedBlock(StreamState& state, const core::ReceiverSampleBlock& block)
+		{
+			if (!state.pulsed_file)
+			{
+				throw std::logic_error("HDF5 pulsed stream is not open");
+			}
+
+			std::vector<ComplexType> chunk(block.samples.begin(), block.samples.end());
+			const RealType fullscale = quantizeAndScaleWindow(chunk);
+			const auto chunk_index = state.next_chunk_index++;
+			const auto sample_start = state.metadata.total_samples;
+			core::PulseChunkMetadata chunk_metadata{.chunk_index = chunk_index,
+													.i_dataset = std::format("chunk_{:06}_I", chunk_index),
+													.q_dataset = std::format("chunk_{:06}_Q", chunk_index),
+													.start_time = block.first_sample_time,
+													.sample_count = static_cast<std::uint64_t>(chunk.size()),
+													.sample_start = sample_start,
+													.sample_end_exclusive =
+														sample_start + static_cast<std::uint64_t>(chunk.size())};
+			serial::addChunkToFile(*state.pulsed_file, chunk, block.first_sample_time, fullscale, chunk_index,
+								   &chunk_metadata);
+			state.metadata.chunks.push_back(std::move(chunk_metadata));
+			state.metadata.total_samples = state.metadata.chunks.back().sample_end_exclusive;
+			state.next_sample_start = state.metadata.total_samples;
+		}
+
+		void appendStreamingBlock(StreamState& state, const core::ReceiverSampleBlock& block)
+		{
+			const auto sample_start = static_cast<std::size_t>(block.sample_start);
+			const auto sample_end = sample_start + block.samples.size();
+			if (state.streaming_buffer.size() < sample_end)
+			{
+				state.streaming_buffer.resize(sample_end);
+			}
+			std::copy(block.samples.begin(), block.samples.end(),
+					  std::next(state.streaming_buffer.begin(),
+								static_cast<std::vector<ComplexType>::difference_type>(sample_start)));
+			state.next_sample_start = std::max(state.next_sample_start,
+											   block.sample_start + static_cast<std::uint64_t>(block.samples.size()));
+		}
+
+		void closePulsedStream(StreamState& state)
+		{
+			if (!state.pulsed_file)
+			{
+				return;
+			}
+			finalizePulsedMetadata(state.metadata);
+			{
+				std::scoped_lock hdf5_lock(serial::hdf5_global_mutex);
+				serial::writeOutputFileMetadataAttributes(*state.pulsed_file, state.metadata);
+				state.pulsed_file.reset();
+			}
+			if (metadata_collector)
+			{
+				metadata_collector->addFile(state.metadata);
+			}
+		}
+
+		void closeStreamingStream(StreamState& state)
+		{
+			if (state.streaming_buffer.empty())
+			{
+				return;
+			}
+
+			auto metadata = state.streaming_metadata.value_or(
+				core::OutputFileMetadata{.receiver_id = state.descriptor.receiver_id,
+										 .receiver_name = state.descriptor.receiver_name,
+										 .mode = state.descriptor.mode,
+										 .path = state.metadata.path,
+										 .sampling_rate = state.descriptor.sample_rate});
+			metadata.path = state.metadata.path;
+			metadata.sampling_rate = state.descriptor.sample_rate;
+			metadata.total_samples = static_cast<std::uint64_t>(state.streaming_buffer.size());
+			metadata.sample_start = 0;
+			metadata.sample_end_exclusive = static_cast<std::uint64_t>(state.streaming_buffer.size());
+
+			const RealType fullscale = quantizeAndScaleWindow(state.streaming_buffer);
+			pipeline::exportStreamingToHdf5(state.metadata.path, state.streaming_buffer, fullscale,
+											state.descriptor.reference_frequency, &metadata,
+											state.descriptor.sample_rate);
+			if (metadata_collector)
+			{
+				metadata_collector->addFile(std::move(metadata));
+			}
+		}
+
+		std::string output_dir;
+		std::shared_ptr<core::OutputMetadataCollector> metadata_collector;
+		std::recursive_mutex mutex;
+		std::unordered_map<std::uint32_t, StreamState> streams;
+		std::unordered_map<std::string, std::uint32_t> stream_ids;
+		std::uint32_t next_stream_id = 1;
+		bool finalized = false;
+	};
+
+	Hdf5OutputSink::Hdf5OutputSink(std::string output_dir,
+								   std::shared_ptr<core::OutputMetadataCollector> metadata_collector) :
+		_impl(std::make_unique<Impl>(std::move(output_dir), std::move(metadata_collector)))
+	{
+	}
+
+	Hdf5OutputSink::~Hdf5OutputSink()
+	{
+		if (_impl)
+		{
+			try
+			{
+				(void)_impl->finalize();
+			}
+			catch (...)
+			{
+			}
+		}
+	}
+
+	void Hdf5OutputSink::initializeRun(const core::OutputConfig& config, std::string simulation_name)
+	{
+		_impl->initializeRun(config, std::move(simulation_name));
+	}
+
+	std::uint32_t Hdf5OutputSink::registerStream(const core::ReceiverStreamDescriptor& stream)
+	{
+		return _impl->registerStream(stream);
+	}
+
+	void Hdf5OutputSink::openStream(const std::uint32_t stream_id, const RealType first_sample_time)
+	{
+		_impl->openStream(stream_id, first_sample_time);
+	}
+
+	void Hdf5OutputSink::submitBlock(const core::ReceiverSampleBlock& block) { _impl->submitBlock(block); }
+
+	void Hdf5OutputSink::emitContextHeartbeat(const RealType /*simulation_time*/) {}
+
+	void Hdf5OutputSink::closeStream(const std::uint32_t stream_id) { _impl->closeStream(stream_id); }
+
+	core::OutputStats Hdf5OutputSink::finalize() { return _impl->finalize(); }
+
+	std::unique_ptr<core::ReceiverOutputSink>
+	makeHdf5OutputSink(std::string output_dir, std::shared_ptr<core::OutputMetadataCollector> metadata_collector)
+	{
+		return std::make_unique<Hdf5OutputSink>(std::move(output_dir), std::move(metadata_collector));
 	}
 
 	void runPulsedFinalizer(radar::Receiver* receiver, const std::vector<std::unique_ptr<radar::Target>>* targets,
@@ -586,49 +897,23 @@ namespace processing
 			return;
 		}
 
-		const bool route_to_sink = output_sink != nullptr;
-		std::string hdf5_filename;
-		if (!route_to_sink)
+		std::unique_ptr<core::ReceiverOutputSink> owned_sink;
+		if (output_sink == nullptr)
 		{
-			std::filesystem::path out_path(output_dir);
-			if (!std::filesystem::exists(out_path))
-			{
-				std::filesystem::create_directories(out_path);
-			}
-			hdf5_filename = (out_path / std::format("{}_results.h5", receiver->getName())).string();
+			owned_sink = makeHdf5OutputSink(output_dir, metadata_collector);
+			owned_sink->initializeRun(core::OutputConfig{}, params::params.simulation_name);
+			output_sink = owned_sink.get();
 		}
-		core::OutputFileMetadata file_metadata{.receiver_id = receiver->getId(),
-											   .receiver_name = receiver->getName(),
-											   .mode = "pulsed",
-											   .path = hdf5_filename,
-											   .sampling_rate = params::rate()};
 
-		std::unique_ptr<HighFive::File> h5_file;
-		std::uint32_t sink_stream_id = 0;
+		const auto sink_stream_id =
+			output_sink->registerStream(buildReceiverStreamDescriptor(receiver, params::rate()));
 		bool sink_stream_open = false;
 		std::uint64_t sink_sample_start = 0;
-		if (route_to_sink)
-		{
-			sink_stream_id = output_sink->registerStream(buildReceiverStreamDescriptor(receiver, params::rate()));
-		}
-		else
-		{
-			std::scoped_lock lock(serial::hdf5_global_mutex);
-			h5_file = std::make_unique<HighFive::File>(hdf5_filename, HighFive::File::Truncate);
-		}
 
 		unsigned chunk_index = 0;
 
-		if (route_to_sink)
-		{
-			LOG(logging::Level::INFO, "Finalizer thread started for receiver '{}'. Routing to output sink.",
-				receiver->getName());
-		}
-		else
-		{
-			LOG(logging::Level::INFO, "Finalizer thread started for receiver '{}'. Outputting to '{}'.",
-				receiver->getName(), hdf5_filename);
-		}
+		LOG(logging::Level::INFO, "Finalizer thread started for receiver '{}'. Routing to output sink.",
+			receiver->getName());
 
 		auto last_report_time = std::chrono::steady_clock::now();
 		const auto report_interval = std::chrono::milliseconds(100);
@@ -660,12 +945,6 @@ namespace processing
 
 			std::vector<ComplexType> window_buffer(window_samples);
 
-			if (!route_to_sink)
-			{
-				applyThermalNoise(window_buffer, receiver->getNoiseTemperature(receiver->getRotation(actual_start)),
-								  receiver->getRngEngine());
-			}
-
 			pipeline::applyStreamingInterference(window_buffer, actual_start, dt, receiver,
 												 job.active_streaming_sources, targets, streaming_tracker_cache);
 
@@ -676,43 +955,20 @@ namespace processing
 				pipeline::addPhaseNoiseToWindow(pnoise, window_buffer);
 			}
 
-			if (route_to_sink)
+			pipeline::applyDownsampling(window_buffer);
+			applyThermalNoiseAtSampleRate(window_buffer,
+										  receiver->getNoiseTemperature(receiver->getRotation(actual_start)),
+										  receiver->getRngEngine(), params::rate());
+			if (!sink_stream_open)
 			{
-				pipeline::applyDownsampling(window_buffer);
-				applyThermalNoiseAtSampleRate(window_buffer,
-											  receiver->getNoiseTemperature(receiver->getRotation(actual_start)),
-											  receiver->getRngEngine(), params::rate());
-				if (!sink_stream_open)
-				{
-					output_sink->openStream(sink_stream_id, actual_start);
-					sink_stream_open = true;
-				}
-				const auto block =
-					buildReceiverSampleBlock(receiver, actual_start, params::rate(), window_buffer, sink_sample_start);
-				output_sink->submitBlock(block);
-				sink_sample_start += static_cast<std::uint64_t>(window_buffer.size());
-				++chunk_index;
+				output_sink->openStream(sink_stream_id, actual_start);
+				sink_stream_open = true;
 			}
-			else
-			{
-				const RealType fullscale = pipeline::applyDownsamplingAndQuantization(window_buffer);
-
-				const auto current_chunk_index = chunk_index++;
-				const auto sample_start = file_metadata.total_samples;
-				core::PulseChunkMetadata chunk_metadata{
-					.chunk_index = current_chunk_index,
-					.i_dataset = std::format("chunk_{:06}_I", current_chunk_index),
-					.q_dataset = std::format("chunk_{:06}_Q", current_chunk_index),
-					.start_time = actual_start,
-					.sample_count = static_cast<std::uint64_t>(window_buffer.size()),
-					.sample_start = sample_start,
-					.sample_end_exclusive = sample_start + static_cast<std::uint64_t>(window_buffer.size())};
-
-				serial::addChunkToFile(*h5_file, window_buffer, actual_start, fullscale, current_chunk_index,
-									   &chunk_metadata);
-				file_metadata.chunks.push_back(std::move(chunk_metadata));
-				file_metadata.total_samples = file_metadata.chunks.back().sample_end_exclusive;
-			}
+			const auto block =
+				buildReceiverSampleBlock(receiver, actual_start, params::rate(), window_buffer, sink_sample_start);
+			output_sink->submitBlock(block);
+			sink_sample_start += static_cast<std::uint64_t>(window_buffer.size());
+			++chunk_index;
 
 			if (reporter)
 			{
@@ -726,31 +982,13 @@ namespace processing
 			}
 		}
 
-		if (route_to_sink)
+		if (sink_stream_open)
 		{
-			if (sink_stream_open)
-			{
-				output_sink->closeStream(sink_stream_id);
-			}
+			output_sink->closeStream(sink_stream_id);
 		}
-		else
+		if (owned_sink)
 		{
-			finalizePulsedMetadata(file_metadata);
-			{
-				std::scoped_lock lock(serial::hdf5_global_mutex);
-				serial::writeOutputFileMetadataAttributes(*h5_file, file_metadata);
-			}
-
-			{
-				// Safe destruction of the HDF5 object inside a lock
-				std::scoped_lock lock(serial::hdf5_global_mutex);
-				h5_file.reset();
-			}
-
-			if (metadata_collector)
-			{
-				metadata_collector->addFile(std::move(file_metadata));
-			}
+			owned_sink->finalize();
 		}
 
 		if (reporter)
@@ -774,6 +1012,14 @@ namespace processing
 		{
 			LOG(logging::Level::INFO, "No streaming data to finalize for receiver '{}'.", receiver->getName());
 			return;
+		}
+
+		std::unique_ptr<core::ReceiverOutputSink> owned_sink;
+		if (output_sink == nullptr)
+		{
+			owned_sink = makeHdf5OutputSink(output_dir, metadata_collector);
+			owned_sink->initializeRun(core::OutputConfig{}, params::params.simulation_name);
+			output_sink = owned_sink.get();
 		}
 
 		if (reporter)
@@ -840,54 +1086,28 @@ namespace processing
 			applyThermalNoise(iq_buffer, receiver->getNoiseTemperature(), receiver->getRngEngine());
 		}
 
-		if (output_sink != nullptr)
+		if (!dechirped)
 		{
-			if (!dechirped)
-			{
-				pipeline::applyDownsampling(iq_buffer);
-			}
-
-			if (reporter)
-			{
-				reporter->report(std::format("Submitting Output for {}", receiver->getName()), 75, 100);
-			}
-
-			const auto stream_id =
-				output_sink->registerStream(buildReceiverStreamDescriptor(receiver, output_sample_rate));
-			output_sink->openStream(stream_id, params::startTime());
-			const auto block =
-				buildReceiverSampleBlock(receiver, params::startTime(), output_sample_rate, iq_buffer, 0);
-			output_sink->submitBlock(block);
-			output_sink->closeStream(stream_id);
-
-			if (reporter)
-			{
-				reporter->report(std::format("Finalized {}", receiver->getName()), 100, 100);
-			}
-			return;
+			pipeline::applyDownsampling(iq_buffer);
 		}
-
-		const RealType fullscale =
-			dechirped ? quantizeAndScaleWindow(iq_buffer) : pipeline::applyDownsamplingAndQuantization(iq_buffer);
 
 		if (reporter)
 		{
-			reporter->report(std::format("Writing HDF5 for {}", receiver->getName()), 75, 100);
+			reporter->report(std::format("Submitting Output for {}", receiver->getName()), 75, 100);
 		}
 
-		std::filesystem::path out_path(output_dir);
-		if (!std::filesystem::exists(out_path))
+		auto file_metadata = std::make_shared<core::OutputFileMetadata>(buildStreamingMetadata(
+			receiver, "", iq_buffer.size(), streaming_sources, output_sample_rate, dechirp_time_spans));
+		const auto stream_id = output_sink->registerStream(buildReceiverStreamDescriptor(receiver, output_sample_rate));
+		output_sink->openStream(stream_id, params::startTime());
+		const auto block =
+			buildReceiverSampleBlock(receiver, params::startTime(), output_sample_rate, iq_buffer, 0, file_metadata);
+		output_sink->submitBlock(block);
+		output_sink->closeStream(stream_id);
+
+		if (owned_sink)
 		{
-			std::filesystem::create_directories(out_path);
-		}
-		const auto hdf5_filename = (out_path / std::format("{}_results.h5", receiver->getName())).string();
-		auto file_metadata = buildStreamingMetadata(receiver, hdf5_filename, iq_buffer.size(), streaming_sources,
-													output_sample_rate, dechirp_time_spans);
-		pipeline::exportStreamingToHdf5(hdf5_filename, iq_buffer, fullscale, receiver->getTiming()->getFrequency(),
-										&file_metadata, output_sample_rate);
-		if (metadata_collector)
-		{
-			metadata_collector->addFile(std::move(file_metadata));
+			owned_sink->finalize();
 		}
 
 		if (reporter)

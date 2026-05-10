@@ -224,6 +224,47 @@ namespace
 	};
 }
 
+TEST_CASE("Hdf5OutputSink writes streaming blocks through the receiver output contract",
+		  "[processing][finalizer][hdf5]")
+{
+	ParamGuard guard;
+	params::setAdcBits(0);
+
+	const std::string receiver_name = uniqueName("hdf5_sink");
+	const auto out_dir = std::filesystem::temp_directory_path() / uniqueName("hdf5_sink_dir");
+	std::filesystem::create_directories(out_dir);
+	const auto output_path = resultPath(out_dir, receiver_name);
+	removeIfExists(output_path);
+
+	processing::Hdf5OutputSink sink(out_dir.string());
+	sink.initializeRun(core::OutputConfig{}, "sim");
+
+	const core::ReceiverStreamDescriptor stream{.receiver_id = 42,
+												.receiver_name = receiver_name,
+												.mode = "cw",
+												.sample_rate = 2.0,
+												.reference_frequency = 1.0e9};
+	const std::vector<ComplexType> samples{ComplexType{1.0, 0.0}, ComplexType{0.5, -0.5}};
+	const auto stream_id = sink.registerStream(stream);
+	sink.openStream(stream_id, 0.0);
+	sink.submitBlock(core::ReceiverSampleBlock{
+		.stream = stream, .first_sample_time = 0.0, .sample_rate = 2.0, .samples = samples, .sample_start = 0});
+	sink.closeStream(stream_id);
+	sink.finalize();
+
+	HighFive::File file(output_path.string(), HighFive::File::ReadOnly);
+	const auto i_data = readDataset(file, "I_data");
+	const auto q_data = readDataset(file, "Q_data");
+
+	REQUIRE(i_data.size() == 2u);
+	REQUIRE(q_data.size() == 2u);
+	REQUIRE_THAT(i_data[0], WithinAbs(1.0, 1e-12));
+	REQUIRE_THAT(i_data[1], WithinAbs(0.5, 1e-12));
+	REQUIRE_THAT(q_data[1], WithinAbs(-0.5, 1e-12));
+
+	std::filesystem::remove_all(out_dir);
+}
+
 TEST_CASE("finalizeStreamingReceiver exits cleanly when no streaming samples were collected", "[processing][finalizer]")
 {
 	ParamGuard guard;

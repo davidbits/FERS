@@ -9,6 +9,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <deque>
+#include <list>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -54,6 +55,7 @@ namespace serial::vita49
 
 	private:
 		void run();
+		[[nodiscard]] bool waitUntilDue(std::unique_lock<std::mutex>& lock, std::chrono::steady_clock::time_point due);
 		void sendOneUnlocked(SerializedPacket packet, std::chrono::steady_clock::time_point now);
 		[[nodiscard]] std::chrono::steady_clock::time_point dueTime(const SerializedPacket& packet) const;
 		[[nodiscard]] std::optional<DroppedDatagram> dropQueuedDataPacketUnlocked();
@@ -62,7 +64,8 @@ namespace serial::vita49
 		std::size_t _queue_depth = 0;
 		mutable std::mutex _mutex;
 		std::condition_variable _cv;
-		std::deque<SerializedPacket> _queue;
+		std::list<SerializedPacket> _queue;
+		std::deque<std::list<SerializedPacket>::iterator> _queued_data_packets;
 		std::unordered_map<std::uint32_t, std::uint64_t> _late_packets;
 		std::unordered_map<std::uint32_t, std::uint64_t> _sent_packets;
 		std::chrono::steady_clock::time_point _steady_epoch = std::chrono::steady_clock::now();

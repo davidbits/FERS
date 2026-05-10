@@ -8,9 +8,9 @@
 
 #include <algorithm>
 #include <cmath>
-#include <limits>
 #include <stdexcept>
 
+#include "processing/signal_processor.h"
 #include "serial/vita49/vita49_serializer.h"
 
 namespace serial::vita49
@@ -63,21 +63,17 @@ namespace serial::vita49
 				block.first_sample_time + static_cast<RealType>(offset) / sample_rate;
 			const auto timestamp = timestampFromEpoch(_epoch_unix_nanoseconds, packet_first_sample_time);
 
+			const auto scaled =
+				processing::scaleToInt16FixedFullscale(block.samples.subspan(offset, count), _adc_fullscale);
 			std::vector<std::int16_t> iq;
-			iq.reserve(count * 2u);
-			bool packet_over_range = false;
-			for (std::size_t i = 0; i < count; ++i)
+			iq.reserve(scaled.samples.size() * 2u);
+			for (const auto& sample : scaled.samples)
 			{
-				bool i_clipped = false;
-				bool q_clipped = false;
-				iq.push_back(quantize(block.samples[offset + i].real(), i_clipped));
-				iq.push_back(quantize(block.samples[offset + i].imag(), q_clipped));
-				if (i_clipped || q_clipped)
-				{
-					packet_over_range = true;
-					++result.over_range_count;
-				}
+				iq.push_back(sample.i);
+				iq.push_back(sample.q);
 			}
+			const bool packet_over_range = scaled.clipped_sample_count > 0;
+			result.over_range_count += scaled.clipped_sample_count;
 
 			SignalDataPacket signal{.stream_id = stream_id,
 									.class_id = kFersVrtIqClassId,
@@ -129,27 +125,4 @@ namespace serial::vita49
 								.timestamp = context.timestamp};
 	}
 
-	std::int16_t Vita49Packetizer::quantize(const RealType value, bool& clipped) const noexcept
-	{
-		if (!std::isfinite(value))
-		{
-			clipped = true;
-			return 0;
-		}
-		if (value >= _adc_fullscale)
-		{
-			clipped = true;
-			return std::numeric_limits<std::int16_t>::max();
-		}
-		if (value <= -_adc_fullscale)
-		{
-			clipped = true;
-			return std::numeric_limits<std::int16_t>::min();
-		}
-
-		clipped = false;
-		const RealType normalized = value / _adc_fullscale;
-		const RealType scale = normalized < 0.0 ? 32768.0 : 32767.0;
-		return static_cast<std::int16_t>(std::lrint(normalized * scale));
-	}
 }

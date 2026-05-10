@@ -29,8 +29,6 @@ namespace serial::vita49
 		[[nodiscard]] SerializedPacket makeContextPacket(const ContextPacket& context) const;
 
 	private:
-		[[nodiscard]] std::int16_t quantize(RealType value, bool& clipped) const noexcept;
-
 		std::uint64_t _epoch_unix_nanoseconds = 0;
 		RealType _adc_fullscale = 1.0;
 		std::uint16_t _max_udp_payload_bytes = kDefaultMaxUdpPayloadBytes;
