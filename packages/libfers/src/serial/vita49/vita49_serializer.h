@@ -9,6 +9,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <span>
+#include <string_view>
 #include <vector>
 
 #include "serial/vita49/vita49_types.h"
@@ -25,7 +26,7 @@ namespace serial::vita49
 		void writeU32(std::uint32_t value);
 		void writeU64(std::uint64_t value);
 		void writeF64(RealType value);
-		void writeStringField(const std::string& value);
+		void writeAsciiMetadata(std::string_view value);
 		void writeBytes(std::span<const std::uint8_t> bytes);
 
 		[[nodiscard]] const std::vector<std::uint8_t>& bytes() const noexcept;

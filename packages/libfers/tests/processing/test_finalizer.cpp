@@ -241,7 +241,10 @@ TEST_CASE("Hdf5OutputSink writes streaming blocks through the receiver output co
 												.receiver_name = receiver_name,
 												.mode = "cw",
 												.sample_rate = 2.0,
-												.reference_frequency = 1.0e9};
+												.reference_frequency = 1.0e9,
+												.coordinate = {},
+												.initial_platform_state = {},
+												.fmcw = {}};
 	const std::vector<ComplexType> samples{ComplexType{1.0, 0.0}, ComplexType{0.5, -0.5}};
 	const auto stream_id = sink.registerStream(stream);
 	sink.openStream(stream_id, 0.0);
@@ -268,21 +271,46 @@ TEST_CASE("buildReceiverSampleBlock captures receiver identity, timing, and samp
 {
 	ParamGuard guard;
 	params::setAdcBits(12);
+	params::setOrigin(-33.5, 18.25, 123.0);
+	params::setCoordinateSystem(params::CoordinateFrame::UTM, 34, false);
 
 	radar::Platform platform("RxPlatform");
+	setupPlatform(platform, math::Vec3{100.0, 200.0, 300.0});
 	radar::Receiver receiver(&platform, "RxDescriptor", 55, radar::OperationMode::FMCW_MODE, 4242);
 	auto timing_owner = makeQuietTiming("descriptor_clk", 11, 10.5e9);
 	receiver.setTiming(timing_owner.timing);
 	receiver.setDechirpMode(radar::Receiver::DechirpMode::Physical);
+	FmcwTxFixture tx("DescriptorTx", 6001, 7001, 40.0e6, 2.0e-3, 3.0e-3, -1.0e6, 7);
+	setupPlatform(tx.platform, math::Vec3{0.0, 0.0, 0.0});
+	std::vector<core::ActiveStreamingSource> streaming_sources{core::makeActiveSource(&tx.transmitter, 0.0, 1.0)};
 
 	const std::vector<ComplexType> samples = {ComplexType{1.0, 0.0}, ComplexType{0.0, 1.0}};
-	const auto block = processing::buildReceiverSampleBlock(&receiver, 1.25, 2.0e6, samples, 17);
+	const auto block =
+		processing::buildReceiverSampleBlock(&receiver, 1.25, 2.0e6, samples, 17, streaming_sources, nullptr);
 
 	REQUIRE(block.stream.receiver_id == 4242);
 	REQUIRE(block.stream.receiver_name == "RxDescriptor");
 	REQUIRE(block.stream.mode == "fmcw");
 	REQUIRE(block.stream.dechirped);
 	REQUIRE(block.stream.adc_bits == 12u);
+	REQUIRE(block.stream.coordinate.frame == "UTM");
+	REQUIRE_THAT(block.stream.coordinate.origin_latitude, WithinAbs(-33.5, 1e-12));
+	REQUIRE(block.stream.coordinate.utm_zone == 34);
+	REQUIRE_FALSE(block.stream.coordinate.utm_north_hemisphere);
+	REQUIRE(block.stream.initial_platform_state.platform_id == platform.getId());
+	REQUIRE(block.stream.initial_platform_state.platform_name == "RxPlatform");
+	REQUIRE_THAT(block.stream.initial_platform_state.position_x, WithinAbs(100.0, 1e-12));
+	REQUIRE_THAT(block.stream.initial_platform_state.position_y, WithinAbs(200.0, 1e-12));
+	REQUIRE_THAT(block.stream.initial_platform_state.position_z, WithinAbs(300.0, 1e-12));
+	REQUIRE(block.stream.fmcw.present);
+	REQUIRE(block.stream.fmcw.waveform_shape == "linear");
+	REQUIRE(block.stream.fmcw.sweep_direction == "up");
+	REQUIRE_THAT(block.stream.fmcw.chirp_bandwidth, WithinAbs(40.0e6, 1e-6));
+	REQUIRE_THAT(block.stream.fmcw.chirp_duration, WithinAbs(2.0e-3, 1e-12));
+	REQUIRE_THAT(block.stream.fmcw.chirp_period, WithinAbs(3.0e-3, 1e-12));
+	REQUIRE_THAT(block.stream.fmcw.chirp_rate, WithinAbs(20.0e9, 1e-3));
+	REQUIRE(block.stream.fmcw.chirp_count.has_value());
+	REQUIRE(*block.stream.fmcw.chirp_count == 7u);
 	REQUIRE_THAT(block.stream.sample_rate, WithinAbs(2.0e6, 1e-12));
 	REQUIRE_THAT(block.stream.reference_frequency, WithinAbs(10.5e9, 1e-6));
 	REQUIRE_THAT(block.first_sample_time, WithinAbs(1.25, 1e-12));

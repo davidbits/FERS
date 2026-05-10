@@ -57,6 +57,7 @@ namespace serial::vita49
 	private:
 		void run();
 		[[nodiscard]] bool waitUntilDue(std::unique_lock<std::mutex>& lock, std::chrono::steady_clock::time_point due);
+		[[nodiscard]] bool waitUntilDueOrStopping(std::chrono::steady_clock::time_point due);
 		void sendOneUnlocked(SerializedPacket packet, std::chrono::steady_clock::time_point now);
 		void drainQueuedPackets();
 		[[nodiscard]] std::chrono::steady_clock::time_point dueTime(const SerializedPacket& packet) const;

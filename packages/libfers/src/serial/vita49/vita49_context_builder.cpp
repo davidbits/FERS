@@ -31,6 +31,10 @@ namespace serial::vita49
 		{
 			flags |= ContextFlagStreamClose;
 		}
+		if (request.stream.fmcw.present)
+		{
+			flags |= ContextFlagFmcwMetadataPresent;
+		}
 
 		return ContextPacket{
 			.stream_id = request.stream_id,
@@ -53,6 +57,9 @@ namespace serial::vita49
 			.receiver_name = request.stream.receiver_name,
 			.simulation_name = request.simulation_name,
 			.receiver_mode = request.stream.mode,
+			.coordinate = request.stream.coordinate,
+			.initial_platform_state = request.stream.initial_platform_state,
+			.fmcw = request.stream.fmcw,
 		};
 	}
 }

@@ -1,11 +1,14 @@
 // SPDX-License-Identifier: GPL-2.0-only
 // Copyright (c) 2026-present FERS Contributors (see AUTHORS.md).
 
+#include <algorithm>
 #include <bit>
 #include <catch2/catch_test_macros.hpp>
 #include <chrono>
 #include <cstdint>
+#include <iterator>
 #include <memory>
+#include <nlohmann/json.hpp>
 #include <stdexcept>
 #include <vector>
 
@@ -56,6 +59,17 @@ namespace
 	[[nodiscard]] double readF64(const std::vector<std::uint8_t>& bytes, const std::size_t offset)
 	{
 		return std::bit_cast<double>(readU64(bytes, offset));
+	}
+
+	[[nodiscard]] std::string readAsciiMetadata(const std::vector<std::uint8_t>& bytes, std::size_t offset)
+	{
+		std::string value;
+		while (offset < bytes.size() && bytes.at(offset) != 0)
+		{
+			++offset;
+			value.push_back(static_cast<char>(bytes.at(offset - 1u)));
+		}
+		return value;
 	}
 
 	class RecordingSender final : public serial::vita49::DatagramSender
@@ -124,7 +138,39 @@ TEST_CASE("VITA context packet serializes CIF and fields in profile order", "[se
 												.bandwidth = 5.0e6,
 												.dechirped = true,
 												.if_resampled = false,
-												.adc_bits = 14};
+												.adc_bits = 14,
+												.coordinate = {.frame = "UTM",
+															   .origin_latitude = -33.9,
+															   .origin_longitude = 18.4,
+															   .origin_altitude = 111.0,
+															   .utm_zone = 34,
+															   .utm_north_hemisphere = false},
+												.initial_platform_state = {.platform_id = 0x99,
+																		   .platform_name = "rx-platform",
+																		   .position_x = 1.0,
+																		   .position_y = 2.0,
+																		   .position_z = 3.0,
+																		   .velocity_x = 4.0,
+																		   .velocity_y = 5.0,
+																		   .velocity_z = 6.0,
+																		   .azimuth = 0.25,
+																		   .elevation = -0.5},
+												.fmcw = {.present = true,
+														 .waveform_shape = "linear",
+														 .chirp_bandwidth = 20.0e6,
+														 .chirp_duration = 1.0e-3,
+														 .chirp_period = 2.0e-3,
+														 .chirp_rate = 20.0e9,
+														 .chirp_rate_signed = -20.0e9,
+														 .sweep_direction = "down",
+														 .start_frequency_offset = 1.5e6,
+														 .chirp_count = 64,
+														 .dechirp_mode = "physical",
+														 .dechirp_reference_source = "transmitter",
+														 .dechirp_reference_transmitter_id = 0x1234,
+														 .dechirp_reference_transmitter_name = "tx-lo",
+														 .dechirp_reference_waveform_id = 0,
+														 .dechirp_reference_waveform_name = ""}};
 	const auto context = Vita49ContextBuilder::build(ContextBuildRequest{.stream = stream,
 																		 .stream_id = 0x55667788u,
 																		 .simulation_name = "sim",
@@ -152,9 +198,59 @@ TEST_CASE("VITA context packet serializes CIF and fields in profile order", "[se
 	REQUIRE(readF64(bytes, 68) == 5.0e6);
 	REQUIRE(readF64(bytes, 76) == 2.0);
 	REQUIRE(readU64(bytes, 84) == 0x1122334455667788ull);
-	REQUIRE(readU32(bytes, 92) == 14u);
-	REQUIRE((readU32(bytes, 96) & (ContextFlagDechirped | ContextFlagSampleLoss | ContextFlagStreamOpen)) ==
-			(ContextFlagDechirped | ContextFlagSampleLoss | ContextFlagStreamOpen));
+	constexpr std::size_t ascii_offset = 92u;
+	const auto null_pos = std::find(bytes.begin() + static_cast<std::ptrdiff_t>(ascii_offset), bytes.end(), 0);
+	REQUIRE(null_pos != bytes.end());
+	for (auto it = bytes.begin() + static_cast<std::ptrdiff_t>(ascii_offset); it != null_pos; ++it)
+	{
+		REQUIRE(*it <= 0x7Fu);
+	}
+	for (auto it = std::next(null_pos); it != bytes.end(); ++it)
+	{
+		REQUIRE(*it == 0u);
+	}
+
+	const auto metadata = nlohmann::json::parse(readAsciiMetadata(bytes, ascii_offset));
+	REQUIRE(metadata.at("schema") == "fers-vita49-context-v1");
+	REQUIRE(metadata.at("simulation_name") == "sim");
+	REQUIRE(metadata.at("receiver").at("id").get<std::uint64_t>() == 0x1122334455667788ull);
+	REQUIRE(metadata.at("receiver").at("name") == "rx1");
+	REQUIRE(metadata.at("receiver").at("mode") == "cw");
+	REQUIRE(metadata.at("receiver").at("adc_bits") == 14u);
+	const auto context_flags = metadata.at("receiver").at("context_flags").get<std::uint32_t>();
+	REQUIRE((context_flags &
+			 (ContextFlagDechirped | ContextFlagSampleLoss | ContextFlagStreamOpen | ContextFlagFmcwMetadataPresent)) ==
+			(ContextFlagDechirped | ContextFlagSampleLoss | ContextFlagStreamOpen | ContextFlagFmcwMetadataPresent));
+	REQUIRE(metadata.at("coordinate_frame").at("frame") == "UTM");
+	REQUIRE(metadata.at("coordinate_frame").at("origin").at("latitude") == -33.9);
+	REQUIRE(metadata.at("coordinate_frame").at("origin").at("longitude") == 18.4);
+	REQUIRE(metadata.at("coordinate_frame").at("origin").at("altitude") == 111.0);
+	REQUIRE(metadata.at("coordinate_frame").at("utm_zone") == 34);
+	REQUIRE_FALSE(metadata.at("coordinate_frame").at("utm_north_hemisphere").get<bool>());
+	REQUIRE(metadata.at("initial_platform_state").at("platform_id") == 0x99u);
+	REQUIRE(metadata.at("initial_platform_state").at("platform_name") == "rx-platform");
+	REQUIRE(metadata.at("initial_platform_state").at("position_m").at("x") == 1.0);
+	REQUIRE(metadata.at("initial_platform_state").at("position_m").at("y") == 2.0);
+	REQUIRE(metadata.at("initial_platform_state").at("position_m").at("z") == 3.0);
+	REQUIRE(metadata.at("initial_platform_state").at("velocity_mps").at("x") == 4.0);
+	REQUIRE(metadata.at("initial_platform_state").at("velocity_mps").at("y") == 5.0);
+	REQUIRE(metadata.at("initial_platform_state").at("velocity_mps").at("z") == 6.0);
+	REQUIRE(metadata.at("initial_platform_state").at("rotation_rad").at("azimuth") == 0.25);
+	REQUIRE(metadata.at("initial_platform_state").at("rotation_rad").at("elevation") == -0.5);
+	REQUIRE(metadata.at("fmcw").at("present").get<bool>());
+	REQUIRE(metadata.at("fmcw").at("waveform_shape") == "linear");
+	REQUIRE(metadata.at("fmcw").at("sweep_direction") == "down");
+	REQUIRE(metadata.at("fmcw").at("chirp_bandwidth_hz") == 20.0e6);
+	REQUIRE(metadata.at("fmcw").at("chirp_duration_s") == 1.0e-3);
+	REQUIRE(metadata.at("fmcw").at("chirp_period_s") == 2.0e-3);
+	REQUIRE(metadata.at("fmcw").at("chirp_rate_hz_per_s") == 20.0e9);
+	REQUIRE(metadata.at("fmcw").at("chirp_rate_signed_hz_per_s") == -20.0e9);
+	REQUIRE(metadata.at("fmcw").at("start_frequency_offset_hz") == 1.5e6);
+	REQUIRE(metadata.at("fmcw").at("chirp_count") == 64u);
+	REQUIRE(metadata.at("fmcw").at("dechirp_mode") == "physical");
+	REQUIRE(metadata.at("fmcw").at("dechirp_reference_source") == "transmitter");
+	REQUIRE(metadata.at("fmcw").at("dechirp_reference_transmitter_id") == 0x1234u);
+	REQUIRE(metadata.at("fmcw").at("dechirp_reference_transmitter_name") == "tx-lo");
 }
 
 TEST_CASE("VITA packetizer uses first sample timestamp, packet cap, and big-endian payload", "[serial][vita49]")
@@ -165,8 +261,14 @@ TEST_CASE("VITA packetizer uses first sample timestamp, packet cap, and big-endi
 	REQUIRE(packetizer.maxComplexSamplesPerPacket() == 342u);
 
 	std::vector<ComplexType> samples(1000, ComplexType(0.5, -0.5));
-	const core::ReceiverStreamDescriptor stream{
-		.receiver_id = 77, .receiver_name = "rx", .mode = "cw", .sample_rate = 1.0, .reference_frequency = 1.0e9};
+	const core::ReceiverStreamDescriptor stream{.receiver_id = 77,
+												.receiver_name = "rx",
+												.mode = "cw",
+												.sample_rate = 1.0,
+												.reference_frequency = 1.0e9,
+												.coordinate = {},
+												.initial_platform_state = {},
+												.fmcw = {}};
 	const core::ReceiverSampleBlock block{
 		.stream = stream, .first_sample_time = 1.25, .sample_rate = 1.0, .samples = samples, .sample_start = 0};
 	PacketCountSequencer counts;
@@ -198,8 +300,18 @@ TEST_CASE("VITA packet count rolls over modulo 16", "[serial][vita49]")
 TEST_CASE("VITA stream registry allocates stable non-truncated stream IDs", "[serial][vita49]")
 {
 	serial::vita49::StreamRegistry registry;
-	const core::ReceiverStreamDescriptor a{.receiver_id = 0x00030000FFFFFFFFull, .receiver_name = "rx-a", .mode = "cw"};
-	const core::ReceiverStreamDescriptor b{.receiver_id = 0x00030001FFFFFFFFull, .receiver_name = "rx-b", .mode = "cw"};
+	const core::ReceiverStreamDescriptor a{.receiver_id = 0x00030000FFFFFFFFull,
+										   .receiver_name = "rx-a",
+										   .mode = "cw",
+										   .coordinate = {},
+										   .initial_platform_state = {},
+										   .fmcw = {}};
+	const core::ReceiverStreamDescriptor b{.receiver_id = 0x00030001FFFFFFFFull,
+										   .receiver_name = "rx-b",
+										   .mode = "cw",
+										   .coordinate = {},
+										   .initial_platform_state = {},
+										   .fmcw = {}};
 
 	const auto stream_a = registry.registerStream(a);
 	const auto stream_a_again = registry.registerStream(a);
@@ -263,8 +375,13 @@ TEST_CASE("VITA queue overflow drops data and loss flags appear in next packet/c
 
 	Vita49Packetizer packetizer(1'700'000'000'000'000'000ull, 1.0, 1400);
 	std::vector<ComplexType> samples{ComplexType(0.0, 0.0)};
-	const core::ReceiverStreamDescriptor stream{
-		.receiver_id = 9, .receiver_name = "rx", .mode = "cw", .sample_rate = 1.0};
+	const core::ReceiverStreamDescriptor stream{.receiver_id = 9,
+												.receiver_name = "rx",
+												.mode = "cw",
+												.sample_rate = 1.0,
+												.coordinate = {},
+												.initial_platform_state = {},
+												.fmcw = {}};
 	const core::ReceiverSampleBlock block{.stream = stream, .sample_rate = 1.0, .samples = samples};
 	PacketCountSequencer counts;
 	const auto packets = packetizer.packetize(block, 9, counts, true);
@@ -281,10 +398,12 @@ TEST_CASE("VITA queue overflow drops data and loss flags appear in next packet/c
 																		 .sample_loss = true});
 	const auto context_bytes = Vita49Serializer::serializeContext(context);
 	REQUIRE((readU32(context_bytes, 32) & TrailerSampleLoss) == TrailerSampleLoss);
-	REQUIRE((readU32(context_bytes, 96) & ContextFlagSampleLoss) == ContextFlagSampleLoss);
+	const auto context_metadata = nlohmann::json::parse(readAsciiMetadata(context_bytes, 92u));
+	REQUIRE((context_metadata.at("receiver").at("context_flags").get<std::uint32_t>() & ContextFlagSampleLoss) ==
+			ContextFlagSampleLoss);
 }
 
-TEST_CASE("VITA paced sender drains future packets on stop", "[serial][vita49]")
+TEST_CASE("VITA paced sender drains due packets on stop", "[serial][vita49]")
 {
 	using namespace serial::vita49;
 
@@ -297,7 +416,7 @@ TEST_CASE("VITA paced sender drains future packets on stop", "[serial][vita49]")
 	const SerializedPacket packet{.bytes = {0, 0, 0, 1},
 								  .stream_id = 5,
 								  .sample_count = 1,
-								  .first_sample_time = 1000.002,
+								  .first_sample_time = 1000.0,
 								  .data_packet = true,
 								  .timestamp = Timestamp{}};
 	REQUIRE(sender.enqueue(packet).enqueued);
@@ -305,6 +424,32 @@ TEST_CASE("VITA paced sender drains future packets on stop", "[serial][vita49]")
 
 	REQUIRE(recording_raw->sent.size() == 1u);
 	REQUIRE(sender.sentPacketCount(5) == 1u);
+}
+
+TEST_CASE("VITA paced sender stop drops far-future packets instead of bursting them", "[serial][vita49]")
+{
+	using namespace serial::vita49;
+
+	auto recording = std::make_unique<RecordingSender>();
+	auto* recording_raw = recording.get();
+	PacedSender sender(std::move(recording), 4);
+	sender.open("127.0.0.1", 1);
+	sender.start(0.0);
+
+	const SerializedPacket packet{.bytes = {0, 0, 0, 1},
+								  .stream_id = 5,
+								  .sample_count = 1,
+								  .first_sample_time = 30.0,
+								  .data_packet = true,
+								  .timestamp = Timestamp{}};
+	REQUIRE(sender.enqueue(packet).enqueued);
+	const auto start = std::chrono::steady_clock::now();
+	sender.stop();
+	const auto elapsed = std::chrono::steady_clock::now() - start;
+
+	REQUIRE(elapsed < std::chrono::milliseconds(500));
+	REQUIRE(recording_raw->sent.empty());
+	REQUIRE(sender.sentPacketCount(5) == 0u);
 }
 
 TEST_CASE("VITA paced sender catches datagram send failures", "[serial][vita49]")
@@ -345,8 +490,14 @@ TEST_CASE("VITA output sink emits context, signal data, and stats through inject
 											   .max_udp_payload = 1400}};
 	sink.initializeRun(config, "sim");
 
-	const core::ReceiverStreamDescriptor stream{
-		.receiver_id = 42, .receiver_name = "rx", .mode = "cw", .sample_rate = 2.0, .reference_frequency = 9.0e8};
+	const core::ReceiverStreamDescriptor stream{.receiver_id = 42,
+												.receiver_name = "rx",
+												.mode = "cw",
+												.sample_rate = 2.0,
+												.reference_frequency = 9.0e8,
+												.coordinate = {},
+												.initial_platform_state = {},
+												.fmcw = {}};
 	std::vector<ComplexType> samples{ComplexType(0.25, -0.25), ComplexType(2.0, 0.0)};
 	const core::ReceiverSampleBlock block{
 		.stream = stream, .first_sample_time = 0.0, .sample_rate = 2.0, .samples = samples, .sample_start = 0};
@@ -383,8 +534,14 @@ TEST_CASE("VITA output sink starts pacing at simulation start time", "[serial][v
 											   .max_udp_payload = 1400}};
 	sink.initializeRun(config, "sim");
 
-	const core::ReceiverStreamDescriptor stream{
-		.receiver_id = 42, .receiver_name = "rx", .mode = "cw", .sample_rate = 1.0, .reference_frequency = 9.0e8};
+	const core::ReceiverStreamDescriptor stream{.receiver_id = 42,
+												.receiver_name = "rx",
+												.mode = "cw",
+												.sample_rate = 1.0,
+												.reference_frequency = 9.0e8,
+												.coordinate = {},
+												.initial_platform_state = {},
+												.fmcw = {}};
 	std::vector<ComplexType> samples{ComplexType(0.25, -0.25)};
 	const core::ReceiverSampleBlock block{
 		.stream = stream, .first_sample_time = 2.0, .sample_rate = 1.0, .samples = samples, .sample_start = 0};

@@ -23,6 +23,52 @@ namespace core
 
 	struct ReceiverStreamDescriptor
 	{
+		struct CoordinateContext
+		{
+			std::string frame = "ENU";
+			RealType origin_latitude = 0.0;
+			RealType origin_longitude = 0.0;
+			RealType origin_altitude = 0.0;
+			std::int32_t utm_zone = 0;
+			bool utm_north_hemisphere = true;
+		};
+
+		struct PlatformState
+		{
+			SimId platform_id = 0;
+			std::string platform_name;
+			RealType position_x = 0.0;
+			RealType position_y = 0.0;
+			RealType position_z = 0.0;
+			RealType velocity_x = 0.0;
+			RealType velocity_y = 0.0;
+			RealType velocity_z = 0.0;
+			RealType azimuth = 0.0;
+			RealType elevation = 0.0;
+		};
+
+		struct FmcwContext
+		{
+			bool present = false;
+			std::string waveform_shape;
+			RealType chirp_bandwidth = 0.0;
+			RealType chirp_duration = 0.0;
+			RealType chirp_period = 0.0;
+			RealType chirp_rate = 0.0;
+			RealType chirp_rate_signed = 0.0;
+			std::string sweep_direction;
+			RealType start_frequency_offset = 0.0;
+			std::optional<RealType> triangle_period = std::nullopt;
+			std::optional<std::uint64_t> chirp_count = std::nullopt;
+			std::optional<std::uint64_t> triangle_count = std::nullopt;
+			std::string dechirp_mode = "none";
+			std::string dechirp_reference_source = "none";
+			SimId dechirp_reference_transmitter_id = 0;
+			std::string dechirp_reference_transmitter_name;
+			SimId dechirp_reference_waveform_id = 0;
+			std::string dechirp_reference_waveform_name;
+		};
+
 		SimId receiver_id = 0;
 		std::string receiver_name;
 		std::string mode;
@@ -33,6 +79,9 @@ namespace core
 		bool dechirped = false;
 		bool if_resampled = false;
 		unsigned adc_bits = 0;
+		CoordinateContext coordinate;
+		PlatformState initial_platform_state;
+		FmcwContext fmcw;
 	};
 
 	struct ReceiverSampleBlock

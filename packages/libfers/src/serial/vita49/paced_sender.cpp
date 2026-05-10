@@ -134,11 +134,12 @@ namespace serial::vita49
 				_queued_data_packets.pop_front();
 			}
 			_queue.pop_front();
-			const auto now = std::chrono::steady_clock::now();
+			const auto due = dueTime(packet);
 			lock.unlock();
-			if (dueTime(packet) > now)
+			if (std::chrono::steady_clock::now() < due && waitUntilDueOrStopping(due))
 			{
-				std::this_thread::sleep_until(dueTime(packet));
+				lock.lock();
+				continue;
 			}
 			sendOneUnlocked(std::move(packet), std::chrono::steady_clock::now());
 			lock.lock();
@@ -275,6 +276,21 @@ namespace serial::vita49
 		}
 	}
 
+	bool PacedSender::waitUntilDueOrStopping(const std::chrono::steady_clock::time_point due)
+	{
+		std::unique_lock lock(_mutex);
+		while (!_stopping)
+		{
+			const auto now = std::chrono::steady_clock::now();
+			if (now >= due)
+			{
+				return false;
+			}
+			_cv.wait_until(lock, due, [this] { return _stopping; });
+		}
+		return true;
+	}
+
 	void PacedSender::sendOneUnlocked(SerializedPacket packet, const std::chrono::steady_clock::time_point now)
 	{
 		const auto due = dueTime(packet);
@@ -317,10 +333,9 @@ namespace serial::vita49
 			}
 
 			const auto due = dueTime(packet);
-			const auto now = std::chrono::steady_clock::now();
-			if (due > now)
+			if (std::chrono::steady_clock::now() < due && waitUntilDueOrStopping(due))
 			{
-				std::this_thread::sleep_until(due);
+				continue;
 			}
 			sendOneUnlocked(std::move(packet), std::chrono::steady_clock::now());
 		}

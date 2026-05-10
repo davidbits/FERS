@@ -11,7 +11,9 @@
 #include <cmath>
 #include <cstring>
 #include <limits>
+#include <nlohmann/json.hpp>
 #include <stdexcept>
+#include <string_view>
 
 namespace serial::vita49
 {
@@ -59,6 +61,60 @@ namespace serial::vita49
 			}
 			return static_cast<std::uint16_t>(words);
 		}
+
+		[[nodiscard]] nlohmann::json makeContextMetadataJson(const ContextPacket& packet)
+		{
+			return nlohmann::json{
+				{"schema", "fers-vita49-context-v1"},
+				{"simulation_name", packet.simulation_name},
+				{"receiver",
+				 {{"id", packet.receiver_id},
+				  {"name", packet.receiver_name},
+				  {"mode", packet.receiver_mode},
+				  {"adc_bits", packet.adc_bits},
+				  {"context_flags", packet.context_flags}}},
+				{"coordinate_frame",
+				 {{"frame", packet.coordinate.frame},
+				  {"origin",
+				   {{"latitude", packet.coordinate.origin_latitude},
+					{"longitude", packet.coordinate.origin_longitude},
+					{"altitude", packet.coordinate.origin_altitude}}},
+				  {"utm_zone", packet.coordinate.utm_zone},
+				  {"utm_north_hemisphere", packet.coordinate.utm_north_hemisphere}}},
+				{"initial_platform_state",
+				 {{"platform_id", packet.initial_platform_state.platform_id},
+				  {"platform_name", packet.initial_platform_state.platform_name},
+				  {"position_m",
+				   {{"x", packet.initial_platform_state.position_x},
+					{"y", packet.initial_platform_state.position_y},
+					{"z", packet.initial_platform_state.position_z}}},
+				  {"velocity_mps",
+				   {{"x", packet.initial_platform_state.velocity_x},
+					{"y", packet.initial_platform_state.velocity_y},
+					{"z", packet.initial_platform_state.velocity_z}}},
+				  {"rotation_rad",
+				   {{"azimuth", packet.initial_platform_state.azimuth},
+					{"elevation", packet.initial_platform_state.elevation}}}}},
+				{"fmcw",
+				 {{"present", packet.fmcw.present},
+				  {"waveform_shape", packet.fmcw.waveform_shape},
+				  {"chirp_bandwidth_hz", packet.fmcw.chirp_bandwidth},
+				  {"chirp_duration_s", packet.fmcw.chirp_duration},
+				  {"chirp_period_s", packet.fmcw.chirp_period},
+				  {"chirp_rate_hz_per_s", packet.fmcw.chirp_rate},
+				  {"chirp_rate_signed_hz_per_s", packet.fmcw.chirp_rate_signed},
+				  {"sweep_direction", packet.fmcw.sweep_direction},
+				  {"start_frequency_offset_hz", packet.fmcw.start_frequency_offset},
+				  {"triangle_period_s", packet.fmcw.triangle_period},
+				  {"chirp_count", packet.fmcw.chirp_count},
+				  {"triangle_count", packet.fmcw.triangle_count},
+				  {"dechirp_mode", packet.fmcw.dechirp_mode},
+				  {"dechirp_reference_source", packet.fmcw.dechirp_reference_source},
+				  {"dechirp_reference_transmitter_id", packet.fmcw.dechirp_reference_transmitter_id},
+				  {"dechirp_reference_transmitter_name", packet.fmcw.dechirp_reference_transmitter_name},
+				  {"dechirp_reference_waveform_id", packet.fmcw.dechirp_reference_waveform_id},
+				  {"dechirp_reference_waveform_name", packet.fmcw.dechirp_reference_waveform_name}}}};
+		}
 	}
 
 	ByteWriter::ByteWriter(const std::size_t reserve_bytes)
@@ -94,18 +150,30 @@ namespace serial::vita49
 	void ByteWriter::writeF64(const RealType value)
 	{
 		static_assert(sizeof(RealType) == sizeof(std::uint64_t));
+		static_assert(std::numeric_limits<RealType>::is_iec559,
+					  "VITA F64 context serialization requires IEEE 754 binary64 RealType");
+		// VRT context doubles are serialized from their IEEE 754 bit pattern as a
+		// big-endian unsigned integer. This assumes the host uses a conventional
+		// IEEE representation for RealType.
 		const auto bits = std::bit_cast<std::uint64_t>(value);
 		writeU64(bits);
 	}
 
-	void ByteWriter::writeStringField(const std::string& value)
+	void ByteWriter::writeAsciiMetadata(const std::string_view value)
 	{
-		if (value.size() > std::numeric_limits<std::uint32_t>::max())
+		if (value.size() >= std::numeric_limits<std::uint32_t>::max())
 		{
-			throw std::length_error("VITA context string field too large");
+			throw std::length_error("VITA ASCII metadata field too large");
 		}
-		writeU32(static_cast<std::uint32_t>(value.size()));
+		for (const auto ch : value)
+		{
+			if (static_cast<unsigned char>(ch) > 0x7Fu)
+			{
+				throw std::invalid_argument("VITA ASCII metadata must contain ASCII bytes only");
+			}
+		}
 		_bytes.insert(_bytes.end(), value.begin(), value.end());
+		_bytes.push_back(0);
 		while (_bytes.size() % sizeof(std::uint32_t) != 0u)
 		{
 			_bytes.push_back(0);
@@ -206,11 +274,8 @@ namespace serial::vita49
 		payload.writeF64(packet.bandwidth);
 		payload.writeF64(packet.adc_fullscale);
 		payload.writeU64(packet.receiver_id);
-		payload.writeU32(static_cast<std::uint32_t>(packet.adc_bits));
-		payload.writeU32(packet.context_flags);
-		payload.writeStringField(packet.receiver_name);
-		payload.writeStringField(packet.simulation_name);
-		payload.writeStringField(packet.receiver_mode);
+		const auto metadata = makeContextMetadataJson(packet).dump(-1, ' ', true);
+		payload.writeAsciiMetadata(metadata);
 
 		const std::size_t byte_count = 4u + 4u + 8u + 4u + 8u + payload.bytes().size();
 		const auto packet_size_words = checkedWordCount(byte_count);

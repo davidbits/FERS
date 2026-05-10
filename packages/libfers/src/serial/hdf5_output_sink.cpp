@@ -7,6 +7,7 @@
 #include "serial/hdf5_output_sink.h"
 
 #include <algorithm>
+#include <cmath>
 #include <filesystem>
 #include <format>
 #include <highfive/highfive.hpp>
@@ -20,6 +21,7 @@
 #include <vector>
 
 #include "core/output_metadata.h"
+#include "core/parameters.h"
 #include "processing/finalizer_pipeline.h"
 #include "processing/signal_processor.h"
 #include "serial/hdf5_handler.h"
@@ -121,6 +123,14 @@ namespace serial
 				std::scoped_lock hdf5_lock(hdf5_global_mutex);
 				state.pulsed_file = std::make_unique<HighFive::File>(state.metadata.path, HighFive::File::Truncate);
 			}
+			else
+			{
+				const auto expected_samples = expectedStreamingSamples(state.descriptor.sample_rate);
+				if (expected_samples > 0u)
+				{
+					state.streaming_buffer.resize(expected_samples);
+				}
+			}
 			state.opened = true;
 			state.closed = false;
 		}
@@ -191,6 +201,16 @@ namespace serial
 		}
 
 		static bool isPulsed(const StreamState& state) { return state.descriptor.mode == "pulsed"; }
+
+		static std::size_t expectedStreamingSamples(const RealType sample_rate)
+		{
+			if (sample_rate <= 0.0)
+			{
+				return 0u;
+			}
+			const RealType duration = std::max<RealType>(0.0, params::endTime() - params::startTime());
+			return static_cast<std::size_t>(std::ceil(duration * sample_rate));
+		}
 
 		static std::string streamKey(const core::ReceiverStreamDescriptor& stream)
 		{

@@ -425,6 +425,125 @@ namespace processing
 			}
 			return "unknown";
 		}
+
+		[[nodiscard]] std::string coordinateFrameToken(const params::CoordinateFrame frame)
+		{
+			switch (frame)
+			{
+			case params::CoordinateFrame::ENU:
+				return "ENU";
+			case params::CoordinateFrame::UTM:
+				return "UTM";
+			case params::CoordinateFrame::ECEF:
+				return "ECEF";
+			}
+			return "ENU";
+		}
+
+		[[nodiscard]] core::ReceiverStreamDescriptor::CoordinateContext buildCoordinateContext()
+		{
+			return core::ReceiverStreamDescriptor::CoordinateContext{
+				.frame = coordinateFrameToken(params::coordinateFrame()),
+				.origin_latitude = params::originLatitude(),
+				.origin_longitude = params::originLongitude(),
+				.origin_altitude = params::originAltitude(),
+				.utm_zone = params::utmZone(),
+				.utm_north_hemisphere = params::utmNorthHemisphere()};
+		}
+
+		[[nodiscard]] core::ReceiverStreamDescriptor::PlatformState
+		buildInitialPlatformState(const radar::Receiver* receiver)
+		{
+			core::ReceiverStreamDescriptor::PlatformState state;
+			const auto* platform = receiver->getPlatform();
+			if (platform == nullptr)
+			{
+				return state;
+			}
+
+			const RealType t0 = params::startTime();
+			state.platform_id = platform->getId();
+			state.platform_name = platform->getName();
+			try
+			{
+				const auto position = platform->getPosition(t0);
+				state.position_x = position.x;
+				state.position_y = position.y;
+				state.position_z = position.z;
+			}
+			catch (...)
+			{
+			}
+			try
+			{
+				const auto velocity = platform->getMotionPath()->getVelocity(t0);
+				state.velocity_x = velocity.x;
+				state.velocity_y = velocity.y;
+				state.velocity_z = velocity.z;
+			}
+			catch (...)
+			{
+			}
+			try
+			{
+				const auto rotation = platform->getRotation(t0);
+				state.azimuth = rotation.azimuth;
+				state.elevation = rotation.elevation;
+			}
+			catch (...)
+			{
+			}
+			return state;
+		}
+
+		[[nodiscard]] const core::ActiveStreamingSource*
+		findFmcwContextSource(const radar::Receiver* receiver,
+							  const std::span<const core::ActiveStreamingSource> streaming_sources)
+		{
+			if (receiver->isDechirpEnabled() && !receiver->getDechirpSources().empty())
+			{
+				return &receiver->getDechirpSources().front();
+			}
+			const auto found = std::ranges::find_if(streaming_sources, [](const core::ActiveStreamingSource& source)
+													{ return source.is_fmcw; });
+			return found == streaming_sources.end() ? nullptr : &*found;
+		}
+
+		[[nodiscard]] core::ReceiverStreamDescriptor::FmcwContext
+		buildFmcwContext(const radar::Receiver* receiver,
+						 const std::span<const core::ActiveStreamingSource> streaming_sources)
+		{
+			core::ReceiverStreamDescriptor::FmcwContext context;
+			context.dechirp_mode = std::string(radar::dechirpModeToken(receiver->getDechirpMode()));
+			const auto& reference = receiver->getDechirpReference();
+			context.dechirp_reference_source = std::string(radar::dechirpReferenceSourceToken(reference.source));
+			context.dechirp_reference_transmitter_id = reference.transmitter_id;
+			context.dechirp_reference_transmitter_name = reference.transmitter_name;
+			context.dechirp_reference_waveform_id = reference.waveform_id;
+			context.dechirp_reference_waveform_name = reference.waveform_name;
+
+			const auto* source = findFmcwContextSource(receiver, streaming_sources);
+			if (source == nullptr)
+			{
+				return context;
+			}
+
+			const auto waveform = buildFmcwMetadata(*source);
+			context.present = true;
+			context.waveform_shape = waveform.waveform_shape;
+			context.chirp_bandwidth = waveform.chirp_bandwidth;
+			context.chirp_duration = waveform.chirp_duration;
+			context.chirp_period = waveform.chirp_period;
+			context.chirp_rate = waveform.chirp_rate;
+			context.chirp_rate_signed = waveform.chirp_rate_signed;
+			context.sweep_direction =
+				source->kind == core::StreamingWaveformKind::FmcwTriangle ? "up_down" : waveform.chirp_direction;
+			context.start_frequency_offset = waveform.start_frequency_offset;
+			context.triangle_period = waveform.triangle_period;
+			context.chirp_count = waveform.chirp_count;
+			context.triangle_count = waveform.triangle_count;
+			return context;
+		}
 	}
 
 	core::OutputFileMetadata buildStreamingOutputMetadata(
@@ -437,8 +556,9 @@ namespace processing
 									  dechirp_time_spans);
 	}
 
-	core::ReceiverStreamDescriptor buildReceiverStreamDescriptor(const radar::Receiver* receiver,
-																 const RealType sample_rate)
+	core::ReceiverStreamDescriptor
+	buildReceiverStreamDescriptor(const radar::Receiver* receiver, const RealType sample_rate,
+								  const std::span<const core::ActiveStreamingSource> streaming_sources)
 	{
 		core::ReceiverStreamDescriptor descriptor{.receiver_id = receiver->getId(),
 												  .receiver_name = receiver->getName(),
@@ -447,7 +567,10 @@ namespace processing
 												  .bandwidth = sample_rate > 0.0 ? sample_rate / 2.0 : 0.0,
 												  .dechirped = receiver->isDechirpEnabled(),
 												  .if_resampled = receiver->getFmcwIfResamplerPlan().has_value(),
-												  .adc_bits = params::adcBits()};
+												  .adc_bits = params::adcBits(),
+												  .coordinate = buildCoordinateContext(),
+												  .initial_platform_state = buildInitialPlatformState(receiver),
+												  .fmcw = buildFmcwContext(receiver, streaming_sources)};
 		if (const auto timing = receiver->getTiming(); timing)
 		{
 			descriptor.reference_frequency = timing->getFrequency();
@@ -461,7 +584,19 @@ namespace processing
 													   const std::uint64_t sample_start,
 													   std::shared_ptr<const core::OutputFileMetadata> file_metadata)
 	{
-		return core::ReceiverSampleBlock{.stream = buildReceiverStreamDescriptor(receiver, sample_rate),
+		return buildReceiverSampleBlock(receiver, first_sample_time, sample_rate, samples, sample_start,
+										std::span<const core::ActiveStreamingSource>{}, std::move(file_metadata));
+	}
+
+	core::ReceiverSampleBlock
+	buildReceiverSampleBlock(const radar::Receiver* receiver, const RealType first_sample_time,
+							 const RealType sample_rate, const std::span<const ComplexType> samples,
+							 const std::uint64_t sample_start,
+							 const std::span<const core::ActiveStreamingSource> streaming_sources,
+							 std::shared_ptr<const core::OutputFileMetadata> file_metadata)
+	{
+		return core::ReceiverSampleBlock{.stream =
+											 buildReceiverStreamDescriptor(receiver, sample_rate, streaming_sources),
 										 .first_sample_time = first_sample_time,
 										 .sample_rate = sample_rate,
 										 .samples = samples,

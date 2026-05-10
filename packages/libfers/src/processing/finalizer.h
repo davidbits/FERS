@@ -36,14 +36,22 @@ namespace core
 namespace processing
 {
 	/// Builds the receiver stream descriptor used by output sinks.
-	[[nodiscard]] core::ReceiverStreamDescriptor buildReceiverStreamDescriptor(const radar::Receiver* receiver,
-																			   RealType sample_rate);
+	[[nodiscard]] core::ReceiverStreamDescriptor
+	buildReceiverStreamDescriptor(const radar::Receiver* receiver, RealType sample_rate,
+								  std::span<const core::ActiveStreamingSource> streaming_sources = {});
 
 	/// Builds a non-owning output sample block over contiguous processed complex samples.
 	[[nodiscard]] core::ReceiverSampleBlock
 	buildReceiverSampleBlock(const radar::Receiver* receiver, RealType first_sample_time, RealType sample_rate,
 							 std::span<const ComplexType> samples, std::uint64_t sample_start,
 							 std::shared_ptr<const core::OutputFileMetadata> file_metadata = nullptr);
+
+	/// Builds a sample block with active streaming-source context for VITA Context packets.
+	[[nodiscard]] core::ReceiverSampleBlock
+	buildReceiverSampleBlock(const radar::Receiver* receiver, RealType first_sample_time, RealType sample_rate,
+							 std::span<const ComplexType> samples, std::uint64_t sample_start,
+							 std::span<const core::ActiveStreamingSource> streaming_sources,
+							 std::shared_ptr<const core::OutputFileMetadata> file_metadata);
 
 	/// Builds HDF5 file metadata for a streaming receiver result emitted through the output sink.
 	[[nodiscard]] core::OutputFileMetadata buildStreamingOutputMetadata(

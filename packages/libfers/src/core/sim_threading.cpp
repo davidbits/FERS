@@ -1119,14 +1119,14 @@ namespace core
 		processing::applyThermalNoiseAtSampleRate(processed, receiver->getNoiseTemperature(), receiver->getRngEngine(),
 												  sample_rate);
 
+		auto streaming_sources = collectStreamingSourcesForWindow(params::startTime(), params::endTime());
 		if (_streaming_output_stream_ids[receiver_index] == 0)
 		{
-			_streaming_output_stream_ids[receiver_index] =
-				_output_sink->registerStream(processing::buildReceiverStreamDescriptor(receiver.get(), sample_rate));
+			_streaming_output_stream_ids[receiver_index] = _output_sink->registerStream(
+				processing::buildReceiverStreamDescriptor(receiver.get(), sample_rate, streaming_sources));
 		}
 		if (!_streaming_output_file_metadata[receiver_index])
 		{
-			auto streaming_sources = collectStreamingSourcesForWindow(params::startTime(), params::endTime());
 			_streaming_output_file_metadata[receiver_index] =
 				std::make_shared<OutputFileMetadata>(processing::buildStreamingOutputMetadata(
 					receiver.get(), "", expectedStreamingOutputSamples(sample_rate), streaming_sources, sample_rate));
@@ -1138,9 +1138,9 @@ namespace core
 			_streaming_output_stream_open[receiver_index] = true;
 		}
 
-		const auto block =
-			processing::buildReceiverSampleBlock(receiver.get(), first_sample_time, sample_rate, processed,
-												 sample_start, _streaming_output_file_metadata[receiver_index]);
+		const auto block = processing::buildReceiverSampleBlock(receiver.get(), first_sample_time, sample_rate,
+																processed, sample_start, streaming_sources,
+																_streaming_output_file_metadata[receiver_index]);
 		_output_sink->submitBlock(block);
 		_streaming_output_sample_cursors[receiver_index] = sample_start + static_cast<std::uint64_t>(processed.size());
 	}

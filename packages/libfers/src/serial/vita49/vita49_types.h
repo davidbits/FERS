@@ -90,6 +90,7 @@ namespace serial::vita49
 		ContextFlagSampleLoss = 1u << 2u,
 		ContextFlagStreamOpen = 1u << 3u,
 		ContextFlagStreamClose = 1u << 4u,
+		ContextFlagFmcwMetadataPresent = 1u << 5u,
 	};
 
 	struct Timestamp
@@ -128,6 +129,9 @@ namespace serial::vita49
 		std::string receiver_name;
 		std::string simulation_name;
 		std::string receiver_mode;
+		core::ReceiverStreamDescriptor::CoordinateContext coordinate;
+		core::ReceiverStreamDescriptor::PlatformState initial_platform_state;
+		core::ReceiverStreamDescriptor::FmcwContext fmcw;
 	};
 
 	struct SerializedPacket
