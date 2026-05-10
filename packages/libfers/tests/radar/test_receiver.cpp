@@ -49,6 +49,20 @@ namespace
 			REQUIRE_THAT(actual[i].imag(), WithinAbs(expected[i].imag(), tolerance));
 		}
 	}
+
+	void appendCapturedIfOutput(std::vector<ComplexType>& timeline, const std::span<const ComplexType> samples,
+								const std::uint64_t sample_start)
+	{
+		const auto end = static_cast<std::size_t>(sample_start) + samples.size();
+		if (timeline.size() < end)
+		{
+			timeline.resize(end);
+		}
+		for (std::size_t i = 0; i < samples.size(); ++i)
+		{
+			timeline[static_cast<std::size_t>(sample_start) + i] += samples[i];
+		}
+	}
 }
 
 TEST_CASE("Receiver basic accessors and flags", "[radar][receiver]")
@@ -90,19 +104,13 @@ TEST_CASE("Receiver noise temperature guards and aggregation", "[radar][receiver
 	REQUIRE_THROWS_AS(rx.setNoiseTemperature(-1.0), std::runtime_error);
 }
 
-TEST_CASE("Receiver exposes RNG and mutable streaming data", "[radar][receiver]")
+TEST_CASE("Receiver exposes RNG", "[radar][receiver]")
 {
 	radar::Platform platform("RxPlatform");
 	radar::Receiver rx(&platform, "RxA", 99, radar::OperationMode::CW_MODE);
 
 	const auto first_sample = rx.getRngEngine()();
 	REQUIRE(first_sample != 0U);
-
-	rx.prepareStreamingData(2);
-	auto& mutable_data = rx.getMutableStreamingData();
-	mutable_data[0] = ComplexType(2.0, -1.0);
-	REQUIRE_THAT(rx.getStreamingData()[0].real(), WithinAbs(2.0, 1e-12));
-	REQUIRE_THAT(rx.getStreamingData()[0].imag(), WithinAbs(-1.0, 1e-12));
 }
 
 TEST_CASE("Receiver windows quantize to sampling rate", "[radar][receiver]")
@@ -154,24 +162,6 @@ TEST_CASE("Receiver inbox and interference log", "[radar][receiver]")
 	REQUIRE(rx.getPulsedInterferenceLog().size() == 1);
 }
 
-TEST_CASE("Receiver streaming data accumulation", "[radar][receiver]")
-{
-	radar::Platform platform("RxPlatform");
-	radar::Receiver rx(&platform, "RxA", 9, radar::OperationMode::CW_MODE);
-
-	rx.prepareStreamingData(3);
-	REQUIRE(rx.getStreamingData().size() == 3);
-
-	rx.setStreamingSample(1, ComplexType(1.0, 2.0));
-	rx.setStreamingSample(1, ComplexType(0.5, -1.0));
-
-	REQUIRE_THAT(rx.getStreamingData()[1].real(), WithinAbs(1.5, 1e-12));
-	REQUIRE_THAT(rx.getStreamingData()[1].imag(), WithinAbs(1.0, 1e-12));
-
-	rx.setStreamingSample(10, ComplexType(3.0, 3.0));
-	REQUIRE_THAT(rx.getStreamingData()[1].real(), WithinAbs(1.5, 1e-12));
-}
-
 TEST_CASE("Receiver IF resampling preserves absolute output positions across schedule gaps", "[radar][receiver][fmcw]")
 {
 	ParamGuard guard;
@@ -182,6 +172,9 @@ TEST_CASE("Receiver IF resampling preserves absolute output positions across sch
 	radar::Platform platform("RxPlatform");
 	radar::Receiver rx(&platform, "IfRx", 9, radar::OperationMode::FMCW_MODE);
 	rx.setDechirpMode(radar::Receiver::DechirpMode::Physical);
+	std::vector<ComplexType> samples;
+	rx.setFmcwIfOutputCallback([&samples](const std::span<const ComplexType> block, const std::uint64_t sample_start)
+							   { appendCapturedIfOutput(samples, block, sample_start); });
 
 	const fers_signal::FmcwIfResamplerRequest request{.input_sample_rate_hz = 10.0,
 													  .output_sample_rate_hz = 10.0,
@@ -199,8 +192,7 @@ TEST_CASE("Receiver IF resampling preserves absolute output positions across sch
 	rx.endFmcwIfResamplingSegment();
 	rx.flushFmcwIfResampling();
 
-	const auto& samples = rx.getStreamingData();
-	REQUIRE(samples.size() == 10);
+	REQUIRE(samples.size() >= 7u);
 	REQUIRE_THAT(samples[0].real(), WithinAbs(0.0, 1e-12));
 	REQUIRE_THAT(samples[1].real(), WithinAbs(0.0, 1e-12));
 	REQUIRE_THAT(samples[2].real(), WithinAbs(1.0, 1e-12));
@@ -208,11 +200,9 @@ TEST_CASE("Receiver IF resampling preserves absolute output positions across sch
 	REQUIRE_THAT(samples[4].real(), WithinAbs(0.0, 1e-12));
 	REQUIRE_THAT(samples[5].real(), WithinAbs(0.0, 1e-12));
 	REQUIRE_THAT(samples[6].real(), WithinAbs(3.0, 1e-12));
-	REQUIRE_THAT(samples[7].real(), WithinAbs(0.0, 1e-12));
 }
 
-TEST_CASE("Receiver IF live output reports absolute sample positions without growing the HDF5 buffer",
-		  "[radar][receiver][fmcw][vita49]")
+TEST_CASE("Receiver IF live output reports absolute sample positions", "[radar][receiver][fmcw][vita49]")
 {
 	ParamGuard guard;
 	params::setTime(0.0, 1.0);
@@ -248,7 +238,6 @@ TEST_CASE("Receiver IF live output reports absolute sample positions without gro
 	rx.endFmcwIfResamplingSegment();
 	rx.flushFmcwIfResampling();
 
-	REQUIRE(rx.getStreamingData().empty());
 	REQUIRE(sample_starts == std::vector<std::uint64_t>{2u, 6u});
 	REQUIRE(emitted_blocks.size() == 2u);
 	REQUIRE_THAT(emitted_blocks[0][0].real(), WithinAbs(1.0, 1e-12));
@@ -279,19 +268,27 @@ TEST_CASE("Receiver IF resampling aligns off-grid segments to the global IF grid
 	radar::Platform platform("RxPlatform");
 	radar::Receiver reference(&platform, "ReferenceIfRx", 10, radar::OperationMode::FMCW_MODE);
 	reference.setDechirpMode(radar::Receiver::DechirpMode::Physical);
+	std::vector<ComplexType> reference_samples;
+	reference.setFmcwIfOutputCallback(
+		[&reference_samples](const std::span<const ComplexType> block, const std::uint64_t sample_start)
+		{ appendCapturedIfOutput(reference_samples, block, sample_start); });
 	reference.initializeFmcwIfResampling(plan);
 	reference.consumeFmcwIfBlock(full_timeline, 0.0);
 	reference.flushFmcwIfResampling();
 
 	radar::Receiver scheduled(&platform, "ScheduledIfRx", 11, radar::OperationMode::FMCW_MODE);
 	scheduled.setDechirpMode(radar::Receiver::DechirpMode::Physical);
+	std::vector<ComplexType> scheduled_samples;
+	scheduled.setFmcwIfOutputCallback(
+		[&scheduled_samples](const std::span<const ComplexType> block, const std::uint64_t sample_start)
+		{ appendCapturedIfOutput(scheduled_samples, block, sample_start); });
 	scheduled.initializeFmcwIfResampling(plan);
 	scheduled.beginFmcwIfResamplingSegment(0.13);
 	scheduled.consumeFmcwIfBlock(std::span<const ComplexType>(full_timeline.data() + 13, 42), 0.13);
 	scheduled.endFmcwIfResamplingSegment();
 	scheduled.flushFmcwIfResampling();
 
-	requireComplexVectorsNear(scheduled.getStreamingData(), reference.getStreamingData(), 1e-10);
+	requireComplexVectorsNear(scheduled_samples, reference_samples, 1e-10);
 }
 
 TEST_CASE("Receiver IF resampling flushes filtered tail samples after scheduled segment ends",
@@ -319,19 +316,27 @@ TEST_CASE("Receiver IF resampling flushes filtered tail samples after scheduled 
 	radar::Platform platform("RxPlatform");
 	radar::Receiver reference(&platform, "ReferenceTailIfRx", 12, radar::OperationMode::FMCW_MODE);
 	reference.setDechirpMode(radar::Receiver::DechirpMode::Physical);
+	std::vector<ComplexType> reference_samples;
+	reference.setFmcwIfOutputCallback(
+		[&reference_samples](const std::span<const ComplexType> block, const std::uint64_t sample_start)
+		{ appendCapturedIfOutput(reference_samples, block, sample_start); });
 	reference.initializeFmcwIfResampling(plan);
 	reference.consumeFmcwIfBlock(full_timeline, 0.0);
 	reference.flushFmcwIfResampling();
 
 	radar::Receiver scheduled(&platform, "ScheduledTailIfRx", 13, radar::OperationMode::FMCW_MODE);
 	scheduled.setDechirpMode(radar::Receiver::DechirpMode::Physical);
+	std::vector<ComplexType> scheduled_samples;
+	scheduled.setFmcwIfOutputCallback(
+		[&scheduled_samples](const std::span<const ComplexType> block, const std::uint64_t sample_start)
+		{ appendCapturedIfOutput(scheduled_samples, block, sample_start); });
 	scheduled.initializeFmcwIfResampling(plan);
 	scheduled.beginFmcwIfResamplingSegment(0.0);
 	scheduled.consumeFmcwIfBlock(std::span<const ComplexType>(full_timeline.data(), 50), 0.0);
 	scheduled.endFmcwIfResamplingSegment();
 	scheduled.flushFmcwIfResampling();
 
-	requireComplexVectorsNear(scheduled.getStreamingData(), reference.getStreamingData(), 1e-10);
+	requireComplexVectorsNear(scheduled_samples, reference_samples, 1e-10);
 }
 
 TEST_CASE("Receiver IF resampling skips long inactive gaps without zero-sample work", "[radar][receiver][fmcw]")
@@ -351,6 +356,9 @@ TEST_CASE("Receiver IF resampling skips long inactive gaps without zero-sample w
 	radar::Platform platform("RxPlatform");
 	radar::Receiver rx(&platform, "SparseIfRx", 14, radar::OperationMode::FMCW_MODE);
 	rx.setDechirpMode(radar::Receiver::DechirpMode::Physical);
+	std::vector<ComplexType> samples;
+	rx.setFmcwIfOutputCallback([&samples](const std::span<const ComplexType> block, const std::uint64_t sample_start)
+							   { appendCapturedIfOutput(samples, block, sample_start); });
 	rx.initializeFmcwIfResampling(plan);
 
 	std::vector<ComplexType> active_block(10000, ComplexType{1.0, 0.0});
@@ -359,8 +367,7 @@ TEST_CASE("Receiver IF resampling skips long inactive gaps without zero-sample w
 	rx.endFmcwIfResamplingSegment();
 	rx.flushFmcwIfResampling();
 
-	const auto& samples = rx.getStreamingData();
-	REQUIRE(samples.size() == 100000);
+	REQUIRE(samples.size() > 50030u);
 	REQUIRE_THAT(std::abs(samples[49900]), WithinAbs(0.0, 1e-12));
 
 	RealType local_peak = 0.0;

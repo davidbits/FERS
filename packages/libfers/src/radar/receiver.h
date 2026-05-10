@@ -358,34 +358,6 @@ namespace radar
 		void setNoiseTemperature(RealType temp);
 
 		/**
-		 * @brief Prepares the internal storage for streaming IQ data.
-		 * @param numSamples The total number of samples to allocate memory for.
-		 */
-		void prepareStreamingData(size_t numSamples);
-
-		/// Releases the complete-run streaming I/Q buffer when live output does not need it.
-		void releaseStreamingData();
-
-		/**
-		 * @brief Sets a single IQ sample at a specific index for streaming simulation.
-		 * @param index The index at which to store the sample.
-		 * @param sample The complex IQ sample.
-		 */
-		void setStreamingSample(size_t index, ComplexType sample);
-
-		/**
-		 * @brief Retrieves the collected streaming IQ data.
-		 * @return A constant reference to the vector of complex IQ samples.
-		 */
-		[[nodiscard]] const std::vector<ComplexType>& getStreamingData() const { return _streaming_iq_data; }
-
-		/**
-		 * @brief Retrieves the collected streaming IQ data for modification.
-		 * @return A mutable reference to the vector of complex IQ samples.
-		 */
-		[[nodiscard]] std::vector<ComplexType>& getMutableStreamingData() { return _streaming_iq_data; }
-
-		/**
 		 * @brief Retrieves the log of pulsed interferences for streaming modes.
 		 * @return A const reference to the vector of interference responses.
 		 */
@@ -447,8 +419,6 @@ namespace radar
 		std::vector<std::unique_ptr<serial::Response>>
 			_pulsed_interference_log; ///< Log of pulsed signals that interfere with CW reception.
 		std::mutex _interference_log_mutex; ///< Mutex guarding the pulsed interference log.
-		std::vector<ComplexType> _streaming_iq_data; ///< Buffer for raw, simulation-long I/Q data.
-		std::mutex _cw_mutex; ///< Mutex for handling CW data.
 		DechirpMode _dechirp_mode{DechirpMode::None}; ///< FMCW dechirp mode.
 		DechirpReference _dechirp_reference{}; ///< Configured/resolved LO reference.
 		std::vector<core::ActiveStreamingSource> _dechirp_sources; ///< Resolved LO sources.

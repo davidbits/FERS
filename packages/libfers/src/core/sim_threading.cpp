@@ -62,6 +62,12 @@ namespace core
 		constexpr std::size_t fmcw_if_block_size = 1024;
 		constexpr std::size_t streaming_output_block_size = 4096;
 
+		[[nodiscard]] std::size_t expectedStreamingOutputSamples(const RealType sample_rate)
+		{
+			return static_cast<std::size_t>(
+				std::ceil(std::max<RealType>(0.0, params::endTime() - params::startTime()) * sample_rate));
+		}
+
 		[[nodiscard]] Vita49StreamMetadata streamStatsToMetadata(const ReceiverStreamStats& stats)
 		{
 			return Vita49StreamMetadata{.receiver_id = stats.receiver_id,
@@ -589,6 +595,7 @@ namespace core
 		_streaming_output_sample_cursors.resize(_world->getReceivers().size(), 0);
 		_streaming_output_stream_ids.resize(_world->getReceivers().size(), 0);
 		_streaming_output_stream_open.resize(_world->getReceivers().size(), false);
+		_streaming_output_file_metadata.resize(_world->getReceivers().size());
 		for (auto& block : _streaming_output_block_buffers)
 		{
 			block.reserve(streaming_output_block_size);
@@ -608,16 +615,6 @@ namespace core
 		}
 
 		initializeFmcwIfResamplers();
-		if (_output_sink != nullptr)
-		{
-			for (const auto& receiver_ptr : _world->getReceivers())
-			{
-				if (isStreamingReceiver(receiver_ptr.get()))
-				{
-					receiver_ptr->releaseStreamingData();
-				}
-			}
-		}
 
 		logSimulationMemoryProjection(*_world);
 
@@ -954,10 +951,6 @@ namespace core
 						{
 							appendStreamingOutputSample(receiver_index, sample_index, t_step, sample);
 						}
-						else
-						{
-							receiver_ptr->setStreamingSample(sample_index, sample);
-						}
 					}
 				}
 				if (_output_sink != nullptr && t_step >= _next_context_heartbeat_time)
@@ -1076,6 +1069,13 @@ namespace core
 			_streaming_output_stream_ids[receiver_index] =
 				_output_sink->registerStream(processing::buildReceiverStreamDescriptor(receiver.get(), sample_rate));
 		}
+		if (!_streaming_output_file_metadata[receiver_index])
+		{
+			auto streaming_sources = collectStreamingSourcesForWindow(params::startTime(), params::endTime());
+			_streaming_output_file_metadata[receiver_index] =
+				std::make_shared<OutputFileMetadata>(processing::buildStreamingOutputMetadata(
+					receiver.get(), "", expectedStreamingOutputSamples(sample_rate), streaming_sources, sample_rate));
+		}
 		const auto stream_id = _streaming_output_stream_ids[receiver_index];
 		if (!_streaming_output_stream_open[receiver_index])
 		{
@@ -1083,8 +1083,9 @@ namespace core
 			_streaming_output_stream_open[receiver_index] = true;
 		}
 
-		const auto block = processing::buildReceiverSampleBlock(receiver.get(), first_sample_time, sample_rate,
-																processed, sample_start);
+		const auto block =
+			processing::buildReceiverSampleBlock(receiver.get(), first_sample_time, sample_rate, processed,
+												 sample_start, _streaming_output_file_metadata[receiver_index]);
 		_output_sink->submitBlock(block);
 		_streaming_output_sample_cursors[receiver_index] = sample_start + static_cast<std::uint64_t>(processed.size());
 	}
@@ -1686,7 +1687,6 @@ namespace core
 						_output_sink->closeStream(_streaming_output_stream_ids[receiver_index]);
 						_streaming_output_stream_open[receiver_index] = false;
 					}
-					receiver_ptr->releaseStreamingData();
 				}
 			}
 			else if (receiver_ptr->getMode() == OperationMode::PULSED_MODE)

@@ -121,7 +121,7 @@ TEST_CASE("JSON: FMCW waveform emits large-buffer warning", "[serial][json]")
 
 	auto wf = serial::parse_waveform_from_json(wf_json);
 	REQUIRE(wf != nullptr);
-	REQUIRE_THAT(capture.str(), ContainsSubstring("GiB of FMCW streaming IQ data"));
+	REQUIRE_THAT(capture.str(), ContainsSubstring("GiB of FMCW streaming output"));
 }
 
 TEST_CASE("JSON: FMCW linear chirp direction round trips", "[serial][json][fmcw]")

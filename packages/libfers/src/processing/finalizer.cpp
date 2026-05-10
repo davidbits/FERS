@@ -168,23 +168,6 @@ namespace processing
 		/// Half-open time interval in simulation seconds.
 		using TimeSpan = std::pair<RealType, RealType>;
 
-		/// Converts a time interval to a half-open sample span at a specific output rate.
-		std::optional<pipeline::SampleSpan> timeSpanToSampleSpan(const TimeSpan& span, const std::size_t total_samples,
-																 const RealType sample_rate)
-		{
-			const auto start_sample = static_cast<std::size_t>(std::min<RealType>(
-				static_cast<RealType>(total_samples),
-				std::max<RealType>(0.0, std::ceil((span.first - params::startTime()) * sample_rate))));
-			const auto end_sample = static_cast<std::size_t>(std::min<RealType>(
-				static_cast<RealType>(total_samples),
-				std::max<RealType>(0.0, std::ceil((span.second - params::startTime()) * sample_rate))));
-			if (start_sample >= end_sample)
-			{
-				return std::nullopt;
-			}
-			return pipeline::SampleSpan{.start = start_sample, .end_exclusive = end_sample};
-		}
-
 		/// Merges overlapping or adjacent time spans.
 		void normalizeTimeSpans(std::vector<TimeSpan>& spans)
 		{
@@ -289,63 +272,6 @@ namespace processing
 			}
 			normalizeTimeSpans(spans);
 			return spans;
-		}
-
-		/// Converts time spans to sample spans.
-		std::vector<pipeline::SampleSpan> sampleSpansFromTimeSpans(const std::vector<TimeSpan>& spans,
-																   const std::size_t total_samples,
-																   const RealType sample_rate)
-		{
-			std::vector<pipeline::SampleSpan> sample_spans;
-			for (const auto& span : spans)
-			{
-				if (const auto sample_span = timeSpanToSampleSpan(span, total_samples, sample_rate))
-				{
-					if (!sample_spans.empty() && sample_spans.back().end_exclusive >= sample_span->start)
-					{
-						sample_spans.back().end_exclusive =
-							std::max(sample_spans.back().end_exclusive, sample_span->end_exclusive);
-					}
-					else
-					{
-						sample_spans.push_back(*sample_span);
-					}
-				}
-			}
-			return sample_spans;
-		}
-
-		/// Applies thermal noise only inside selected spans.
-		void applyThermalNoiseToSpans(std::vector<ComplexType>& iq_buffer, const RealType noise_temperature,
-									  std::mt19937& rng_engine, std::span<const pipeline::SampleSpan> spans)
-		{
-			for (const auto& span : spans)
-			{
-				if (span.start >= span.end_exclusive || span.start >= iq_buffer.size())
-				{
-					continue;
-				}
-				const auto end = std::min(span.end_exclusive, iq_buffer.size());
-				applyThermalNoise(std::span(iq_buffer).subspan(span.start, end - span.start), noise_temperature,
-								  rng_engine);
-			}
-		}
-
-		/// Applies IF-rate thermal noise only inside selected spans.
-		void applyThermalNoiseToSpansAtSampleRate(std::vector<ComplexType>& iq_buffer, const RealType noise_temperature,
-												  std::mt19937& rng_engine, std::span<const pipeline::SampleSpan> spans,
-												  const RealType sample_rate_hz)
-		{
-			for (const auto& span : spans)
-			{
-				if (span.start >= span.end_exclusive || span.start >= iq_buffer.size())
-				{
-					continue;
-				}
-				const auto end = std::min(span.end_exclusive, iq_buffer.size());
-				applyThermalNoiseAtSampleRate(std::span(iq_buffer).subspan(span.start, end - span.start),
-											  noise_temperature, rng_engine, sample_rate_hz);
-			}
 		}
 
 		/// Builds output metadata for a streaming receiver result file.
@@ -485,16 +411,6 @@ namespace processing
 			return metadata;
 		}
 
-		/// Returns the UI-facing finalization label for a streaming receiver.
-		std::string streamingFinalizerLabel(const radar::Receiver* receiver)
-		{
-			if (receiver->getMode() == radar::OperationMode::FMCW_MODE)
-			{
-				return "FMCW";
-			}
-			return "CW";
-		}
-
 		/// Converts a receiver mode to the stable sink descriptor token.
 		[[nodiscard]] std::string receiverModeToken(const radar::Receiver* receiver)
 		{
@@ -509,6 +425,16 @@ namespace processing
 			}
 			return "unknown";
 		}
+	}
+
+	core::OutputFileMetadata buildStreamingOutputMetadata(
+		const radar::Receiver* receiver, const std::string& output_path, const std::size_t total_samples,
+		const std::vector<core::ActiveStreamingSource>& streaming_sources, const RealType output_sample_rate)
+	{
+		const auto dechirp_time_spans =
+			receiver->isDechirpEnabled() ? dechirpActiveTimeSpans(receiver) : std::vector<TimeSpan>{};
+		return buildStreamingMetadata(receiver, output_path, total_samples, streaming_sources, output_sample_rate,
+									  dechirp_time_spans);
 	}
 
 	core::ReceiverStreamDescriptor buildReceiverStreamDescriptor(const radar::Receiver* receiver,
@@ -652,118 +578,6 @@ namespace processing
 			reporter->report(std::format("Finished Exporting {}", receiver->getName()), 100, 100);
 		}
 		LOG(logging::Level::INFO, "Finalizer thread for receiver '{}' finished.", receiver->getName());
-	}
-
-	void finalizeStreamingReceiver(radar::Receiver* receiver, pool::ThreadPool* /*pool*/,
-								   std::shared_ptr<core::ProgressReporter> reporter, const std::string& output_dir,
-								   std::shared_ptr<core::OutputMetadataCollector> metadata_collector,
-								   std::vector<core::ActiveStreamingSource> streaming_sources,
-								   core::ReceiverOutputSink* output_sink)
-	{
-		(void)output_dir;
-		(void)metadata_collector;
-		LOG(logging::Level::INFO, "Finalization task started for streaming receiver '{}'.", receiver->getName());
-
-		receiver->flushFmcwIfResampling();
-		auto& iq_buffer = receiver->getMutableStreamingData();
-		if (iq_buffer.empty())
-		{
-			LOG(logging::Level::INFO, "No streaming data to finalize for receiver '{}'.", receiver->getName());
-			return;
-		}
-
-		if (output_sink == nullptr)
-		{
-			throw std::invalid_argument("finalizeStreamingReceiver requires a receiver output sink");
-		}
-
-		if (reporter)
-		{
-			reporter->report(
-				std::format("Finalizing {} Receiver {}", streamingFinalizerLabel(receiver), receiver->getName()), 0,
-				100);
-		}
-
-		const bool dechirped = receiver->isDechirpEnabled();
-		const auto& if_plan = receiver->getFmcwIfResamplerPlan();
-		const bool if_decimated = dechirped && if_plan.has_value();
-		const RealType output_sample_rate = if_decimated
-			? if_plan->actual_output_sample_rate_hz
-			: (dechirped ? params::rate() * static_cast<RealType>(params::oversampleRatio()) : params::rate());
-		const auto expected_samples = static_cast<std::size_t>(
-			std::ceil(std::max<RealType>(0.0, params::endTime() - params::startTime()) * output_sample_rate));
-		if (if_decimated && iq_buffer.size() > expected_samples)
-		{
-			iq_buffer.resize(expected_samples);
-		}
-		const auto dechirp_time_spans = dechirped ? dechirpActiveTimeSpans(receiver) : std::vector<TimeSpan>{};
-		const auto dechirp_sample_spans = dechirped
-			? sampleSpansFromTimeSpans(dechirp_time_spans, iq_buffer.size(), output_sample_rate)
-			: std::vector<pipeline::SampleSpan>{};
-
-		if (reporter)
-		{
-			reporter->report(std::format("Rendering Interference for {}", receiver->getName()), 25, 100);
-		}
-		if (dechirped)
-		{
-			if (!if_decimated)
-			{
-				pipeline::applyPulsedInterference(iq_buffer, receiver->getPulsedInterferenceLog(), dechirp_sample_spans,
-												  output_sample_rate);
-			}
-		}
-		else
-		{
-			pipeline::applyPulsedInterference(iq_buffer, receiver->getPulsedInterferenceLog());
-		}
-
-		if (reporter)
-		{
-			reporter->report(std::format("Applying Noise for {}", receiver->getName()), 50, 100);
-		}
-		if (dechirped)
-		{
-			if (if_decimated)
-			{
-				applyThermalNoiseToSpansAtSampleRate(iq_buffer, receiver->getNoiseTemperature(),
-													 receiver->getRngEngine(), dechirp_sample_spans,
-													 output_sample_rate);
-			}
-			else
-			{
-				applyThermalNoiseToSpans(iq_buffer, receiver->getNoiseTemperature(), receiver->getRngEngine(),
-										 dechirp_sample_spans);
-			}
-		}
-		else
-		{
-			applyThermalNoise(iq_buffer, receiver->getNoiseTemperature(), receiver->getRngEngine());
-		}
-
-		if (!dechirped)
-		{
-			pipeline::applyDownsampling(iq_buffer);
-		}
-
-		if (reporter)
-		{
-			reporter->report(std::format("Submitting Output for {}", receiver->getName()), 75, 100);
-		}
-
-		auto file_metadata = std::make_shared<core::OutputFileMetadata>(buildStreamingMetadata(
-			receiver, "", iq_buffer.size(), streaming_sources, output_sample_rate, dechirp_time_spans));
-		const auto stream_id = output_sink->registerStream(buildReceiverStreamDescriptor(receiver, output_sample_rate));
-		output_sink->openStream(stream_id, params::startTime());
-		const auto block =
-			buildReceiverSampleBlock(receiver, params::startTime(), output_sample_rate, iq_buffer, 0, file_metadata);
-		output_sink->submitBlock(block);
-		output_sink->closeStream(stream_id);
-
-		if (reporter)
-		{
-			reporter->report(std::format("Finalized {}", receiver->getName()), 100, 100);
-		}
 	}
 
 }

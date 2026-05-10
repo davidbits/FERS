@@ -11,6 +11,7 @@
 
 #pragma once
 
+#include <cstddef>
 #include <memory>
 #include <span>
 #include <string>
@@ -23,11 +24,6 @@ namespace radar
 {
 	class Receiver;
 	class Target;
-}
-
-namespace pool
-{
-	class ThreadPool;
 }
 
 namespace core
@@ -49,6 +45,11 @@ namespace processing
 							 std::span<const ComplexType> samples, std::uint64_t sample_start,
 							 std::shared_ptr<const core::OutputFileMetadata> file_metadata = nullptr);
 
+	/// Builds HDF5 file metadata for a streaming receiver result emitted through the output sink.
+	[[nodiscard]] core::OutputFileMetadata buildStreamingOutputMetadata(
+		const radar::Receiver* receiver, const std::string& output_path, std::size_t total_samples,
+		const std::vector<core::ActiveStreamingSource>& streaming_sources, RealType output_sample_rate);
+
 	/**
 	 * @brief The main function for a dedicated pulsed-mode receiver finalizer thread.
 	 *
@@ -66,21 +67,4 @@ namespace processing
 							std::shared_ptr<core::OutputMetadataCollector> metadata_collector = nullptr,
 							core::ReceiverOutputSink* output_sink = nullptr);
 
-	/**
-	 * @brief The finalization task for a streaming-mode receiver.
-	 *
-	 * This function is submitted to the main thread pool when a streaming receiver
-	 * finishes its operation. It processes the entire collected I/Q buffer,
-	 * applies interference and noise, and writes the final data to a file.
-	 *
-	 * @param receiver A pointer to the streaming-mode receiver to finalize.
-	 * @param pool A pointer to the main thread pool for parallelizing sub-tasks.
-	 * @param reporter Shared pointer to the progress reporter for status updates.
-	 * @param output_dir Output directory for the simulation files.
-	 */
-	void finalizeStreamingReceiver(radar::Receiver* receiver, pool::ThreadPool* pool,
-								   std::shared_ptr<core::ProgressReporter> reporter, const std::string& output_dir,
-								   std::shared_ptr<core::OutputMetadataCollector> metadata_collector = nullptr,
-								   std::vector<core::ActiveStreamingSource> streaming_sources = {},
-								   core::ReceiverOutputSink* output_sink = nullptr);
 }

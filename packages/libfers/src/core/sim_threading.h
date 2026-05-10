@@ -248,7 +248,7 @@ namespace core
 		void applyPulsedInterferenceToStreamingBlock(std::size_t receiver_index, std::span<ComplexType> block,
 													 RealType block_start_time, RealType sample_rate, bool dechirp_mix);
 
-		/// Emits summary logs for streaming receiver buffers.
+		/// Emits summary logs for streaming receiver configuration.
 		void logStreamingSummaries() const;
 
 		/**
@@ -304,8 +304,10 @@ namespace core
 		std::vector<RealType> _streaming_output_block_start_times; ///< Start time for pending live output blocks.
 		std::vector<std::uint64_t> _streaming_output_block_start_indices; ///< High-rate sample index for each block.
 		std::vector<std::uint64_t> _streaming_output_sample_cursors; ///< Output sample cursor per receiver.
-		std::vector<std::uint32_t> _streaming_output_stream_ids; ///< Registered VRT stream IDs for live receivers.
+		std::vector<std::uint32_t> _streaming_output_stream_ids; ///< Registered sink stream IDs for live receivers.
 		std::vector<bool> _streaming_output_stream_open; ///< Live receiver stream lifecycle state.
+		std::vector<std::shared_ptr<const OutputFileMetadata>>
+			_streaming_output_file_metadata; ///< Per-receiver metadata attached to sink blocks.
 		RealType _internal_stop_time = 0.0; ///< Physics stop time including IF over-render margin.
 	};
 

@@ -388,7 +388,7 @@ TEST_CASE("parseWaveform warns for large FMCW streaming allocation", "[serial][x
 
 	serial::xml_parser_utils::parseWaveform(doc.getRootElement(), ctx);
 	REQUIRE(world.getWaveforms().size() == 1);
-	REQUIRE_THAT(capture.str(), ContainsSubstring("GiB of FMCW streaming IQ data"));
+	REQUIRE_THAT(capture.str(), ContainsSubstring("GiB of FMCW streaming output"));
 }
 
 TEST_CASE("parseWaveform validates FMCW chirp schema constraints", "[serial][xml_parser_utils][fmcw]")

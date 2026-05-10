@@ -219,15 +219,7 @@ namespace radar
 
 	void Receiver::initializeFmcwIfResampling(fers_signal::FmcwIfResamplerPlan plan)
 	{
-		releaseStreamingData();
 		_fmcw_if_plan = std::move(plan);
-		if (!_fmcw_if_output_callback)
-		{
-			const auto expected_samples =
-				static_cast<std::size_t>(std::ceil(std::max<RealType>(0.0, params::endTime() - params::startTime()) *
-												   _fmcw_if_plan->actual_output_sample_rate_hz));
-			_streaming_iq_data.reserve(expected_samples);
-		}
 		_fmcw_if_samples_to_discard = _fmcw_if_plan->warmup_discard_samples;
 		_fmcw_if_sink = std::make_unique<fers_signal::FmcwIfResamplingSink>(*_fmcw_if_plan);
 		_fmcw_if_input_cursor = 0;
@@ -270,10 +262,6 @@ namespace radar
 	void Receiver::setFmcwIfOutputCallback(FmcwIfOutputCallback callback)
 	{
 		_fmcw_if_output_callback = std::move(callback);
-		if (_fmcw_if_output_callback)
-		{
-			releaseStreamingData();
-		}
 	}
 
 	void Receiver::appendFmcwIfOutput(std::vector<ComplexType> emitted)
@@ -293,21 +281,6 @@ namespace radar
 		{
 			_fmcw_if_output_callback(std::span<const ComplexType>(emitted.data(), emitted.size()), output_start);
 		}
-		else
-		{
-			if (_streaming_iq_data.size() < _fmcw_if_output_cursor)
-			{
-				_streaming_iq_data.resize(_fmcw_if_output_cursor);
-			}
-			if (_streaming_iq_data.size() < _fmcw_if_output_cursor + emitted.size())
-			{
-				_streaming_iq_data.resize(_fmcw_if_output_cursor + emitted.size());
-			}
-			for (std::size_t i = 0; i < emitted.size(); ++i)
-			{
-				_streaming_iq_data[_fmcw_if_output_cursor + i] += emitted[i];
-			}
-		}
 		_fmcw_if_output_cursor += emitted.size();
 	}
 
@@ -322,10 +295,6 @@ namespace radar
 		if (sample_count == 0)
 		{
 			return;
-		}
-		if (!_fmcw_if_output_callback && _streaming_iq_data.size() < _fmcw_if_output_cursor + sample_count)
-		{
-			_streaming_iq_data.resize(_fmcw_if_output_cursor + sample_count);
 		}
 		_fmcw_if_output_cursor += sample_count;
 	}
@@ -353,21 +322,6 @@ namespace radar
 			consumeFmcwIfZerosUntil(ceilSampleIndexAtOrAfter(flush_until_time, _fmcw_if_plan->input_sample_rate_hz));
 			auto emitted = _fmcw_if_sink->finish();
 			appendFmcwIfOutput(std::move(emitted));
-
-			const auto expected_samples =
-				static_cast<std::size_t>(std::ceil(std::max<RealType>(0.0, params::endTime() - params::startTime()) *
-												   _fmcw_if_plan->actual_output_sample_rate_hz));
-			if (!_fmcw_if_output_callback)
-			{
-				if (_streaming_iq_data.size() > expected_samples)
-				{
-					_streaming_iq_data.resize(expected_samples);
-				}
-				else if (_streaming_iq_data.size() < expected_samples)
-				{
-					_streaming_iq_data.resize(expected_samples);
-				}
-			}
 		}
 		_fmcw_if_sink.reset();
 	}
@@ -419,33 +373,6 @@ namespace radar
 			throw std::logic_error("Receiver must be associated with timing source");
 		}
 		return stime;
-	}
-
-	void Receiver::prepareStreamingData(const size_t numSamples)
-	{
-		std::scoped_lock lock(_cw_mutex);
-		if (numSamples == 0)
-		{
-			_streaming_iq_data.clear();
-			_streaming_iq_data.shrink_to_fit();
-			return;
-		}
-		_streaming_iq_data.resize(numSamples);
-	}
-
-	void Receiver::releaseStreamingData()
-	{
-		std::scoped_lock lock(_cw_mutex);
-		_streaming_iq_data.clear();
-		_streaming_iq_data.shrink_to_fit();
-	}
-
-	void Receiver::setStreamingSample(const size_t index, const ComplexType sample)
-	{
-		if (index < _streaming_iq_data.size())
-		{
-			_streaming_iq_data[index] += sample;
-		}
 	}
 
 	void Receiver::setSchedule(std::vector<SchedulePeriod> schedule) { _schedule = std::move(schedule); }

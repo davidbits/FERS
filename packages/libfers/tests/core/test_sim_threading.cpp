@@ -27,6 +27,7 @@
 #include "radar/receiver.h"
 #include "radar/target.h"
 #include "radar/transmitter.h"
+#include "serial/response.h"
 #include "signal/radar_signal.h"
 #include "simulation/channel_model.h"
 #include "timing/prototype_timing.h"
@@ -100,6 +101,72 @@ namespace
 		std::vector<RealType> heartbeat_times;
 		std::vector<std::vector<ComplexType>> blocks;
 	};
+
+	ComplexType sampleAt(const RecordingOutputSink& sink, const std::uint64_t sample_index)
+	{
+		for (std::size_t block_index = 0; block_index < sink.blocks.size(); ++block_index)
+		{
+			const auto start = sink.sample_starts[block_index];
+			const auto& block = sink.blocks[block_index];
+			const auto end = start + static_cast<std::uint64_t>(block.size());
+			if (sample_index >= start && sample_index < end)
+			{
+				return block[static_cast<std::size_t>(sample_index - start)];
+			}
+		}
+		return {};
+	}
+
+	std::vector<ComplexType> outputTimeline(const RecordingOutputSink& sink)
+	{
+		std::vector<ComplexType> timeline;
+		for (std::size_t block_index = 0; block_index < sink.blocks.size(); ++block_index)
+		{
+			const auto start = static_cast<std::size_t>(sink.sample_starts[block_index]);
+			const auto& block = sink.blocks[block_index];
+			if (timeline.size() < start + block.size())
+			{
+				timeline.resize(start + block.size());
+			}
+			for (std::size_t i = 0; i < block.size(); ++i)
+			{
+				timeline[start + i] += block[i];
+			}
+		}
+		return timeline;
+	}
+
+	struct FixedSignal final : public fers_signal::Signal
+	{
+		std::vector<ComplexType> data;
+
+		std::vector<ComplexType> render(const std::vector<interp::InterpPoint>&, unsigned& size,
+										RealType) const override
+		{
+			size = static_cast<unsigned>(data.size());
+			return data;
+		}
+	};
+
+	std::unique_ptr<serial::Response>
+	makeFixedResponse(const radar::Transmitter* transmitter,
+					  std::vector<std::unique_ptr<fers_signal::RadarSignal>>& wave_store,
+					  const std::vector<ComplexType>& samples, const RealType sample_rate, const RealType start_time)
+	{
+		auto signal = std::make_unique<FixedSignal>();
+		signal->data = samples;
+		signal->load(samples, static_cast<unsigned>(samples.size()), sample_rate);
+
+		auto wave = std::make_unique<fers_signal::RadarSignal>(
+			"fixed_wave", 1.0, 1.0e9, static_cast<RealType>(samples.size()) / sample_rate, std::move(signal));
+		const auto* wave_ptr = wave.get();
+		wave_store.push_back(std::move(wave));
+
+		auto response = std::make_unique<serial::Response>(wave_ptr, transmitter);
+		response->addInterpPoint({1.0, start_time, 0.0, 0.0});
+		response->addInterpPoint({1.0, start_time + static_cast<RealType>(samples.size() - 1) / sample_rate, 0.0, 0.0});
+		return response;
+	}
 
 	/// Initializes a platform with constant position and zero rotation.
 	void setupStaticPlatform(radar::Platform& platform, const math::Vec3& position)
@@ -623,46 +690,7 @@ TEST_CASE("SimulationEngine calculates mathematically correct CW physics", "[cor
 	}
 }
 
-TEST_CASE("SimulationEngine processStreamingPhysics steps through time and updates buffers", "[core][threading]")
-{
-	ParamGuard guard;
-	params::setRate(1000.0);
-	params::setOversampleRatio(1);
-	params::setTime(0.0, 10.0);
-
-	auto world = createPhysicsWorld();
-	pool::ThreadPool pool(1);
-	core::SimulationEngine engine(world.get(), pool, nullptr, ".");
-
-	auto* tx = world->getTransmitters().front().get();
-	auto* rx = world->getReceivers().front().get();
-
-	// Prepare receiver buffer
-	rx->prepareStreamingData(10);
-	rx->setActive(true);
-
-	// Set state
-	world->getSimulationState().t_current = 0.0;
-	engine.handleTxStreamingStart(core::makeActiveSource(tx, params::startTime(), params::endTime()));
-
-	SECTION("Processes correct number of samples based on dt")
-	{
-		// dt = 1/1000 = 0.001s. Processing up to t=0.0025 should hit indices 0, 1, 2.
-		engine.processStreamingPhysics(0.0025);
-
-		const auto& buffer = rx->getStreamingData();
-		// Sample 0 arrives before the propagation delay; samples 1 and 2 contain retarded-time energy.
-		REQUIRE(std::abs(buffer[0]) == 0.0);
-		REQUIRE(std::abs(buffer[1]) > 0.0);
-		REQUIRE(std::abs(buffer[2]) > 0.0);
-
-		// Sample 3 should be untouched (0.0)
-		REQUIRE(std::abs(buffer[3]) == 0.0);
-	}
-}
-
-TEST_CASE("SimulationEngine live streaming output emits bounded CW blocks without receiver buffer accumulation",
-		  "[core][threading][vita49][bounded]")
+TEST_CASE("SimulationEngine processStreamingPhysics steps through time and emits sink blocks", "[core][threading]")
 {
 	ParamGuard guard;
 	params::setRate(1000.0);
@@ -677,15 +705,49 @@ TEST_CASE("SimulationEngine live streaming output emits bounded CW blocks withou
 	auto* tx = world->getTransmitters().front().get();
 	auto* rx = world->getReceivers().front().get();
 
-	rx->prepareStreamingData(100000);
-	rx->releaseStreamingData();
+	rx->setActive(true);
+
+	// Set state
+	world->getSimulationState().t_current = 0.0;
+	engine.handleTxStreamingStart(core::makeActiveSource(tx, params::startTime(), params::endTime()));
+
+	SECTION("Processes correct number of samples based on dt")
+	{
+		// dt = 1/1000 = 0.001s. Processing up to t=0.0025 should hit indices 0, 1, 2.
+		engine.processStreamingPhysics(0.0025);
+		engine.handleRxStreamingEnd(rx);
+
+		// Sample 0 arrives before the propagation delay; samples 1 and 2 contain retarded-time energy.
+		REQUIRE(std::abs(sampleAt(sink, 0)) == 0.0);
+		REQUIRE(std::abs(sampleAt(sink, 1)) > 0.0);
+		REQUIRE(std::abs(sampleAt(sink, 2)) > 0.0);
+
+		// Sample 3 should be untouched (0.0)
+		REQUIRE(std::abs(sampleAt(sink, 3)) == 0.0);
+	}
+}
+
+TEST_CASE("SimulationEngine live streaming output emits bounded CW blocks", "[core][threading][vita49][bounded]")
+{
+	ParamGuard guard;
+	params::setRate(1000.0);
+	params::setOversampleRatio(1);
+	params::setTime(0.0, 10.0);
+
+	auto world = createPhysicsWorld();
+	pool::ThreadPool pool(1);
+	RecordingOutputSink sink;
+	core::SimulationEngine engine(world.get(), pool, nullptr, ".", nullptr, &sink);
+
+	auto* tx = world->getTransmitters().front().get();
+	auto* rx = world->getReceivers().front().get();
+
 	rx->setActive(true);
 	world->getSimulationState().t_current = 0.0;
 	engine.handleTxStreamingStart(core::makeActiveSource(tx, params::startTime(), params::endTime()));
 
 	engine.processStreamingPhysics(8.192);
 
-	REQUIRE(rx->getStreamingData().empty());
 	REQUIRE(sink.blocks.size() == 2u);
 	REQUIRE(sink.sample_starts == std::vector<std::uint64_t>{0u, 4096u});
 	REQUIRE(sink.sample_rates == std::vector<RealType>{1000.0, 1000.0});
@@ -709,7 +771,6 @@ TEST_CASE("SimulationEngine emits output heartbeats on streaming simulation time
 	auto* tx = world->getTransmitters().front().get();
 	auto* rx = world->getReceivers().front().get();
 
-	rx->releaseStreamingData();
 	rx->setActive(true);
 	world->getSimulationState().t_current = 0.0;
 	engine.handleTxStreamingStart(core::makeActiveSource(tx, params::startTime(), params::endTime()));
@@ -722,6 +783,40 @@ TEST_CASE("SimulationEngine emits output heartbeats on streaming simulation time
 	REQUIRE_THAT(sink.heartbeat_times[2], WithinAbs(3.0, 1e-12));
 }
 
+TEST_CASE("SimulationEngine streaming output applies logged pulsed interference through block path",
+		  "[core][threading][interference]")
+{
+	ParamGuard guard;
+	params::setRate(4.0);
+	params::setOversampleRatio(1);
+	params::setTime(0.0, 1.0);
+
+	auto world = createPhysicsWorld();
+	pool::ThreadPool pool(1);
+	RecordingOutputSink sink;
+	core::SimulationEngine engine(world.get(), pool, nullptr, ".", nullptr, &sink);
+
+	auto* tx = world->getTransmitters().front().get();
+	auto* rx = world->getReceivers().front().get();
+	rx->setNoiseTemperature(0.0);
+	rx->setActive(true);
+
+	std::vector<std::unique_ptr<fers_signal::RadarSignal>> wave_store;
+	rx->addInterferenceToLog(
+		makeFixedResponse(tx, wave_store, {ComplexType{1.0, 0.0}, ComplexType{1.0, 0.0}}, params::rate(), 0.25));
+
+	world->getSimulationState().t_current = 0.0;
+	engine.processStreamingPhysics(1.0);
+	engine.handleRxStreamingEnd(rx);
+
+	const auto samples = outputTimeline(sink);
+	REQUIRE(samples.size() == 4u);
+	REQUIRE_THAT(samples[0].real(), WithinAbs(0.0, 1e-12));
+	REQUIRE_THAT(samples[1].real(), WithinAbs(1.0, 1e-12));
+	REQUIRE_THAT(samples[2].real(), WithinAbs(1.0, 1e-12));
+	REQUIRE_THAT(samples[3].real(), WithinAbs(0.0, 1e-12));
+}
+
 TEST_CASE("SimulationEngine keeps streaming source through propagation tail after transmit end", "[core][threading]")
 {
 	ParamGuard guard;
@@ -732,12 +827,12 @@ TEST_CASE("SimulationEngine keeps streaming source through propagation tail afte
 
 	auto world = createPhysicsWorld();
 	pool::ThreadPool pool(1);
-	core::SimulationEngine engine(world.get(), pool, nullptr, ".");
+	RecordingOutputSink sink;
+	core::SimulationEngine engine(world.get(), pool, nullptr, ".", nullptr, &sink);
 
 	auto* tx = world->getTransmitters().front().get();
 	auto* rx = world->getReceivers().front().get();
 
-	rx->prepareStreamingData(400);
 	rx->setActive(true);
 
 	const core::ActiveStreamingSource source = core::makeActiveSource(tx, 0.0, 0.2);
@@ -747,17 +842,18 @@ TEST_CASE("SimulationEngine keeps streaming source through propagation tail afte
 
 	world->getSimulationState().t_current = 0.2;
 	engine.processStreamingPhysics(0.315);
+	engine.handleRxStreamingEnd(rx);
 
 	bool saw_tail_energy = false;
 	for (std::size_t index = 200; index < 205; ++index)
 	{
-		saw_tail_energy = saw_tail_energy || std::abs(rx->getStreamingData()[index]) > 0.0;
+		saw_tail_energy = saw_tail_energy || std::abs(sampleAt(sink, index)) > 0.0;
 	}
 	REQUIRE(saw_tail_energy);
 
 	for (std::size_t index = 310; index < 315; ++index)
 	{
-		REQUIRE(std::abs(rx->getStreamingData()[index]) == 0.0);
+		REQUIRE(std::abs(sampleAt(sink, index)) == 0.0);
 	}
 	REQUIRE(world->getSimulationState().active_streaming_transmitters.empty());
 }
@@ -777,17 +873,18 @@ TEST_CASE("SimulationEngine cleanup preserves moving direct streaming tails", "[
 		auto fixture = createStreamingPathWorld(interpolation, tx_path, math::Path::InterpType::INTERP_STATIC,
 												{{math::Vec3{0.0, 0.0, 0.0}, 0.0}, {math::Vec3{0.0, 0.0, 0.0}, 0.6}});
 		pool::ThreadPool pool(1);
-		core::SimulationEngine engine(fixture.world.get(), pool, nullptr, ".");
+		RecordingOutputSink sink;
+		core::SimulationEngine engine(fixture.world.get(), pool, nullptr, ".", nullptr, &sink);
 
-		fixture.rx->prepareStreamingData(600);
 		fixture.rx->setActive(true);
 		engine.handleTxStreamingStart(core::makeActiveSource(fixture.tx, 0.0, 0.2));
 		fixture.world->getSimulationState().t_current = 0.2;
 		engine.handleTxStreamingEnd(fixture.tx);
 
 		engine.processStreamingPhysics(active_sample_time + 0.001);
+		engine.handleRxStreamingEnd(fixture.rx);
 		const auto active_index = static_cast<std::size_t>(std::llround(active_sample_time * params::rate()));
-		REQUIRE(std::abs(fixture.rx->getStreamingData()[active_index]) > 0.0);
+		REQUIRE(std::abs(sampleAt(sink, active_index)) > 0.0);
 		REQUIRE(fixture.world->getSimulationState().active_streaming_transmitters.size() == 1);
 
 		fixture.world->getSimulationState().t_current = active_sample_time + 0.001;
@@ -825,17 +922,18 @@ TEST_CASE("SimulationEngine cleanup preserves reflected-only streaming tails", "
 											math::Path::InterpType::INTERP_STATIC, {{math::Vec3{500.0, 0.0, 0.0}, 0.0}},
 											std::vector<math::Coord>{{math::Vec3{250.0, 0.0, 0.0}, 0.0}});
 	fixture.rx->setFlag(radar::Receiver::RecvFlag::FLAG_NODIRECT);
-	fixture.rx->prepareStreamingData(800);
 	fixture.rx->setActive(true);
 
 	pool::ThreadPool pool(1);
-	core::SimulationEngine engine(fixture.world.get(), pool, nullptr, ".");
+	RecordingOutputSink sink;
+	core::SimulationEngine engine(fixture.world.get(), pool, nullptr, ".", nullptr, &sink);
 	engine.handleTxStreamingStart(core::makeActiveSource(fixture.tx, 0.0, 0.2));
 	fixture.world->getSimulationState().t_current = 0.2;
 	engine.handleTxStreamingEnd(fixture.tx);
 
 	engine.processStreamingPhysics(0.601);
-	REQUIRE(std::abs(fixture.rx->getStreamingData()[600]) > 0.0);
+	engine.handleRxStreamingEnd(fixture.rx);
+	REQUIRE(std::abs(sampleAt(sink, 600)) > 0.0);
 	REQUIRE(fixture.world->getSimulationState().active_streaming_transmitters.size() == 1);
 
 	fixture.world->getSimulationState().t_current = 0.601;
@@ -856,11 +954,11 @@ TEST_CASE("SimulationEngine cleanup keeps sources through receiver gaps when tai
 		createStreamingPathWorld(math::Path::InterpType::INTERP_STATIC, {{math::Vec3{0.0, 0.0, 0.0}, 0.0}},
 								 math::Path::InterpType::INTERP_STATIC, {{math::Vec3{100.0, 0.0, 0.0}, 0.0}});
 	fixture.rx->setSchedule({{0.0, 0.15}, {0.25, 0.5}});
-	fixture.rx->prepareStreamingData(500);
 	fixture.rx->setActive(true);
 
 	pool::ThreadPool pool(1);
-	core::SimulationEngine engine(fixture.world.get(), pool, nullptr, ".");
+	RecordingOutputSink sink;
+	core::SimulationEngine engine(fixture.world.get(), pool, nullptr, ".", nullptr, &sink);
 	engine.handleTxStreamingStart(core::makeActiveSource(fixture.tx, 0.0, 0.2));
 
 	engine.processStreamingPhysics(0.15);
@@ -874,7 +972,8 @@ TEST_CASE("SimulationEngine cleanup keeps sources through receiver gaps when tai
 
 	fixture.world->getSimulationState().t_current = 0.25;
 	engine.processStreamingPhysics(0.301);
-	REQUIRE(std::abs(fixture.rx->getStreamingData()[250]) > 0.0);
+	engine.handleRxStreamingEnd(fixture.rx);
+	REQUIRE(std::abs(sampleAt(sink, 250)) > 0.0);
 	REQUIRE(fixture.world->getSimulationState().active_streaming_transmitters.empty());
 }
 
@@ -890,7 +989,6 @@ TEST_CASE("SimulationEngine cleanup removes an old segment before a same-time ne
 	auto fixture =
 		createStreamingPathWorld(math::Path::InterpType::INTERP_STATIC, {{math::Vec3{0.0, 0.0, 0.0}, 0.0}},
 								 math::Path::InterpType::INTERP_STATIC, {{math::Vec3{125.0, 0.0, 0.0}, 0.0}});
-	fixture.rx->prepareStreamingData(768);
 	fixture.rx->setActive(true);
 
 	pool::ThreadPool pool(1);
@@ -943,17 +1041,18 @@ TEST_CASE("SimulationEngine processStreamingPhysics handles active streaming rec
 
 	auto world = createPhysicsWorld();
 	pool::ThreadPool pool(1);
-	core::SimulationEngine engine(world.get(), pool, nullptr, ".");
+	RecordingOutputSink sink;
+	core::SimulationEngine engine(world.get(), pool, nullptr, ".", nullptr, &sink);
 
 	auto* rx = world->getReceivers().front().get();
-	rx->prepareStreamingData(10);
 	rx->setActive(true);
 	world->getSimulationState().t_current = 0.0;
 
 	REQUIRE(world->getSimulationState().active_streaming_transmitters.empty());
 	REQUIRE_NOTHROW(engine.processStreamingPhysics(0.0025));
+	engine.handleRxStreamingEnd(rx);
 
-	const auto& buffer = rx->getStreamingData();
+	const auto buffer = outputTimeline(sink);
 	for (const auto& sample : buffer)
 	{
 		REQUIRE(sample.real() == 0.0);
@@ -1003,7 +1102,6 @@ TEST_CASE("SimulationEngine processStreamingPhysics uses buffered shared timing 
 	auto rx = std::make_unique<radar::Receiver>(rx_plat.get(), "Rx", 42, radar::OperationMode::CW_MODE, 5);
 	rx->setTiming(timing);
 	rx->setAntenna(antenna.get());
-	rx->prepareStreamingData(10);
 	rx->setActive(true);
 
 	auto* tx_ptr = tx.get();
@@ -1020,12 +1118,14 @@ TEST_CASE("SimulationEngine processStreamingPhysics uses buffered shared timing 
 	world->getSimulationState().t_current = 0.0;
 
 	pool::ThreadPool pool(1);
-	core::SimulationEngine engine(world.get(), pool, nullptr, ".");
+	RecordingOutputSink sink;
+	core::SimulationEngine engine(world.get(), pool, nullptr, ".", nullptr, &sink);
 	engine.handleTxStreamingStart(core::makeActiveSource(tx_ptr, params::startTime(), params::endTime()));
 	engine.processStreamingPhysics(0.6);
+	engine.handleRxStreamingEnd(rx_ptr);
 
 	const ComplexType expected = simulation::calculateDirectPathContribution(tx_ptr, rx_ptr, 0.5, &lookup);
-	const ComplexType actual = rx_ptr->getStreamingData()[5];
+	const ComplexType actual = sampleAt(sink, 5);
 
 	REQUIRE_THAT(actual.real(), WithinAbs(expected.real(), 1e-6));
 	REQUIRE_THAT(actual.imag(), WithinAbs(expected.imag(), 1e-6));
@@ -1063,7 +1163,6 @@ TEST_CASE("SimulationEngine phase-noise lookup covers pre-start retarded streami
 	auto rx = std::make_unique<radar::Receiver>(rx_plat.get(), "Rx", 42, radar::OperationMode::CW_MODE, 5);
 	rx->setTiming(timing);
 	rx->setAntenna(antenna.get());
-	rx->prepareStreamingData(10);
 	rx->setActive(true);
 
 	auto* tx_ptr = tx.get();
@@ -1078,12 +1177,14 @@ TEST_CASE("SimulationEngine phase-noise lookup covers pre-start retarded streami
 	world->getSimulationState().t_current = 0.0;
 
 	pool::ThreadPool pool(1);
-	core::SimulationEngine engine(world.get(), pool, nullptr, ".");
+	RecordingOutputSink sink;
+	core::SimulationEngine engine(world.get(), pool, nullptr, ".", nullptr, &sink);
 	engine.handleTxStreamingStart(core::makeActiveSource(tx_ptr, -0.2, params::endTime()));
 	engine.processStreamingPhysics(0.2);
+	engine.handleRxStreamingEnd(rx_ptr);
 
 	const ComplexType expected = simulation::calculateDirectPathContribution(tx_ptr, rx_ptr, 0.1, &expected_lookup);
-	const ComplexType actual = rx_ptr->getStreamingData()[1];
+	const ComplexType actual = sampleAt(sink, 1);
 	REQUIRE_THAT(actual.real(), WithinAbs(expected.real(), 1.0e-6));
 	REQUIRE_THAT(actual.imag(), WithinAbs(expected.imag(), 1.0e-6));
 }
@@ -1132,7 +1233,6 @@ TEST_CASE("SimulationEngine native FMCW dechirp produces positive stationary-tar
 	radar::Receiver::DechirpReference reference;
 	reference.source = radar::Receiver::DechirpReferenceSource::Attached;
 	rx->setDechirpReference(reference);
-	rx->prepareStreamingData(1000);
 	rx->setActive(true);
 
 	auto target = radar::createIsoTarget(target_platform.get(), "Target", 1.0, 7, 6);
@@ -1153,18 +1253,22 @@ TEST_CASE("SimulationEngine native FMCW dechirp produces positive stationary-tar
 	world->getSimulationState().t_current = 0.0;
 
 	pool::ThreadPool pool(1);
-	core::SimulationEngine engine(world.get(), pool, nullptr, ".");
+	RecordingOutputSink sink;
+	core::SimulationEngine engine(world.get(), pool, nullptr, ".", nullptr, &sink);
 	engine.handleTxStreamingStart(core::makeActiveSource(tx_ptr, params::startTime(), params::endTime()));
 	engine.processStreamingPhysics(0.0007);
+	engine.handleRxStreamingEnd(rx_ptr);
 
 	const RealType dt = 1.0 / params::simSamplingRate();
 	const std::size_t first_index = 20;
 	const std::size_t sample_count = 500;
+	const auto samples = outputTimeline(sink);
+	REQUIRE(samples.size() > first_index + sample_count);
 	RealType unwrapped_span = 0.0;
-	RealType previous_phase = std::arg(rx_ptr->getStreamingData()[first_index]);
+	RealType previous_phase = std::arg(samples[first_index]);
 	for (std::size_t i = 1; i < sample_count; ++i)
 	{
-		const RealType phase = std::arg(rx_ptr->getStreamingData()[first_index + i]);
+		const RealType phase = std::arg(samples[first_index + i]);
 		unwrapped_span += unwrapDelta(phase - previous_phase);
 		previous_phase = phase;
 	}
@@ -1220,7 +1324,6 @@ TEST_CASE("SimulationEngine physical FMCW dechirp keeps timing decorrelation abs
 		radar::Receiver::DechirpReference reference;
 		reference.source = radar::Receiver::DechirpReferenceSource::Attached;
 		rx->setDechirpReference(reference);
-		rx->prepareStreamingData(sample_index + 2);
 		rx->setActive(true);
 
 		auto target = radar::createIsoTarget(target_platform.get(), "Target", 1.0, 7, 6);
@@ -1241,10 +1344,12 @@ TEST_CASE("SimulationEngine physical FMCW dechirp keeps timing decorrelation abs
 		world->getSimulationState().t_current = 0.0;
 
 		pool::ThreadPool pool(1);
-		core::SimulationEngine engine(world.get(), pool, nullptr, ".");
+		RecordingOutputSink sink;
+		core::SimulationEngine engine(world.get(), pool, nullptr, ".", nullptr, &sink);
 		engine.handleTxStreamingStart(core::makeActiveSource(tx_ptr, params::startTime(), params::endTime()));
 		engine.processStreamingPhysics(sample_time + 1.0 / params::simSamplingRate());
-		return rx_ptr->getStreamingData()[sample_index];
+		engine.handleRxStreamingEnd(rx_ptr);
+		return sampleAt(sink, sample_index);
 	};
 
 	const ComplexType physical = run_sample(radar::Receiver::DechirpMode::Physical);
@@ -1294,7 +1399,6 @@ TEST_CASE("SimulationEngine reports progress while processing long streaming spa
 
 	auto world = createPhysicsWorld();
 	auto* rx = world->getReceivers().front().get();
-	rx->prepareStreamingData(100);
 	rx->setActive(true);
 
 	pool::ThreadPool pool(1);
@@ -1412,10 +1516,10 @@ TEST_CASE("SimulationEngine processStreamingPhysics exits early if t_event <= t_
 	ParamGuard guard;
 	auto world = createPhysicsWorld();
 	pool::ThreadPool pool(1);
-	core::SimulationEngine engine(world.get(), pool, nullptr, ".");
+	RecordingOutputSink sink;
+	core::SimulationEngine engine(world.get(), pool, nullptr, ".", nullptr, &sink);
 
 	auto* rx = world->getReceivers().front().get();
-	rx->prepareStreamingData(10);
 	rx->setActive(true);
 
 	// Advance the simulation state time
@@ -1427,12 +1531,8 @@ TEST_CASE("SimulationEngine processStreamingPhysics exits early if t_event <= t_
 	// Call with t_event == t_current
 	REQUIRE_NOTHROW(engine.processStreamingPhysics(1.0));
 
-	// The buffer should be completely untouched (all zeros) because the method returned early
-	for (const auto& sample : rx->getStreamingData())
-	{
-		REQUIRE(sample.real() == 0.0);
-		REQUIRE(sample.imag() == 0.0);
-	}
+	engine.handleRxStreamingEnd(rx);
+	REQUIRE(sink.blocks.empty());
 }
 
 TEST_CASE("SimulationEngine processEvent dispatches all event types correctly", "[core][threading]")
