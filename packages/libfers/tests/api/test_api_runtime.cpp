@@ -2,10 +2,12 @@
 #include <catch2/matchers/catch_matchers_string.hpp>
 #include <filesystem>
 #include <libfers/api.h>
+#include <limits>
 #include <string>
 #include <vector>
 
 #include "api_test_helpers.h"
+#include "core/output_metadata.h"
 
 using Catch::Matchers::ContainsSubstring;
 
@@ -266,6 +268,75 @@ TEST_CASE("API run simulation rejects null context", "[api][runtime]")
 	REQUIRE_THAT(error.str(), ContainsSubstring("Invalid context provided to fers_run_simulation"));
 }
 
+TEST_CASE("API VITA49 setters validate control-plane inputs", "[api][runtime][vita49]")
+{
+	api_test::clearLastError();
+	api_test::Context context;
+	REQUIRE(context.get() != nullptr);
+
+	REQUIRE(fers_enable_vita49_udp_output(nullptr, "127.0.0.1", 4991) == -1);
+	api_test::ApiString null_context_error = api_test::lastError();
+	REQUIRE(null_context_error.get() != nullptr);
+	REQUIRE_THAT(null_context_error.str(), ContainsSubstring("context is NULL"));
+
+	REQUIRE(fers_enable_vita49_udp_output(context.get(), nullptr, 4991) == -1);
+	api_test::ApiString null_host_error = api_test::lastError();
+	REQUIRE(null_host_error.get() != nullptr);
+	REQUIRE_THAT(null_host_error.str(), ContainsSubstring("host is NULL"));
+
+	REQUIRE(fers_enable_vita49_udp_output(context.get(), "", 4991) == 1);
+	api_test::ApiString empty_host_error = api_test::lastError();
+	REQUIRE(empty_host_error.get() != nullptr);
+	REQUIRE_THAT(empty_host_error.str(), ContainsSubstring("host must be non-empty"));
+
+	REQUIRE(fers_enable_vita49_udp_output(context.get(), "127.0.0.1", 0) == 1);
+	api_test::ApiString port_error = api_test::lastError();
+	REQUIRE(port_error.get() != nullptr);
+	REQUIRE_THAT(port_error.str(), ContainsSubstring("port must be in the range 1..65535"));
+
+	REQUIRE(fers_set_vita49_fullscale(context.get(), 0.0) == 1);
+	api_test::ApiString fullscale_error = api_test::lastError();
+	REQUIRE(fullscale_error.get() != nullptr);
+	REQUIRE_THAT(fullscale_error.str(), ContainsSubstring("fullscale"));
+
+	REQUIRE(fers_set_vita49_fullscale(context.get(), std::numeric_limits<double>::infinity()) == 1);
+	api_test::ApiString infinite_fullscale_error = api_test::lastError();
+	REQUIRE(infinite_fullscale_error.get() != nullptr);
+	REQUIRE_THAT(infinite_fullscale_error.str(), ContainsSubstring("positive and finite"));
+
+	REQUIRE(fers_set_vita49_epoch_unix_nanoseconds(context.get(), 4294967296000000000ULL) == 1);
+	api_test::ApiString epoch_error = api_test::lastError();
+	REQUIRE(epoch_error.get() != nullptr);
+	REQUIRE_THAT(epoch_error.str(), ContainsSubstring("32-bit UTC seconds"));
+
+	REQUIRE(fers_set_vita49_max_udp_payload(context.get(), 0) == 1);
+	api_test::ApiString payload_error = api_test::lastError();
+	REQUIRE(payload_error.get() != nullptr);
+	REQUIRE_THAT(payload_error.str(), ContainsSubstring("max UDP payload"));
+
+	REQUIRE(fers_set_vita49_queue_depth(context.get(), 0) == 1);
+	api_test::ApiString queue_error = api_test::lastError();
+	REQUIRE(queue_error.get() != nullptr);
+	REQUIRE_THAT(queue_error.str(), ContainsSubstring("queue depth"));
+}
+
+TEST_CASE("API run simulation rejects VITA49 mode without fullscale", "[api][runtime][vita49]")
+{
+	api_test::ParamGuard guard;
+	api_test::clearLastError();
+	api_test::Context context;
+	REQUIRE(context.get() != nullptr);
+
+	const std::string xml = api_test::minimalScenarioXml("API VITA Missing Fullscale");
+	REQUIRE(fers_load_scenario_from_xml_string(context.get(), xml.c_str(), 0) == 0);
+	REQUIRE(fers_enable_vita49_udp_output(context.get(), "127.0.0.1", 4991) == 0);
+
+	REQUIRE(fers_run_simulation(context.get(), nullptr, nullptr) == 1);
+	api_test::ApiString error = api_test::lastError();
+	REQUIRE(error.get() != nullptr);
+	REQUIRE_THAT(error.str(), ContainsSubstring("VITA49 fullscale must be a positive finite value"));
+}
+
 TEST_CASE("API run simulation accepts a minimal valid scenario", "[api][runtime]")
 {
 	api_test::ParamGuard guard;
@@ -296,6 +367,37 @@ TEST_CASE("API run simulation accepts a minimal valid scenario", "[api][runtime]
 	api_test::ApiString error = api_test::lastError();
 	REQUIRE(error.get() == nullptr);
 	REQUIRE(std::filesystem::exists(output_path));
+
+	api_test::ApiString metadata_json(fers_get_last_output_metadata_json(context.get()));
+	REQUIRE(metadata_json.get() != nullptr);
+	const auto metadata = api_test::json::parse(metadata_json.str());
+	CHECK_FALSE(metadata.contains("vita49"));
+}
+
+TEST_CASE("VITA49 metadata section records runtime output config", "[api][runtime][vita49]")
+{
+	const core::Vita49OutputConfig config{.host = "127.0.0.1",
+										  .port = 4991,
+										  .adc_fullscale = 2.5,
+										  .queue_depth = 17,
+										  .epoch_unix_nanoseconds = 1700000000123456789ULL,
+										  .max_udp_payload = 1200};
+	core::OutputMetadata output_metadata;
+	output_metadata.vita49 = core::vita49MetadataFromConfig(config);
+
+	const auto metadata = api_test::json::parse(core::outputMetadataToJsonString(output_metadata));
+	REQUIRE(metadata.contains("vita49"));
+	const auto& vita49 = metadata.at("vita49");
+	CHECK(vita49.at("endpoint").get<std::string>() == "127.0.0.1:4991");
+	CHECK(vita49.at("endpoint_host").get<std::string>() == "127.0.0.1");
+	CHECK(vita49.at("endpoint_port").get<std::uint16_t>() == 4991);
+	CHECK(vita49.at("epoch_unix_nanoseconds").get<std::uint64_t>() == 1700000000123456789ULL);
+	CHECK(vita49.at("class_id").get<std::string>() == "0xFA52530001000101");
+	CHECK(vita49.at("adc_fullscale").get<double>() == 2.5);
+	CHECK(vita49.at("max_udp_payload").get<std::uint16_t>() == 1200);
+	CHECK(vita49.at("queue_depth").get<std::uint32_t>() == 17);
+	REQUIRE(vita49.at("streams").is_array());
+	CHECK(vita49.at("streams").empty());
 }
 
 TEST_CASE("API run simulation invokes progress callbacks with caller user data", "[api][runtime]")

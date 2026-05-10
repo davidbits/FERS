@@ -2,6 +2,7 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 #include <chrono>
+#include <cstdint>
 #include <filesystem>
 #include <format>
 #include <highfive/highfive.hpp>
@@ -171,6 +172,56 @@ namespace
 		int current;
 		int total;
 	};
+
+	struct CapturedSinkBlock
+	{
+		core::ReceiverStreamDescriptor stream;
+		RealType first_sample_time = 0.0;
+		RealType sample_rate = 0.0;
+		std::uint64_t sample_start = 0;
+		std::vector<ComplexType> samples;
+	};
+
+	class CapturingOutputSink final : public core::ReceiverOutputSink
+	{
+	public:
+		void initializeRun(const core::OutputConfig&, std::string) override {}
+
+		std::uint32_t registerStream(const core::ReceiverStreamDescriptor& stream) override
+		{
+			registered_streams.push_back(stream);
+			return next_stream_id++;
+		}
+
+		void openStream(const std::uint32_t stream_id, const RealType first_sample_time) override
+		{
+			opened_streams.push_back(stream_id);
+			open_times.push_back(first_sample_time);
+		}
+
+		void submitBlock(const core::ReceiverSampleBlock& block) override
+		{
+			blocks.push_back(
+				CapturedSinkBlock{.stream = block.stream,
+								  .first_sample_time = block.first_sample_time,
+								  .sample_rate = block.sample_rate,
+								  .sample_start = block.sample_start,
+								  .samples = std::vector<ComplexType>(block.samples.begin(), block.samples.end())});
+		}
+
+		void emitContextHeartbeat(RealType) override {}
+
+		void closeStream(const std::uint32_t stream_id) override { closed_streams.push_back(stream_id); }
+
+		core::OutputStats finalize() override { return {}; }
+
+		std::uint32_t next_stream_id = 100;
+		std::vector<core::ReceiverStreamDescriptor> registered_streams;
+		std::vector<std::uint32_t> opened_streams;
+		std::vector<RealType> open_times;
+		std::vector<CapturedSinkBlock> blocks;
+		std::vector<std::uint32_t> closed_streams;
+	};
 }
 
 TEST_CASE("finalizeStreamingReceiver exits cleanly when no streaming samples were collected", "[processing][finalizer]")
@@ -199,6 +250,81 @@ TEST_CASE("finalizeStreamingReceiver exits cleanly when no streaming samples wer
 
 	REQUIRE_FALSE(std::filesystem::exists(output_path));
 	REQUIRE(progress_calls.empty());
+
+	std::filesystem::remove_all(out_dir);
+}
+
+TEST_CASE("buildReceiverSampleBlock captures receiver identity, timing, and sample basis",
+		  "[processing][finalizer][vita49]")
+{
+	ParamGuard guard;
+	params::setAdcBits(12);
+
+	radar::Platform platform("RxPlatform");
+	radar::Receiver receiver(&platform, "RxDescriptor", 55, radar::OperationMode::FMCW_MODE, 4242);
+	auto timing_owner = makeQuietTiming("descriptor_clk", 11, 10.5e9);
+	receiver.setTiming(timing_owner.timing);
+	receiver.setDechirpMode(radar::Receiver::DechirpMode::Physical);
+
+	const std::vector<ComplexType> samples = {ComplexType{1.0, 0.0}, ComplexType{0.0, 1.0}};
+	const auto block = processing::buildReceiverSampleBlock(&receiver, 1.25, 2.0e6, samples, 17);
+
+	REQUIRE(block.stream.receiver_id == 4242);
+	REQUIRE(block.stream.receiver_name == "RxDescriptor");
+	REQUIRE(block.stream.mode == "fmcw");
+	REQUIRE(block.stream.dechirped);
+	REQUIRE(block.stream.adc_bits == 12u);
+	REQUIRE_THAT(block.stream.sample_rate, WithinAbs(2.0e6, 1e-12));
+	REQUIRE_THAT(block.stream.reference_frequency, WithinAbs(10.5e9, 1e-6));
+	REQUIRE_THAT(block.first_sample_time, WithinAbs(1.25, 1e-12));
+	REQUIRE(block.sample_start == 17u);
+	REQUIRE(block.samples.size() == samples.size());
+}
+
+TEST_CASE("finalizeStreamingReceiver can route processed CW samples to an output sink without HDF5",
+		  "[processing][finalizer][vita49]")
+{
+	ParamGuard guard;
+	params::setTime(0.0, 1.0);
+	params::setRate(4.0);
+	params::setOversampleRatio(1);
+	params::setAdcBits(0);
+
+	const std::string receiver_name = uniqueName("cw_sink");
+	const auto out_dir = std::filesystem::temp_directory_path() / uniqueName("cw_sink_dir");
+	std::filesystem::create_directories(out_dir);
+	const auto output_path = resultPath(out_dir, receiver_name);
+	removeIfExists(output_path);
+
+	radar::Platform rx_platform("RxPlatform");
+	radar::Receiver receiver(&rx_platform, receiver_name, 56, radar::OperationMode::CW_MODE);
+	auto timing_owner = makeQuietTiming("sink_clk", 22, 77.0);
+	receiver.setTiming(timing_owner.timing);
+	receiver.setNoiseTemperature(0.0);
+	receiver.prepareStreamingData(4);
+	receiver.setStreamingSample(0, ComplexType{2.0, -1.0});
+	receiver.setStreamingSample(1, ComplexType{0.5, 0.25});
+
+	CapturingOutputSink sink;
+	processing::finalizeStreamingReceiver(&receiver, nullptr, nullptr, out_dir.string(), nullptr, {}, &sink);
+
+	REQUIRE_FALSE(std::filesystem::exists(output_path));
+	REQUIRE(sink.registered_streams.size() == 1u);
+	REQUIRE(sink.opened_streams.size() == 1u);
+	REQUIRE(sink.closed_streams.size() == 1u);
+	REQUIRE(sink.blocks.size() == 1u);
+
+	const auto& block = sink.blocks.front();
+	REQUIRE(block.stream.receiver_name == receiver_name);
+	REQUIRE(block.stream.mode == "cw");
+	REQUIRE_THAT(block.first_sample_time, WithinAbs(params::startTime(), 1e-12));
+	REQUIRE_THAT(block.sample_rate, WithinAbs(params::rate(), 1e-12));
+	REQUIRE(block.sample_start == 0u);
+	REQUIRE(block.samples.size() == 4u);
+	REQUIRE_THAT(block.samples[0].real(), WithinAbs(2.0, 1e-12));
+	REQUIRE_THAT(block.samples[0].imag(), WithinAbs(-1.0, 1e-12));
+	REQUIRE_THAT(block.samples[1].real(), WithinAbs(0.5, 1e-12));
+	REQUIRE_THAT(block.samples[1].imag(), WithinAbs(0.25, 1e-12));
 
 	std::filesystem::remove_all(out_dir);
 }
@@ -614,7 +740,8 @@ TEST_CASE("runPulsedFinalizer writes jittered chunks and emits completion progre
 		std::make_shared<core::ProgressReporter>([&progress_calls](const std::string& msg, int current, int total)
 												 { progress_calls.push_back({msg, current, total}); });
 
-	std::jthread worker(processing::runPulsedFinalizer, &receiver, &targets, reporter, out_dir.string(), nullptr);
+	std::jthread worker(processing::runPulsedFinalizer, &receiver, &targets, reporter, out_dir.string(), nullptr,
+						nullptr);
 	receiver.enqueueFinalizerJob(std::move(first_job));
 	receiver.enqueueFinalizerJob(std::move(second_job));
 	core::RenderingJob shutdown_job{};
@@ -662,6 +789,69 @@ TEST_CASE("runPulsedFinalizer writes jittered chunks and emits completion progre
 	REQUIRE(std::ranges::any_of(
 		progress_calls, [&receiver_name](const ProgressCall& call)
 		{ return call.message == "Finished Exporting " + receiver_name && call.current == 100 && call.total == 100; }));
+
+	std::filesystem::remove_all(out_dir);
+}
+
+TEST_CASE("runPulsedFinalizer routes completed acquisition windows to an output sink without HDF5",
+		  "[processing][finalizer][vita49]")
+{
+	ParamGuard guard;
+	params::setTime(0.0, 1.0);
+	params::setRate(4.0);
+	params::setOversampleRatio(1);
+	params::setAdcBits(0);
+
+	const std::string receiver_name = uniqueName("pulsed_sink");
+	const auto out_dir = std::filesystem::temp_directory_path() / uniqueName("pulsed_sink_dir");
+	std::filesystem::create_directories(out_dir);
+	const auto output_path = resultPath(out_dir, receiver_name);
+	removeIfExists(output_path);
+
+	radar::Platform rx_platform("RxPlatform");
+	setupPlatform(rx_platform, math::Vec3{0.0, 0.0, 0.0});
+	radar::Receiver receiver(&rx_platform, receiver_name, 57, radar::OperationMode::PULSED_MODE);
+	antenna::Isotropic antenna("iso");
+	receiver.setAntenna(&antenna);
+	auto timing_owner = makeQuietTiming("pulsed_sink_clk", 33, 2.0);
+	receiver.setTiming(timing_owner.timing);
+	receiver.setNoiseTemperature(0.0);
+	receiver.setWindowProperties(0.5, 1.0, 0.0);
+
+	radar::Platform tx_platform("TxPlatform");
+	radar::Transmitter transmitter(&tx_platform, "TxA", radar::OperationMode::PULSED_MODE, 701);
+	std::vector<std::unique_ptr<fers_signal::RadarSignal>> wave_store;
+
+	core::RenderingJob job{};
+	job.ideal_start_time = 0.0;
+	job.duration = 0.5;
+	job.responses.push_back(
+		makeFixedResponse(&transmitter, wave_store, {ComplexType{1.0, 0.0}, ComplexType{2.0, 0.0}}, 4.0, 0.0));
+
+	std::vector<std::unique_ptr<radar::Target>> targets;
+	CapturingOutputSink sink;
+
+	std::jthread worker(processing::runPulsedFinalizer, &receiver, &targets, nullptr, out_dir.string(), nullptr, &sink);
+	receiver.enqueueFinalizerJob(std::move(job));
+	core::RenderingJob shutdown_job{};
+	shutdown_job.duration = -1.0;
+	receiver.enqueueFinalizerJob(std::move(shutdown_job));
+	worker.join();
+
+	REQUIRE_FALSE(std::filesystem::exists(output_path));
+	REQUIRE(sink.registered_streams.size() == 1u);
+	REQUIRE(sink.opened_streams.size() == 1u);
+	REQUIRE(sink.closed_streams.size() == 1u);
+	REQUIRE(sink.blocks.size() == 1u);
+
+	const auto& block = sink.blocks.front();
+	REQUIRE(block.stream.mode == "pulsed");
+	REQUIRE_THAT(block.first_sample_time, WithinAbs(0.0, 1e-12));
+	REQUIRE_THAT(block.sample_rate, WithinAbs(params::rate(), 1e-12));
+	REQUIRE(block.sample_start == 0u);
+	REQUIRE(block.samples.size() == 2u);
+	REQUIRE_THAT(block.samples[0].real(), WithinAbs(1.0, 1e-12));
+	REQUIRE_THAT(block.samples[1].real(), WithinAbs(2.0, 1e-12));
 
 	std::filesystem::remove_all(out_dir);
 }

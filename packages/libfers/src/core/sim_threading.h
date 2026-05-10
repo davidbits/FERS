@@ -26,6 +26,7 @@
 #include <vector>
 
 #include "core/config.h"
+#include "core/output_config.h"
 #include "core/output_metadata.h"
 #include "core/parameters.h"
 #include "core/sim_events.h"
@@ -52,6 +53,7 @@ namespace serial
 namespace core
 {
 	class World;
+	class ReceiverOutputSink;
 
 	/**
 	 * @class ProgressReporter
@@ -112,7 +114,8 @@ namespace core
 		 * @param output_dir Output directory for the simulation files.
 		 */
 		SimulationEngine(World* world, pool::ThreadPool& pool, std::shared_ptr<ProgressReporter> reporter,
-						 std::string output_dir, std::shared_ptr<OutputMetadataCollector> metadata_collector = nullptr);
+						 std::string output_dir, std::shared_ptr<OutputMetadataCollector> metadata_collector = nullptr,
+						 ReceiverOutputSink* output_sink = nullptr);
 
 		/**
 		 * @brief Starts and runs the main simulation loop until completion.
@@ -262,6 +265,7 @@ namespace core
 		std::shared_ptr<ProgressReporter> _reporter; ///< Shared progress reporter instance.
 		std::vector<std::jthread> _finalizer_threads; ///< Collection of dedicated pulsed finalizer threads.
 		std::shared_ptr<OutputMetadataCollector> _metadata_collector; ///< Collector for generated output metadata.
+		ReceiverOutputSink* _output_sink = nullptr; ///< Optional live receiver output sink.
 
 		std::chrono::steady_clock::time_point _last_report_time; ///< Timestamp of the last progress report.
 		int _last_reported_percent = -1; ///< The last reported percentage to prevent redundant updates.
@@ -290,5 +294,5 @@ namespace core
 	 */
 	OutputMetadata runEventDrivenSim(World* world, pool::ThreadPool& pool,
 									 const std::function<void(const std::string&, int, int)>& progress_callback,
-									 const std::string& output_dir);
+									 const std::string& output_dir, const OutputConfig& output_config = OutputConfig{});
 }

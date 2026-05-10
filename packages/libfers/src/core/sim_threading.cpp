@@ -38,6 +38,7 @@
 #include "radar/target.h"
 #include "radar/transmitter.h"
 #include "serial/response.h"
+#include "serial/vita49/vita49_output_sink.h"
 #include "signal/if_resampler.h"
 #include "signal/radar_signal.h"
 #include "sim_events.h"
@@ -56,6 +57,24 @@ namespace core
 	namespace
 	{
 		constexpr std::size_t fmcw_if_block_size = 1024;
+
+		[[nodiscard]] Vita49StreamMetadata streamStatsToMetadata(const ReceiverStreamStats& stats)
+		{
+			return Vita49StreamMetadata{.receiver_id = stats.receiver_id,
+										.receiver_name = stats.receiver_name,
+										.stream_id = stats.stream_id,
+										.sample_rate = stats.sample_rate,
+										.reference_frequency = stats.reference_frequency,
+										.packets_emitted = stats.packets_emitted,
+										.samples_emitted = stats.samples_emitted,
+										.packets_dropped = stats.packets_dropped,
+										.samples_dropped = stats.samples_dropped,
+										.over_range_count = stats.over_range_count,
+										.late_packet_count = stats.late_packet_count,
+										.context_packet_count = stats.context_packets,
+										.first_timestamp_unix_ps = stats.first_timestamp_unix_ps,
+										.last_timestamp_unix_ps = stats.last_timestamp_unix_ps};
+		}
 
 		[[nodiscard]] bool isStreamingReceiver(const Receiver* const receiver) noexcept
 		{
@@ -549,9 +568,11 @@ namespace core
 
 	SimulationEngine::SimulationEngine(World* world, pool::ThreadPool& pool, std::shared_ptr<ProgressReporter> reporter,
 									   std::string output_dir,
-									   std::shared_ptr<OutputMetadataCollector> metadata_collector) :
+									   std::shared_ptr<OutputMetadataCollector> metadata_collector,
+									   ReceiverOutputSink* output_sink) :
 		_world(world), _pool(pool), _reporter(std::move(reporter)), _metadata_collector(std::move(metadata_collector)),
-		_last_report_time(std::chrono::steady_clock::now()), _output_dir(std::move(output_dir))
+		_output_sink(output_sink), _last_report_time(std::chrono::steady_clock::now()),
+		_output_dir(std::move(output_dir))
 	{
 		_streaming_tracker_caches.resize(_world->getReceivers().size());
 		_if_pulse_tracker_caches.resize(_world->getReceivers().size());
@@ -591,6 +612,10 @@ namespace core
 			state.t_current = event.timestamp;
 
 			processEvent(event);
+			if (_output_sink != nullptr)
+			{
+				_output_sink->emitContextHeartbeat(state.t_current);
+			}
 			updateProgress();
 		}
 
@@ -707,7 +732,8 @@ namespace core
 			if (receiver_ptr->getMode() == OperationMode::PULSED_MODE)
 			{
 				_finalizer_threads.emplace_back(processing::runPulsedFinalizer, receiver_ptr.get(),
-												&_world->getTargets(), _reporter, _output_dir, _metadata_collector);
+												&_world->getTargets(), _reporter, _output_dir, _metadata_collector,
+												_output_sink);
 			}
 		}
 	}
@@ -1451,7 +1477,7 @@ namespace core
 				receiver_ptr->getMode() == OperationMode::FMCW_MODE)
 			{
 				_pool.enqueue(processing::finalizeStreamingReceiver, receiver_ptr.get(), &_pool, _reporter, _output_dir,
-							  _metadata_collector, streaming_sources);
+							  _metadata_collector, streaming_sources, _output_sink);
 			}
 			else if (receiver_ptr->getMode() == OperationMode::PULSED_MODE)
 			{
@@ -1480,12 +1506,34 @@ namespace core
 
 	OutputMetadata runEventDrivenSim(World* world, pool::ThreadPool& pool,
 									 const std::function<void(const std::string&, int, int)>& progress_callback,
-									 const std::string& output_dir)
+									 const std::string& output_dir, const OutputConfig& output_config)
 	{
 		auto reporter = std::make_shared<ProgressReporter>(progress_callback);
 		auto metadata_collector = std::make_shared<OutputMetadataCollector>(output_dir);
-		SimulationEngine engine(world, pool, reporter, output_dir, metadata_collector);
+		std::unique_ptr<ReceiverOutputSink> output_sink;
+		if (isVita49Enabled(output_config))
+		{
+			output_sink = serial::vita49::makeVita49OutputSink();
+			output_sink->initializeRun(output_config, params::params.simulation_name);
+		}
+
+		SimulationEngine engine(world, pool, reporter, output_dir, metadata_collector, output_sink.get());
 		engine.run();
-		return metadata_collector->snapshot();
+		auto metadata = metadata_collector->snapshot();
+		if (output_sink)
+		{
+			auto vita49_metadata = vita49MetadataFromConfig(output_config.vita49);
+			const auto stats = output_sink->finalize();
+			if (stats.epoch_unix_nanoseconds.has_value())
+			{
+				vita49_metadata.epoch_unix_nanoseconds = *stats.epoch_unix_nanoseconds;
+			}
+			for (const auto& stream : stats.streams)
+			{
+				vita49_metadata.streams.push_back(streamStatsToMetadata(stream));
+			}
+			metadata.vita49 = std::move(vita49_metadata);
+		}
+		return metadata;
 	}
 }

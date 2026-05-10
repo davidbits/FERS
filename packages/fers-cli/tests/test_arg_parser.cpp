@@ -2,6 +2,7 @@
 // Copyright (c) 2025-present FERS Contributors (see AUTHORS.md).
 
 #include <catch2/catch_test_macros.hpp>
+#include <cstdint>
 #include <functional>
 #include <iostream>
 #include <optional>
@@ -55,6 +56,11 @@ TEST_CASE("parseArguments accepts a script file and preserves defaults", "[fers-
 	CHECK_FALSE(result->generate_kml);
 	CHECK_FALSE(result->kml_file.has_value());
 	CHECK_FALSE(result->output_dir.has_value());
+	CHECK_FALSE(result->vita49_enabled);
+	CHECK(result->vita49_host.empty());
+	CHECK(result->vita49_port == 0);
+	CHECK_FALSE(result->vita49_fullscale.has_value());
+	CHECK_FALSE(result->vita49_epoch_unix_nanoseconds.has_value());
 }
 
 TEST_CASE("parseArguments applies recognized options", "[fers-cli][arg-parser]")
@@ -64,8 +70,10 @@ TEST_CASE("parseArguments applies recognized options", "[fers-cli][arg-parser]")
 
 	const auto n_arg = std::string{"-n="} + std::to_string(requested_threads);
 
-	const auto result = parseArgs({"scenario.fersxml", "--log-level=DEBUG", "--log-file=runner.log", n_arg,
-								   "--out-dir=results", "--no-validate", "--kml=preview.kml"});
+	const auto result =
+		parseArgs({"scenario.fersxml", "--log-level=DEBUG", "--log-file=runner.log", n_arg, "--out-dir=results",
+				   "--no-validate", "--kml=preview.kml", "--vita49", "localhost:4991", "--vita49-fullscale", "2.5",
+				   "--vita49-epoch", "1700000000123456789"});
 
 	REQUIRE(result);
 	CHECK(result->script_file == "scenario.fersxml");
@@ -76,6 +84,12 @@ TEST_CASE("parseArguments applies recognized options", "[fers-cli][arg-parser]")
 	CHECK(result->generate_kml);
 	CHECK(result->kml_file == std::optional<std::string>{"preview.kml"});
 	CHECK(result->output_dir == std::optional<std::string>{"results"});
+	CHECK(result->vita49_enabled);
+	CHECK(result->vita49_host == "localhost");
+	CHECK(result->vita49_port == 4991);
+	REQUIRE(result->vita49_fullscale.has_value());
+	CHECK(*result->vita49_fullscale == 2.5);
+	CHECK(result->vita49_epoch_unix_nanoseconds == std::optional<std::uint64_t>{1700000000123456789ULL});
 }
 
 TEST_CASE("parseArguments accepts flags before and after the script", "[fers-cli][arg-parser]")
@@ -98,6 +112,7 @@ TEST_CASE("parseArguments reports help and prints usage text", "[fers-cli][arg-p
 	CHECK(result.error() == "Help requested.");
 	CHECK(output.contains("Usage: fers-cli"));
 	CHECK(output.contains("--kml[=<file>]"));
+	CHECK(output.contains("--vita49 host:port"));
 }
 
 TEST_CASE("parseArguments reports version and prints version text", "[fers-cli][arg-parser]")
@@ -175,6 +190,57 @@ TEST_CASE("parseArguments rejects unknown options", "[fers-cli][arg-parser]")
 
 	REQUIRE_FALSE(result);
 	CHECK(result.error() == "Unrecognized argument: --bogus");
+}
+
+TEST_CASE("parseArguments rejects malformed VITA49 endpoints", "[fers-cli][arg-parser][vita49]")
+{
+	const auto missing_port = parseArgs({"scenario.fersxml", "--vita49", "localhost", "--vita49-fullscale", "1.0"});
+	REQUIRE_FALSE(missing_port);
+	CHECK(missing_port.error() == "Invalid VITA49 endpoint: expected host:port");
+
+	const auto empty_host = parseArgs({"scenario.fersxml", "--vita49", ":4991", "--vita49-fullscale", "1.0"});
+	REQUIRE_FALSE(empty_host);
+	CHECK(empty_host.error() == "Invalid VITA49 endpoint: expected host:port");
+
+	const auto zero_port = parseArgs({"scenario.fersxml", "--vita49", "localhost:0", "--vita49-fullscale", "1.0"});
+	REQUIRE_FALSE(zero_port);
+	CHECK(zero_port.error() == "VITA49 port must be in the range 1..65535");
+
+	const auto high_port = parseArgs({"scenario.fersxml", "--vita49", "localhost:65536", "--vita49-fullscale", "1.0"});
+	REQUIRE_FALSE(high_port);
+	CHECK(high_port.error() == "VITA49 port must be in the range 1..65535");
+}
+
+TEST_CASE("parseArguments rejects invalid VITA49 fullscale usage", "[fers-cli][arg-parser][vita49]")
+{
+	const auto missing = parseArgs({"scenario.fersxml", "--vita49", "localhost:4991"});
+	REQUIRE_FALSE(missing);
+	CHECK(missing.error() == "--vita49-fullscale is required when --vita49 is used");
+
+	const auto zero = parseArgs({"scenario.fersxml", "--vita49", "localhost:4991", "--vita49-fullscale", "0"});
+	REQUIRE_FALSE(zero);
+	CHECK(zero.error() == "VITA49 fullscale must be a positive real number");
+
+	const auto without_endpoint = parseArgs({"scenario.fersxml", "--vita49-fullscale", "1.0"});
+	REQUIRE_FALSE(without_endpoint);
+	CHECK(without_endpoint.error() == "--vita49-fullscale requires --vita49");
+}
+
+TEST_CASE("parseArguments rejects invalid VITA49 epoch usage", "[fers-cli][arg-parser][vita49]")
+{
+	const auto negative = parseArgs(
+		{"scenario.fersxml", "--vita49", "localhost:4991", "--vita49-fullscale", "1.0", "--vita49-epoch", "-1"});
+	REQUIRE_FALSE(negative);
+	CHECK(negative.error() == "VITA49 epoch must be an unsigned decimal integer");
+
+	const auto too_large = parseArgs({"scenario.fersxml", "--vita49", "localhost:4991", "--vita49-fullscale", "1.0",
+									  "--vita49-epoch", "4294967296000000000"});
+	REQUIRE_FALSE(too_large);
+	CHECK(too_large.error() == "VITA49 epoch must fit the VRT 32-bit UTC seconds timestamp field");
+
+	const auto without_endpoint = parseArgs({"scenario.fersxml", "--vita49-epoch", "1700000000000000000"});
+	REQUIRE_FALSE(without_endpoint);
+	CHECK(without_endpoint.error() == "--vita49-epoch requires --vita49");
 }
 
 TEST_CASE("parseArguments rejects extra positional arguments", "[fers-cli][arg-parser]")

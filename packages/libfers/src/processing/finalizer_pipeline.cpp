@@ -237,11 +237,16 @@ namespace processing::pipeline
 
 	RealType applyDownsamplingAndQuantization(std::vector<ComplexType>& buffer)
 	{
+		applyDownsampling(buffer);
+		return quantizeAndScaleWindow(buffer);
+	}
+
+	void applyDownsampling(std::vector<ComplexType>& buffer)
+	{
 		if (params::oversampleRatio() > 1)
 		{
 			buffer = std::move(fers_signal::downsample(buffer));
 		}
-		return quantizeAndScaleWindow(buffer);
 	}
 
 	void exportStreamingToHdf5(const std::string& filename, const std::vector<ComplexType>& iq_buffer,

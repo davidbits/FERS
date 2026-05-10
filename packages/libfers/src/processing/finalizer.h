@@ -12,8 +12,11 @@
 #pragma once
 
 #include <memory>
+#include <span>
+#include <string>
 #include <vector>
 
+#include "core/receiver_output.h"
 #include "core/simulation_state.h"
 
 namespace radar
@@ -35,6 +38,16 @@ namespace core
 
 namespace processing
 {
+	/// Builds the receiver stream descriptor used by output sinks.
+	[[nodiscard]] core::ReceiverStreamDescriptor buildReceiverStreamDescriptor(const radar::Receiver* receiver,
+																			   RealType sample_rate);
+
+	/// Builds a non-owning output sample block over contiguous processed complex samples.
+	[[nodiscard]] core::ReceiverSampleBlock buildReceiverSampleBlock(const radar::Receiver* receiver,
+																	 RealType first_sample_time, RealType sample_rate,
+																	 std::span<const ComplexType> samples,
+																	 std::uint64_t sample_start);
+
 	/**
 	 * @brief The main function for a dedicated pulsed-mode receiver finalizer thread.
 	 *
@@ -49,7 +62,8 @@ namespace processing
 	 */
 	void runPulsedFinalizer(radar::Receiver* receiver, const std::vector<std::unique_ptr<radar::Target>>* targets,
 							std::shared_ptr<core::ProgressReporter> reporter, const std::string& output_dir,
-							std::shared_ptr<core::OutputMetadataCollector> metadata_collector = nullptr);
+							std::shared_ptr<core::OutputMetadataCollector> metadata_collector = nullptr,
+							core::ReceiverOutputSink* output_sink = nullptr);
 
 	/**
 	 * @brief The finalization task for a streaming-mode receiver.
@@ -66,5 +80,6 @@ namespace processing
 	void finalizeStreamingReceiver(radar::Receiver* receiver, pool::ThreadPool* pool,
 								   std::shared_ptr<core::ProgressReporter> reporter, const std::string& output_dir,
 								   std::shared_ptr<core::OutputMetadataCollector> metadata_collector = nullptr,
-								   std::vector<core::ActiveStreamingSource> streaming_sources = {});
+								   std::vector<core::ActiveStreamingSource> streaming_sources = {},
+								   core::ReceiverOutputSink* output_sink = nullptr);
 }

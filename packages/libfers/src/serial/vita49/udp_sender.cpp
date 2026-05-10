@@ -1,0 +1,143 @@
+// SPDX-License-Identifier: GPL-2.0-only
+//
+// Copyright (c) 2026-present FERS Contributors (see AUTHORS.md).
+//
+// See the GNU GPLv2 LICENSE file in the FERS project root for more information.
+
+#include "serial/vita49/udp_sender.h"
+
+#include <cstring>
+#include <memory>
+#include <stdexcept>
+#include <string>
+
+#ifdef _WIN32
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#else
+#include <netdb.h>
+#include <sys/socket.h>
+#include <unistd.h>
+#endif
+
+namespace serial::vita49
+{
+	namespace
+	{
+		void freeAddress(void* address) noexcept { delete[] static_cast<std::byte*>(address); }
+	}
+
+	UdpSender::~UdpSender() { close(); }
+
+	UdpSender::UdpSender(UdpSender&& other) noexcept :
+		_socket(other._socket), _address(other._address), _address_size(other._address_size)
+	{
+		other._socket = -1;
+		other._address = nullptr;
+		other._address_size = 0;
+	}
+
+	UdpSender& UdpSender::operator=(UdpSender&& other) noexcept
+	{
+		if (this != &other)
+		{
+			close();
+			_socket = other._socket;
+			_address = other._address;
+			_address_size = other._address_size;
+			other._socket = -1;
+			other._address = nullptr;
+			other._address_size = 0;
+		}
+		return *this;
+	}
+
+	void UdpSender::open(const std::string& host, const std::uint16_t port)
+	{
+		close();
+		if (host.empty() || port == 0)
+		{
+			throw std::invalid_argument("VITA UDP destination requires non-empty host and non-zero port");
+		}
+
+#ifdef _WIN32
+		WSADATA wsa_data;
+		if (WSAStartup(MAKEWORD(2, 2), &wsa_data) != 0)
+		{
+			throw std::runtime_error("WSAStartup failed for VITA UDP sender");
+		}
+#endif
+
+		addrinfo hints{};
+		hints.ai_family = AF_UNSPEC;
+		hints.ai_socktype = SOCK_DGRAM;
+		hints.ai_protocol = IPPROTO_UDP;
+
+		addrinfo* result = nullptr;
+		const auto port_string = std::to_string(port);
+		const int gai = getaddrinfo(host.c_str(), port_string.c_str(), &hints, &result);
+		if (gai != 0)
+		{
+			throw std::runtime_error("VITA UDP destination resolution failed: " + host + ":" + port_string);
+		}
+		std::unique_ptr<addrinfo, decltype(&freeaddrinfo)> result_guard(result, freeaddrinfo);
+
+		for (auto* candidate = result; candidate != nullptr; candidate = candidate->ai_next)
+		{
+			const int fd =
+				static_cast<int>(::socket(candidate->ai_family, candidate->ai_socktype, candidate->ai_protocol));
+			if (fd < 0)
+			{
+				continue;
+			}
+
+			_socket = fd;
+			_address_size = candidate->ai_addrlen;
+			auto* storage = new std::byte[_address_size];
+			std::memcpy(storage, candidate->ai_addr, _address_size);
+			_address = storage;
+			return;
+		}
+
+		throw std::runtime_error("VITA UDP socket creation failed");
+	}
+
+	void UdpSender::send(const std::span<const std::uint8_t> bytes)
+	{
+		if (_socket < 0 || _address == nullptr)
+		{
+			throw std::runtime_error("VITA UDP sender is not open");
+		}
+		if (bytes.empty())
+		{
+			return;
+		}
+
+		const auto sent = ::sendto(_socket, reinterpret_cast<const char*>(bytes.data()), bytes.size(), 0,
+								   static_cast<const sockaddr*>(_address), static_cast<socklen_t>(_address_size));
+		if (sent < 0 || static_cast<std::size_t>(sent) != bytes.size())
+		{
+			throw std::runtime_error("VITA UDP send failed");
+		}
+	}
+
+	void UdpSender::close() noexcept
+	{
+		if (_socket >= 0)
+		{
+#ifdef _WIN32
+			::closesocket(_socket);
+			WSACleanup();
+#else
+			::close(_socket);
+#endif
+			_socket = -1;
+		}
+		if (_address != nullptr)
+		{
+			freeAddress(_address);
+			_address = nullptr;
+			_address_size = 0;
+		}
+	}
+}

@@ -80,6 +80,62 @@ void fers_context_destroy(fers_context_t* context);
 int fers_set_output_directory(fers_context_t* context, const char* out_dir);
 
 /**
+ * @brief Enables VITA 49.2 UDP receiver output for a context.
+ *
+ * HDF5 remains the default until this function succeeds. The host is copied by
+ * the library and may be freed by the caller after the call returns.
+ *
+ * @param context A valid `fers_context_t` handle.
+ * @param host Null-terminated destination host name or address.
+ * @param port Destination UDP port in the range 1..65535.
+ * @return 0 on success, non-zero on error.
+ */
+int fers_enable_vita49_udp_output(fers_context_t* context, const char* host, uint16_t port);
+
+/**
+ * @brief Sets the fixed ADC full-scale value used by VITA 49.2 int16 IQ output.
+ *
+ * VITA mode requires a positive finite full-scale before simulation starts.
+ * HDF5 output keeps its existing full-buffer scaling behavior.
+ *
+ * @param context A valid `fers_context_t` handle.
+ * @param fullscale Positive finite full-scale value.
+ * @return 0 on success, non-zero on error.
+ */
+int fers_set_vita49_fullscale(fers_context_t* context, double fullscale);
+
+/**
+ * @brief Sets a deterministic VITA 49.2 stream epoch as Unix nanoseconds.
+ *
+ * The epoch must fit the VRT 32-bit UTC seconds timestamp field.
+ *
+ * @param context A valid `fers_context_t` handle.
+ * @param epoch_unix_nanoseconds Unix epoch timestamp in nanoseconds.
+ * @return 0 on success, non-zero on error.
+ */
+int fers_set_vita49_epoch_unix_nanoseconds(fers_context_t* context, uint64_t epoch_unix_nanoseconds);
+
+/**
+ * @brief Sets the VITA 49.2 UDP maximum payload size in bytes.
+ *
+ * The default is 1400 bytes to avoid ordinary IP fragmentation.
+ *
+ * @param context A valid `fers_context_t` handle.
+ * @param max_udp_payload Maximum UDP payload size in bytes.
+ * @return 0 on success, non-zero on error.
+ */
+int fers_set_vita49_max_udp_payload(fers_context_t* context, uint16_t max_udp_payload);
+
+/**
+ * @brief Sets the bounded VITA 49.2 sender queue depth in packets.
+ *
+ * @param context A valid `fers_context_t` handle.
+ * @param queue_depth Queue depth in packets. Must be greater than zero.
+ * @return 0 on success, non-zero on error.
+ */
+int fers_set_vita49_queue_depth(fers_context_t* context, uint32_t queue_depth);
+
+/**
  * @brief Log levels for the FERS library.
  */
 typedef enum // NOLINT(*-use-using)

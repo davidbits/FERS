@@ -17,8 +17,11 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <future>
+#include <limits>
 #include <queue>
+#include <stdexcept>
 #include <tuple>
 #include <vector>
 
@@ -29,6 +32,35 @@
 
 namespace
 {
+	[[nodiscard]] std::int16_t scaleComponentToInt16(const RealType value, const RealType fullscale,
+													 bool& clipped) noexcept
+	{
+		if (value > fullscale)
+		{
+			clipped = true;
+			return std::numeric_limits<std::int16_t>::max();
+		}
+		if (value < -fullscale)
+		{
+			clipped = true;
+			return std::numeric_limits<std::int16_t>::min();
+		}
+		if (value == fullscale)
+		{
+			return std::numeric_limits<std::int16_t>::max();
+		}
+		if (value == -fullscale)
+		{
+			return std::numeric_limits<std::int16_t>::min();
+		}
+
+		const RealType scaled =
+			std::round((value / fullscale) * static_cast<RealType>(std::numeric_limits<std::int16_t>::max()));
+		return static_cast<std::int16_t>(
+			std::clamp<RealType>(scaled, static_cast<RealType>(std::numeric_limits<std::int16_t>::min()),
+								 static_cast<RealType>(std::numeric_limits<std::int16_t>::max())));
+	}
+
 	/**
 	 * @brief Simulate an ADC quantization process on a window of complex samples.
 	 * @param data A span of ComplexType objects representing the window to quantize.
@@ -170,5 +202,29 @@ namespace processing
 			}
 		}
 		return max_value;
+	}
+
+	FixedFullscaleScalingResult scaleToInt16FixedFullscale(const std::span<const ComplexType> samples,
+														   const RealType fullscale)
+	{
+		if (fullscale <= 0.0 || !std::isfinite(fullscale))
+		{
+			throw std::invalid_argument("Fixed full-scale must be positive and finite.");
+		}
+
+		FixedFullscaleScalingResult result;
+		result.samples.reserve(samples.size());
+		for (const auto& sample : samples)
+		{
+			bool clipped = false;
+			const auto i = scaleComponentToInt16(sample.real(), fullscale, clipped);
+			const auto q = scaleComponentToInt16(sample.imag(), fullscale, clipped);
+			if (clipped)
+			{
+				++result.clipped_sample_count;
+			}
+			result.samples.push_back(FixedFullscaleIqSample{.i = i, .q = q});
+		}
+		return result;
 	}
 }

@@ -14,6 +14,7 @@
 
 #pragma once
 
+#include <cstdint>
 #include <expected>
 #include <libfers/api.h>
 #include <optional>
@@ -36,6 +37,11 @@ namespace core
 		bool generate_kml = false; ///< Optional flag to generate KML visualization output.
 		std::optional<std::string> kml_file; ///< Optional specific file path for KML output.
 		std::optional<std::string> output_dir; ///< Optional output directory for simulation results.
+		bool vita49_enabled = false; ///< True when VITA 49.2 UDP output is selected.
+		std::string vita49_host; ///< VITA 49.2 UDP destination host.
+		uint16_t vita49_port = 0; ///< VITA 49.2 UDP destination port.
+		std::optional<double> vita49_fullscale; ///< Fixed ADC full-scale for VITA int16 IQ output.
+		std::optional<uint64_t> vita49_epoch_unix_nanoseconds; ///< Optional deterministic VITA epoch.
 	};
 
 	/**

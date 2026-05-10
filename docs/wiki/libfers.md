@@ -51,6 +51,23 @@ If your application has a UI, run the simulation on a background thread and use 
 
 The simulation writes the same HDF5 files as `fers-cli`. See [[Using FERS]] for output file structure.
 
+HDF5 is the default output backend. Applications can select the VITA 49.2 UDP backend at runtime:
+
+```c
+fers_enable_vita49_udp_output(context, "127.0.0.1", 4991);
+fers_set_vita49_fullscale(context, 1.0);
+fers_set_vita49_epoch_unix_nanoseconds(context, 1700000000123456789ULL);
+```
+
+The VITA epoch setter is optional. The full-scale setter is required before running in VITA mode. Additional tuning setters are available for maximum UDP payload and sender queue depth:
+
+```c
+fers_set_vita49_max_udp_payload(context, 1400);
+fers_set_vita49_queue_depth(context, 1024);
+```
+
+Do not put output transport selection in `.fersxml`; it remains a scenario/physics format.
+
 ## Progress Reporting
 
 Applications can provide a progress callback. Use it for:
@@ -88,6 +105,8 @@ After a run, applications can request JSON metadata describing the output files.
 
 Prefer this metadata over hard-coded output assumptions.
 
+When VITA 49.2 output is selected, the metadata includes a `vita49` section with endpoint, epoch, class ID, fixed full-scale, packet sizing, queue depth, and per-stream packet/sample counters when the streaming backend has populated them.
+
 ## KML Generation
 
 `libfers` can generate a KML file from a loaded scenario. Use this when an application needs a "preview scene on a map" action without running the full simulation.
@@ -118,6 +137,7 @@ When embedding FERS, make sure your application exposes these user-facing choice
 - Scenario file or generated XML input.
 - XML validation on or off. Validation should be on by default.
 - Output directory.
+- Optional VITA 49.2 UDP endpoint and fixed ADC full-scale.
 - Log level and optional log file.
 - Worker thread count for larger runs.
 - Progress display for long simulations.

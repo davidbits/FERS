@@ -65,11 +65,10 @@ namespace core
 			return 0;
 		}
 
-		const auto& [script_file, log_level, num_threads, validate, log_file, generate_kml, kml_file, output_dir] =
-			config_result.value();
+		const auto& config = config_result.value();
 
-		const char* log_file_ptr = log_file ? log_file->c_str() : nullptr;
-		if (fers_configure_logging(log_level, log_file_ptr) != 0)
+		const char* log_file_ptr = config.log_file ? config.log_file->c_str() : nullptr;
+		if (fers_configure_logging(config.log_level, log_file_ptr) != 0)
 		{
 			char* err = fers_get_last_error_message();
 			std::cerr << "[ERROR] Failed to configure logging: " << ((err != nullptr) ? err : "Unknown error") << '\n';
@@ -81,9 +80,10 @@ namespace core
 
 		log(FERS_LOG_DEBUG,
 			"Running FERS with arguments: script_file={}, log_level={}, num_threads={}, validate={}, log_file={}",
-			script_file, getLevelString(log_level), num_threads, validate, log_file.value_or("None"));
+			config.script_file, getLevelString(config.log_level), config.num_threads, config.validate,
+			config.log_file.value_or("None"));
 
-		const std::filesystem::path final_out_dir = resolveOutputDir(script_file, output_dir);
+		const std::filesystem::path final_out_dir = resolveOutputDir(config.script_file, config.output_dir);
 
 		fers_context_t* context = fers_context_create();
 		if (context == nullptr)
@@ -92,14 +92,43 @@ namespace core
 			return 1;
 		}
 
-		log(FERS_LOG_INFO, "Loading scenario from '{}'...", script_file);
-		if (fers_load_scenario_from_xml_file(context, script_file.c_str(), validate ? 1 : 0) != 0)
+		log(FERS_LOG_INFO, "Loading scenario from '{}'...", config.script_file);
+		if (fers_load_scenario_from_xml_file(context, config.script_file.c_str(), config.validate ? 1 : 0) != 0)
 		{
 			char* err = fers_get_last_error_message();
 			log(FERS_LOG_FATAL, "Failed to load scenario: {}", err ? err : "Unknown error");
 			fers_free_string(err);
 			fers_context_destroy(context);
 			return 1;
+		}
+
+		if (config.vita49_enabled)
+		{
+			if (fers_enable_vita49_udp_output(context, config.vita49_host.c_str(), config.vita49_port) != 0)
+			{
+				char* err = fers_get_last_error_message();
+				log(FERS_LOG_FATAL, "Failed to configure VITA49 endpoint: {}", err ? err : "Unknown error");
+				fers_free_string(err);
+				fers_context_destroy(context);
+				return 1;
+			}
+			if (fers_set_vita49_fullscale(context, *config.vita49_fullscale) != 0)
+			{
+				char* err = fers_get_last_error_message();
+				log(FERS_LOG_FATAL, "Failed to configure VITA49 fullscale: {}", err ? err : "Unknown error");
+				fers_free_string(err);
+				fers_context_destroy(context);
+				return 1;
+			}
+			if (config.vita49_epoch_unix_nanoseconds.has_value() &&
+				fers_set_vita49_epoch_unix_nanoseconds(context, *config.vita49_epoch_unix_nanoseconds) != 0)
+			{
+				char* err = fers_get_last_error_message();
+				log(FERS_LOG_FATAL, "Failed to configure VITA49 epoch: {}", err ? err : "Unknown error");
+				fers_free_string(err);
+				fers_context_destroy(context);
+				return 1;
+			}
 		}
 
 		if (fers_set_output_directory(context, final_out_dir.string().c_str()) != 0)
@@ -111,9 +140,10 @@ namespace core
 			return 1;
 		}
 
-		if (generate_kml)
+		if (config.generate_kml)
 		{
-			const std::filesystem::path kml_output_path = resolveKmlOutputPath(script_file, final_out_dir, kml_file);
+			const std::filesystem::path kml_output_path =
+				resolveKmlOutputPath(config.script_file, final_out_dir, config.kml_file);
 			const std::string kml_output_file = kml_output_path.string();
 
 			log(FERS_LOG_INFO, "Generating KML file for scenario: {}", kml_output_file);
@@ -133,7 +163,7 @@ namespace core
 			return kml_result == 0 ? 0 : 1;
 		}
 
-		if (fers_set_thread_count(num_threads) != 0)
+		if (fers_set_thread_count(config.num_threads) != 0)
 		{
 			char* err = fers_get_last_error_message();
 			log(FERS_LOG_ERROR, "Failed to set number of threads: {}", err ? err : "Unknown error");
