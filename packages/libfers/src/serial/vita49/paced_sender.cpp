@@ -135,13 +135,12 @@ namespace serial::vita49
 			}
 			_queue.pop_front();
 			const auto due = dueTime(packet);
-			lock.unlock();
-			if (std::chrono::steady_clock::now() < due && waitUntilDueOrStopping(due))
+			if (std::chrono::steady_clock::now() < due && waitUntilDueOrStopping(lock, due))
 			{
-				recordDropped(std::move(packet));
-				lock.lock();
+				recordDroppedUnlocked(packet);
 				continue;
 			}
+			lock.unlock();
 			sendOneUnlocked(std::move(packet), std::chrono::steady_clock::now());
 			lock.lock();
 		}
@@ -296,9 +295,9 @@ namespace serial::vita49
 		}
 	}
 
-	bool PacedSender::waitUntilDueOrStopping(const std::chrono::steady_clock::time_point due)
+	bool PacedSender::waitUntilDueOrStopping(std::unique_lock<std::mutex>& lock,
+											 const std::chrono::steady_clock::time_point due)
 	{
-		std::unique_lock lock(_mutex);
 		while (!_stopping)
 		{
 			const auto now = std::chrono::steady_clock::now();
@@ -332,12 +331,6 @@ namespace serial::vita49
 		}
 	}
 
-	void PacedSender::recordDropped(SerializedPacket packet)
-	{
-		std::lock_guard lock(_mutex);
-		recordDroppedUnlocked(packet);
-	}
-
 	void PacedSender::recordDroppedUnlocked(const SerializedPacket& packet)
 	{
 		if (packet.data_packet || (!packet.context_packet && packet.sample_count > 0))
@@ -364,32 +357,27 @@ namespace serial::vita49
 
 	void PacedSender::drainQueuedPackets()
 	{
-		while (true)
+		std::unique_lock lock(_mutex);
+		while (!_queue.empty())
 		{
-			SerializedPacket packet;
+			auto packet = std::move(_queue.front());
+			_queue.pop_front();
+			if (packet.data_packet && !_queued_data_packets.empty())
 			{
-				std::lock_guard lock(_mutex);
-				if (_queue.empty())
-				{
-					_queued_data_packets.clear();
-					return;
-				}
-				packet = std::move(_queue.front());
-				_queue.pop_front();
-				if (packet.data_packet && !_queued_data_packets.empty())
-				{
-					_queued_data_packets.pop_front();
-				}
+				_queued_data_packets.pop_front();
 			}
 
 			const auto due = dueTime(packet);
-			if (std::chrono::steady_clock::now() < due && waitUntilDueOrStopping(due))
+			if (std::chrono::steady_clock::now() < due && waitUntilDueOrStopping(lock, due))
 			{
-				recordDropped(std::move(packet));
+				recordDroppedUnlocked(packet);
 				continue;
 			}
+			lock.unlock();
 			sendOneUnlocked(std::move(packet), std::chrono::steady_clock::now());
+			lock.lock();
 		}
+		_queued_data_packets.clear();
 	}
 
 	std::chrono::steady_clock::time_point PacedSender::dueTime(const SerializedPacket& packet) const
