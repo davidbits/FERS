@@ -443,6 +443,14 @@ TEST_CASE("VITA paced sender stop drops far-future packets instead of bursting t
 								  .data_packet = true,
 								  .timestamp = Timestamp{}};
 	REQUIRE(sender.enqueue(packet).enqueued);
+	const SerializedPacket context_packet{.bytes = {0, 0, 0, 2},
+										  .stream_id = 5,
+										  .sample_count = 0,
+										  .first_sample_time = 30.0,
+										  .data_packet = false,
+										  .context_packet = true,
+										  .timestamp = Timestamp{}};
+	REQUIRE(sender.enqueue(context_packet).enqueued);
 	const auto start = std::chrono::steady_clock::now();
 	sender.stop();
 	const auto elapsed = std::chrono::steady_clock::now() - start;
@@ -450,6 +458,9 @@ TEST_CASE("VITA paced sender stop drops far-future packets instead of bursting t
 	REQUIRE(elapsed < std::chrono::milliseconds(500));
 	REQUIRE(recording_raw->sent.empty());
 	REQUIRE(sender.sentPacketCount(5) == 0u);
+	REQUIRE(sender.droppedDataPacketCount(5) == 1u);
+	REQUIRE(sender.droppedContextPacketCount(5) == 1u);
+	REQUIRE(sender.droppedSampleCount(5) == 1u);
 }
 
 TEST_CASE("VITA paced sender catches datagram send failures", "[serial][vita49]")
@@ -553,6 +564,49 @@ TEST_CASE("VITA output sink starts pacing at simulation start time", "[serial][v
 
 	REQUIRE(recording_raw->sent.size() >= 3u);
 	REQUIRE(elapsed < std::chrono::milliseconds(500));
+}
+
+TEST_CASE("VITA output sink accounts shutdown drops in final stream stats", "[serial][vita49]")
+{
+	using namespace serial::vita49;
+
+	ParamGuard guard;
+	params::setTime(0.0, 1.0);
+
+	auto recording = std::make_unique<RecordingSender>();
+	auto* recording_raw = recording.get();
+	Vita49OutputSink sink(std::move(recording));
+	const core::OutputConfig config{.mode = core::OutputMode::Vita49Udp,
+									.vita49 = {.host = "127.0.0.1",
+											   .port = 1,
+											   .adc_fullscale = 1.0,
+											   .queue_depth = 8,
+											   .epoch_unix_nanoseconds = 1'700'000'000'000'000'000ull,
+											   .max_udp_payload = 1400}};
+	sink.initializeRun(config, "sim");
+
+	const core::ReceiverStreamDescriptor stream{.receiver_id = 42,
+												.receiver_name = "rx",
+												.mode = "cw",
+												.sample_rate = 1.0,
+												.reference_frequency = 9.0e8,
+												.coordinate = {},
+												.initial_platform_state = {},
+												.fmcw = {}};
+	std::vector<ComplexType> samples{ComplexType(0.25, -0.25)};
+	const core::ReceiverSampleBlock block{
+		.stream = stream, .first_sample_time = 30.0, .sample_rate = 1.0, .samples = samples, .sample_start = 0};
+
+	sink.submitBlock(block);
+	const auto stats = sink.finalize();
+
+	REQUIRE(recording_raw->sent.empty());
+	REQUIRE(stats.streams.size() == 1u);
+	CHECK(stats.streams.front().packets_emitted == 0u);
+	CHECK(stats.streams.front().samples_emitted == 0u);
+	CHECK(stats.streams.front().context_packets == 0u);
+	CHECK(stats.streams.front().packets_dropped == 3u);
+	CHECK(stats.streams.front().samples_dropped == 1u);
 }
 
 #ifndef _WIN32

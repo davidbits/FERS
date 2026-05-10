@@ -138,6 +138,7 @@ namespace serial::vita49
 			lock.unlock();
 			if (std::chrono::steady_clock::now() < due && waitUntilDueOrStopping(due))
 			{
+				recordDropped(std::move(packet));
 				lock.lock();
 				continue;
 			}
@@ -153,8 +154,7 @@ namespace serial::vita49
 			std::lock_guard lock(_mutex);
 			if (!_started && !_thread.joinable())
 			{
-				_queue.clear();
-				_queued_data_packets.clear();
+				clearQueuedPacketsAsDroppedUnlocked();
 				_sender->close();
 				return;
 			}
@@ -175,8 +175,7 @@ namespace serial::vita49
 		else
 		{
 			std::lock_guard lock(_mutex);
-			_queue.clear();
-			_queued_data_packets.clear();
+			clearQueuedPacketsAsDroppedUnlocked();
 		}
 		{
 			std::lock_guard lock(_mutex);
@@ -205,6 +204,27 @@ namespace serial::vita49
 		std::lock_guard lock(_mutex);
 		const auto found = _send_failures.find(stream_id);
 		return found == _send_failures.end() ? 0 : found->second;
+	}
+
+	std::uint64_t PacedSender::droppedDataPacketCount(const std::uint32_t stream_id) const
+	{
+		std::lock_guard lock(_mutex);
+		const auto found = _dropped_data_packets.find(stream_id);
+		return found == _dropped_data_packets.end() ? 0 : found->second;
+	}
+
+	std::uint64_t PacedSender::droppedContextPacketCount(const std::uint32_t stream_id) const
+	{
+		std::lock_guard lock(_mutex);
+		const auto found = _dropped_context_packets.find(stream_id);
+		return found == _dropped_context_packets.end() ? 0 : found->second;
+	}
+
+	std::uint64_t PacedSender::droppedSampleCount(const std::uint32_t stream_id) const
+	{
+		std::lock_guard lock(_mutex);
+		const auto found = _dropped_samples.find(stream_id);
+		return found == _dropped_samples.end() ? 0 : found->second;
 	}
 
 	void PacedSender::run()
@@ -312,6 +332,36 @@ namespace serial::vita49
 		}
 	}
 
+	void PacedSender::recordDropped(SerializedPacket packet)
+	{
+		std::lock_guard lock(_mutex);
+		recordDroppedUnlocked(packet);
+	}
+
+	void PacedSender::recordDroppedUnlocked(const SerializedPacket& packet)
+	{
+		if (packet.data_packet || (!packet.context_packet && packet.sample_count > 0))
+		{
+			++_dropped_data_packets[packet.stream_id];
+			_dropped_samples[packet.stream_id] += packet.sample_count;
+			return;
+		}
+		if (packet.context_packet)
+		{
+			++_dropped_context_packets[packet.stream_id];
+		}
+	}
+
+	void PacedSender::clearQueuedPacketsAsDroppedUnlocked()
+	{
+		for (const auto& packet : _queue)
+		{
+			recordDroppedUnlocked(packet);
+		}
+		_queue.clear();
+		_queued_data_packets.clear();
+	}
+
 	void PacedSender::drainQueuedPackets()
 	{
 		while (true)
@@ -335,6 +385,7 @@ namespace serial::vita49
 			const auto due = dueTime(packet);
 			if (std::chrono::steady_clock::now() < due && waitUntilDueOrStopping(due))
 			{
+				recordDropped(std::move(packet));
 				continue;
 			}
 			sendOneUnlocked(std::move(packet), std::chrono::steady_clock::now());

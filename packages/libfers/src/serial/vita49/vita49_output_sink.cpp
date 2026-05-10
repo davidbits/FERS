@@ -6,6 +6,7 @@
 
 #include "serial/vita49/vita49_output_sink.h"
 
+#include <algorithm>
 #include <chrono>
 #include <stdexcept>
 
@@ -199,6 +200,14 @@ namespace serial::vita49
 			if (_sender)
 			{
 				state.stats.late_packet_count = _sender->latePacketCount(stream_id);
+				const auto dropped_data_packets = _sender->droppedDataPacketCount(stream_id);
+				const auto dropped_context_packets = _sender->droppedContextPacketCount(stream_id);
+				const auto dropped_samples = _sender->droppedSampleCount(stream_id);
+				state.stats.packets_dropped += dropped_data_packets + dropped_context_packets;
+				state.stats.samples_dropped += dropped_samples;
+				state.stats.packets_emitted -= std::min(state.stats.packets_emitted, dropped_data_packets);
+				state.stats.samples_emitted -= std::min(state.stats.samples_emitted, dropped_samples);
+				state.stats.context_packets -= std::min(state.stats.context_packets, dropped_context_packets);
 			}
 			stats.streams.push_back(state.stats);
 		}

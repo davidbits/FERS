@@ -53,12 +53,18 @@ namespace serial::vita49
 		[[nodiscard]] std::uint64_t latePacketCount(std::uint32_t stream_id) const;
 		[[nodiscard]] std::uint64_t sentPacketCount(std::uint32_t stream_id) const;
 		[[nodiscard]] std::uint64_t sendFailureCount(std::uint32_t stream_id) const;
+		[[nodiscard]] std::uint64_t droppedDataPacketCount(std::uint32_t stream_id) const;
+		[[nodiscard]] std::uint64_t droppedContextPacketCount(std::uint32_t stream_id) const;
+		[[nodiscard]] std::uint64_t droppedSampleCount(std::uint32_t stream_id) const;
 
 	private:
 		void run();
 		[[nodiscard]] bool waitUntilDue(std::unique_lock<std::mutex>& lock, std::chrono::steady_clock::time_point due);
 		[[nodiscard]] bool waitUntilDueOrStopping(std::chrono::steady_clock::time_point due);
 		void sendOneUnlocked(SerializedPacket packet, std::chrono::steady_clock::time_point now);
+		void recordDropped(SerializedPacket packet);
+		void recordDroppedUnlocked(const SerializedPacket& packet);
+		void clearQueuedPacketsAsDroppedUnlocked();
 		void drainQueuedPackets();
 		[[nodiscard]] std::chrono::steady_clock::time_point dueTime(const SerializedPacket& packet) const;
 		[[nodiscard]] std::optional<DroppedDatagram> dropQueuedDataPacketUnlocked();
@@ -72,6 +78,9 @@ namespace serial::vita49
 		std::unordered_map<std::uint32_t, std::uint64_t> _late_packets;
 		std::unordered_map<std::uint32_t, std::uint64_t> _sent_packets;
 		std::unordered_map<std::uint32_t, std::uint64_t> _send_failures;
+		std::unordered_map<std::uint32_t, std::uint64_t> _dropped_data_packets;
+		std::unordered_map<std::uint32_t, std::uint64_t> _dropped_context_packets;
+		std::unordered_map<std::uint32_t, std::uint64_t> _dropped_samples;
 		std::chrono::steady_clock::time_point _steady_epoch = std::chrono::steady_clock::now();
 		RealType _simulation_epoch_time = 0.0;
 		bool _started = false;
