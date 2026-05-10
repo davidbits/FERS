@@ -147,13 +147,17 @@ namespace serial::vita49
 
 	void PacedSender::stop()
 	{
+		bool drain_after_join = false;
 		{
 			std::lock_guard lock(_mutex);
 			if (!_started && !_thread.joinable())
 			{
+				_queue.clear();
+				_queued_data_packets.clear();
 				_sender->close();
 				return;
 			}
+			drain_after_join = _started;
 			_stopping = true;
 			_cv.notify_all();
 		}
@@ -163,25 +167,20 @@ namespace serial::vita49
 			_thread.join();
 		}
 
-		std::deque<SerializedPacket> due_packets;
+		if (drain_after_join)
+		{
+			drainQueuedPackets();
+		}
+		else
 		{
 			std::lock_guard lock(_mutex);
-			const auto now = std::chrono::steady_clock::now();
-			for (auto& packet : _queue)
-			{
-				if (dueTime(packet) <= now)
-				{
-					due_packets.push_back(std::move(packet));
-				}
-			}
 			_queue.clear();
 			_queued_data_packets.clear();
-			_started = false;
 		}
-
-		for (auto& packet : due_packets)
 		{
-			sendOneUnlocked(std::move(packet), std::chrono::steady_clock::now());
+			std::lock_guard lock(_mutex);
+			_started = false;
+			_stopping = false;
 		}
 		_sender->close();
 	}
@@ -198,6 +197,13 @@ namespace serial::vita49
 		std::lock_guard lock(_mutex);
 		const auto found = _sent_packets.find(stream_id);
 		return found == _sent_packets.end() ? 0 : found->second;
+	}
+
+	std::uint64_t PacedSender::sendFailureCount(const std::uint32_t stream_id) const
+	{
+		std::lock_guard lock(_mutex);
+		const auto found = _send_failures.find(stream_id);
+		return found == _send_failures.end() ? 0 : found->second;
 	}
 
 	void PacedSender::run()
@@ -272,12 +278,51 @@ namespace serial::vita49
 	void PacedSender::sendOneUnlocked(SerializedPacket packet, const std::chrono::steady_clock::time_point now)
 	{
 		const auto due = dueTime(packet);
-		_sender->send(packet.bytes);
+		try
+		{
+			_sender->send(packet.bytes);
+		}
+		catch (...)
+		{
+			std::lock_guard lock(_mutex);
+			++_send_failures[packet.stream_id];
+			return;
+		}
 		std::lock_guard lock(_mutex);
 		++_sent_packets[packet.stream_id];
 		if (now > due + std::chrono::milliseconds(1))
 		{
 			++_late_packets[packet.stream_id];
+		}
+	}
+
+	void PacedSender::drainQueuedPackets()
+	{
+		while (true)
+		{
+			SerializedPacket packet;
+			{
+				std::lock_guard lock(_mutex);
+				if (_queue.empty())
+				{
+					_queued_data_packets.clear();
+					return;
+				}
+				packet = std::move(_queue.front());
+				_queue.pop_front();
+				if (packet.data_packet && !_queued_data_packets.empty())
+				{
+					_queued_data_packets.pop_front();
+				}
+			}
+
+			const auto due = dueTime(packet);
+			const auto now = std::chrono::steady_clock::now();
+			if (due > now)
+			{
+				std::this_thread::sleep_until(due);
+			}
+			sendOneUnlocked(std::move(packet), std::chrono::steady_clock::now());
 		}
 	}
 

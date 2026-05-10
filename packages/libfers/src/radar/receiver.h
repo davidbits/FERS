@@ -366,6 +366,9 @@ namespace radar
 			return _pulsed_interference_log;
 		}
 
+		/// Removes logged pulsed interference responses that ended before a receive time.
+		void prunePulsedInterferenceEndingBefore(RealType cutoff_time) noexcept;
+
 		/**
 		 * @brief Sets the active schedule for the receiver.
 		 * @param schedule A vector of active periods.

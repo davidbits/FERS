@@ -783,6 +783,33 @@ TEST_CASE("SimulationEngine emits output heartbeats on streaming simulation time
 	REQUIRE_THAT(sink.heartbeat_times[2], WithinAbs(3.0, 1e-12));
 }
 
+TEST_CASE("SimulationEngine does not burst historical heartbeats after schedule gaps", "[core][threading][vita49]")
+{
+	ParamGuard guard;
+	params::setRate(0.1);
+	params::setOversampleRatio(1);
+	params::setTime(0.0, 4000.0);
+
+	auto world = createPhysicsWorld();
+	pool::ThreadPool pool(1);
+	RecordingOutputSink sink;
+	core::SimulationEngine engine(world.get(), pool, nullptr, ".", nullptr, &sink);
+
+	auto* tx = world->getTransmitters().front().get();
+	auto* rx = world->getReceivers().front().get();
+
+	rx->setActive(true);
+	world->getSimulationState().t_current = 0.0;
+	engine.handleTxStreamingStart(core::makeActiveSource(tx, params::startTime(), params::endTime()));
+	engine.processStreamingPhysics(1.0);
+
+	rx->setActive(false);
+	engine.processStreamingPhysics(3600.0);
+
+	REQUIRE(sink.heartbeat_times.size() < 500u);
+	REQUIRE_THAT(sink.heartbeat_times.back(), WithinAbs(3600.0, 1e-12));
+}
+
 TEST_CASE("SimulationEngine streaming output applies logged pulsed interference through block path",
 		  "[core][threading][interference]")
 {

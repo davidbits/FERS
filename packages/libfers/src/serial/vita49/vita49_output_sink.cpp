@@ -9,6 +9,7 @@
 #include <chrono>
 #include <stdexcept>
 
+#include "core/parameters.h"
 #include "serial/vita49/udp_sender.h"
 
 namespace serial::vita49
@@ -62,7 +63,7 @@ namespace serial::vita49
 		_sender = std::make_unique<PacedSender>(
 			_provided_sender ? std::move(_provided_sender) : std::make_unique<UdpSender>(), config.vita49.queue_depth);
 		_sender->open(config.vita49.host, config.vita49.port);
-		_sender->start(0.0);
+		_sender->start(params::startTime());
 		_initialized = true;
 		_finalized = false;
 	}
@@ -106,24 +107,27 @@ namespace serial::vita49
 			openStream(stream_id, block.first_sample_time);
 		}
 
-		const auto result = _packetizer->packetize(block, stream_id, state.packet_counts, state.sample_loss_pending);
+		auto result = _packetizer->packetize(block, stream_id, state.packet_counts, state.sample_loss_pending);
 		state.sample_loss_pending = false;
-		for (const auto& packet : result.packets)
+		for (auto& packet : result.packets)
 		{
-			if (!enqueuePacket(packet))
+			const auto packet_sample_count = packet.sample_count;
+			const auto packet_first_sample_time = packet.first_sample_time;
+			const auto packet_over_range = packet.over_range;
+			if (!enqueuePacket(std::move(packet)))
 			{
 				continue;
 			}
-			state.stats.samples_emitted += packet.sample_count;
+			state.stats.samples_emitted += packet_sample_count;
 			++state.stats.packets_emitted;
 			const auto packet_ps =
-				saturatedUnixPicoseconds(_packetizer->epochUnixNanoseconds(), packet.first_sample_time);
+				saturatedUnixPicoseconds(_packetizer->epochUnixNanoseconds(), packet_first_sample_time);
 			if (state.stats.first_timestamp_unix_ps == 0)
 			{
 				state.stats.first_timestamp_unix_ps = packet_ps;
 			}
 			state.stats.last_timestamp_unix_ps = packet_ps;
-			if (packet.over_range)
+			if (packet_over_range)
 			{
 				state.over_range_pending = true;
 			}
@@ -222,14 +226,14 @@ namespace serial::vita49
 		return found->second;
 	}
 
-	bool Vita49OutputSink::enqueuePacket(const SerializedPacket& packet)
+	bool Vita49OutputSink::enqueuePacket(SerializedPacket&& packet)
 	{
 		if (!_sender)
 		{
 			throw std::logic_error("VITA paced sender is unavailable");
 		}
 
-		const auto result = _sender->enqueue(packet);
+		const auto result = _sender->enqueue(std::move(packet));
 		if (result.dropped)
 		{
 			applyDropped(*result.dropped);
@@ -263,7 +267,7 @@ namespace serial::vita49
 		const auto context = Vita49ContextBuilder::build(request);
 		auto packet = _packetizer->makeContextPacket(context);
 		packet.first_sample_time = context_time;
-		if (enqueuePacket(packet))
+		if (enqueuePacket(std::move(packet)))
 		{
 			++state.stats.context_packets;
 		}

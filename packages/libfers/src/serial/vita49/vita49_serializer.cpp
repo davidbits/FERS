@@ -6,7 +6,9 @@
 
 #include "serial/vita49/vita49_serializer.h"
 
+#include <algorithm>
 #include <bit>
+#include <cmath>
 #include <cstring>
 #include <limits>
 #include <stdexcept>
@@ -15,6 +17,35 @@ namespace serial::vita49
 {
 	namespace
 	{
+		[[nodiscard]] std::int16_t scaleComponentToInt16(const RealType value, const RealType fullscale,
+														 bool& clipped) noexcept
+		{
+			if (value > fullscale)
+			{
+				clipped = true;
+				return std::numeric_limits<std::int16_t>::max();
+			}
+			if (value < -fullscale)
+			{
+				clipped = true;
+				return std::numeric_limits<std::int16_t>::min();
+			}
+			if (value == fullscale)
+			{
+				return std::numeric_limits<std::int16_t>::max();
+			}
+			if (value == -fullscale)
+			{
+				return std::numeric_limits<std::int16_t>::min();
+			}
+
+			const RealType scaled =
+				std::round((value / fullscale) * static_cast<RealType>(std::numeric_limits<std::int16_t>::max()));
+			return static_cast<std::int16_t>(
+				std::clamp<RealType>(scaled, static_cast<RealType>(std::numeric_limits<std::int16_t>::min()),
+									 static_cast<RealType>(std::numeric_limits<std::int16_t>::max())));
+		}
+
 		[[nodiscard]] std::uint16_t checkedWordCount(const std::size_t byte_count)
 		{
 			if (byte_count % sizeof(std::uint32_t) != 0u)
@@ -27,6 +58,14 @@ namespace serial::vita49
 				throw std::length_error("VITA packet exceeds 16-bit word count");
 			}
 			return static_cast<std::uint16_t>(words);
+		}
+	}
+
+	ByteWriter::ByteWriter(const std::size_t reserve_bytes)
+	{
+		if (reserve_bytes > 0u)
+		{
+			_bytes.reserve(reserve_bytes);
 		}
 	}
 
@@ -92,7 +131,7 @@ namespace serial::vita49
 		const std::size_t byte_count = kSignalDataFixedBytes + packet.iq_interleaved.size() * sizeof(std::int16_t);
 		const auto packet_size_words = checkedWordCount(byte_count);
 
-		ByteWriter writer;
+		ByteWriter writer(byte_count);
 		writer.writeU32(makeHeader(PacketType::SignalDataWithStreamId, true, true, IntegerTimestampMode::Utc,
 								   FractionalTimestampMode::RealTimePicoseconds, packet.packet_count,
 								   packet_size_words));
@@ -111,6 +150,48 @@ namespace serial::vita49
 			throw std::logic_error("VITA signal packet byte count mismatch");
 		}
 		return writer.takeBytes();
+	}
+
+	SignalDataSerializationResult Vita49Serializer::serializeSignalDataFixedFullscale(
+		const std::uint32_t stream_id, const std::uint64_t class_id, const Timestamp timestamp,
+		const std::uint8_t packet_count, const bool valid_data, const bool calibrated_time, const bool reference_lock,
+		const bool sample_loss, const std::span<const ComplexType> samples, const RealType fullscale)
+	{
+		if (!std::isfinite(fullscale) || fullscale <= 0.0)
+		{
+			throw std::invalid_argument("VITA signal full-scale must be positive and finite");
+		}
+
+		const std::size_t byte_count = kSignalDataFixedBytes + samples.size() * sizeof(std::int16_t) * 2u;
+		const auto packet_size_words = checkedWordCount(byte_count);
+
+		ByteWriter writer(byte_count);
+		writer.writeU32(makeHeader(PacketType::SignalDataWithStreamId, true, true, IntegerTimestampMode::Utc,
+								   FractionalTimestampMode::RealTimePicoseconds, packet_count, packet_size_words));
+		writer.writeU32(stream_id);
+		writer.writeU64(class_id);
+		writer.writeU32(timestamp.integer_seconds);
+		writer.writeU64(timestamp.fractional_picoseconds);
+
+		std::uint64_t clipped_sample_count = 0;
+		for (const auto& sample : samples)
+		{
+			bool clipped = false;
+			writer.writeI16(scaleComponentToInt16(sample.real(), fullscale, clipped));
+			writer.writeI16(scaleComponentToInt16(sample.imag(), fullscale, clipped));
+			if (clipped)
+			{
+				++clipped_sample_count;
+			}
+		}
+		writer.writeU32(
+			makeTrailer(valid_data, calibrated_time, reference_lock, clipped_sample_count > 0, sample_loss));
+
+		if (writer.bytes().size() != byte_count)
+		{
+			throw std::logic_error("VITA direct signal packet byte count mismatch");
+		}
+		return SignalDataSerializationResult{.bytes = writer.takeBytes(), .clipped_sample_count = clipped_sample_count};
 	}
 
 	std::vector<std::uint8_t> Vita49Serializer::serializeContext(const ContextPacket& packet)
@@ -134,7 +215,7 @@ namespace serial::vita49
 		const std::size_t byte_count = 4u + 4u + 8u + 4u + 8u + payload.bytes().size();
 		const auto packet_size_words = checkedWordCount(byte_count);
 
-		ByteWriter writer;
+		ByteWriter writer(byte_count);
 		writer.writeU32(makeHeader(PacketType::Context, true, false, IntegerTimestampMode::Utc,
 								   FractionalTimestampMode::RealTimePicoseconds, packet.packet_count,
 								   packet_size_words));

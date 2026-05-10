@@ -14,6 +14,7 @@ This page is the implementation contract for the FERS VITA 49.2 UDP output backe
 - Context cadence: stream open, metadata changes, one-second heartbeat, stream close.
 - Trailer indicators: valid data, calibrated time, reference lock, over-range, sample loss.
 - Class ID: internal placeholder for `FERS VRT IQ Stream v1` until an official allocation is assigned.
+- Context CIF0 uses only standard indicator bits; FERS-specific interpretation is identified by Class ID and profile-defined context payload, not by redefining reserved CIF0 bits.
 - ADC scaling: fixed full-scale only in VITA mode; HDF5 keeps existing full-buffer normalization.
 - Pacing: `std::chrono::steady_clock` scheduler mapped to UTC packet timestamps at run start.
 - Backpressure: bounded queue, drop unsent data packets, set sample-loss indicators, continue simulation.

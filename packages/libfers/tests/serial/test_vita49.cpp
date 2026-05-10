@@ -6,8 +6,10 @@
 #include <chrono>
 #include <cstdint>
 #include <memory>
+#include <stdexcept>
 #include <vector>
 
+#include "core/parameters.h"
 #include "serial/vita49/paced_sender.h"
 #include "serial/vita49/stream_registry.h"
 #include "serial/vita49/udp_sender.h"
@@ -25,6 +27,13 @@
 
 namespace
 {
+	struct ParamGuard
+	{
+		params::Parameters saved;
+		ParamGuard() : saved(params::params) {}
+		~ParamGuard() { params::params = saved; }
+	};
+
 	[[nodiscard]] std::uint16_t readU16(const std::vector<std::uint8_t>& bytes, const std::size_t offset)
 	{
 		return static_cast<std::uint16_t>((static_cast<std::uint16_t>(bytes.at(offset)) << 8u) |
@@ -59,6 +68,16 @@ namespace
 		bool opened = false;
 		bool closed = false;
 		std::vector<std::vector<std::uint8_t>> sent;
+	};
+
+	class ThrowingSender final : public serial::vita49::DatagramSender
+	{
+	public:
+		void open(const std::string&, std::uint16_t) override {}
+		void send(std::span<const std::uint8_t>) override { throw std::runtime_error("send failed"); }
+		void close() noexcept override { closed = true; }
+
+		bool closed = false;
 	};
 }
 
@@ -265,6 +284,51 @@ TEST_CASE("VITA queue overflow drops data and loss flags appear in next packet/c
 	REQUIRE((readU32(context_bytes, 96) & ContextFlagSampleLoss) == ContextFlagSampleLoss);
 }
 
+TEST_CASE("VITA paced sender drains future packets on stop", "[serial][vita49]")
+{
+	using namespace serial::vita49;
+
+	auto recording = std::make_unique<RecordingSender>();
+	auto* recording_raw = recording.get();
+	PacedSender sender(std::move(recording), 4);
+	sender.open("127.0.0.1", 1);
+	sender.start(1000.0);
+
+	const SerializedPacket packet{.bytes = {0, 0, 0, 1},
+								  .stream_id = 5,
+								  .sample_count = 1,
+								  .first_sample_time = 1000.002,
+								  .data_packet = true,
+								  .timestamp = Timestamp{}};
+	REQUIRE(sender.enqueue(packet).enqueued);
+	sender.stop();
+
+	REQUIRE(recording_raw->sent.size() == 1u);
+	REQUIRE(sender.sentPacketCount(5) == 1u);
+}
+
+TEST_CASE("VITA paced sender catches datagram send failures", "[serial][vita49]")
+{
+	using namespace serial::vita49;
+
+	auto throwing = std::make_unique<ThrowingSender>();
+	auto* throwing_raw = throwing.get();
+	PacedSender sender(std::move(throwing), 4);
+	sender.open("127.0.0.1", 1);
+	sender.start(0.0);
+
+	const SerializedPacket packet{.bytes = {0, 0, 0, 1},
+								  .stream_id = 7,
+								  .sample_count = 1,
+								  .first_sample_time = 0.0,
+								  .data_packet = true,
+								  .timestamp = Timestamp{}};
+	REQUIRE(sender.enqueue(packet).enqueued);
+	REQUIRE_NOTHROW(sender.stop());
+	REQUIRE(throwing_raw->closed);
+	REQUIRE(sender.sendFailureCount(7) == 1u);
+}
+
 TEST_CASE("VITA output sink emits context, signal data, and stats through injected sender", "[serial][vita49]")
 {
 	using namespace serial::vita49;
@@ -298,6 +362,40 @@ TEST_CASE("VITA output sink emits context, signal data, and stats through inject
 	CHECK(stats.streams.front().packets_emitted == 1u);
 	CHECK(stats.streams.front().context_packets >= 2u);
 	CHECK(stats.streams.front().over_range_count == 1u);
+}
+
+TEST_CASE("VITA output sink starts pacing at simulation start time", "[serial][vita49]")
+{
+	using namespace serial::vita49;
+
+	ParamGuard guard;
+	params::setTime(2.0, 3.0);
+
+	auto recording = std::make_unique<RecordingSender>();
+	auto* recording_raw = recording.get();
+	Vita49OutputSink sink(std::move(recording));
+	const core::OutputConfig config{.mode = core::OutputMode::Vita49Udp,
+									.vita49 = {.host = "127.0.0.1",
+											   .port = 1,
+											   .adc_fullscale = 1.0,
+											   .queue_depth = 8,
+											   .epoch_unix_nanoseconds = 1'700'000'000'000'000'000ull,
+											   .max_udp_payload = 1400}};
+	sink.initializeRun(config, "sim");
+
+	const core::ReceiverStreamDescriptor stream{
+		.receiver_id = 42, .receiver_name = "rx", .mode = "cw", .sample_rate = 1.0, .reference_frequency = 9.0e8};
+	std::vector<ComplexType> samples{ComplexType(0.25, -0.25)};
+	const core::ReceiverSampleBlock block{
+		.stream = stream, .first_sample_time = 2.0, .sample_rate = 1.0, .samples = samples, .sample_start = 0};
+
+	const auto start = std::chrono::steady_clock::now();
+	sink.submitBlock(block);
+	(void)sink.finalize();
+	const auto elapsed = std::chrono::steady_clock::now() - start;
+
+	REQUIRE(recording_raw->sent.size() >= 3u);
+	REQUIRE(elapsed < std::chrono::milliseconds(500));
 }
 
 #ifndef _WIN32

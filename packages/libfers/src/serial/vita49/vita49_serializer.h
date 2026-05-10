@@ -6,6 +6,7 @@
 
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <span>
 #include <vector>
@@ -17,6 +18,8 @@ namespace serial::vita49
 	class ByteWriter
 	{
 	public:
+		explicit ByteWriter(std::size_t reserve_bytes = 0);
+
 		void writeU16(std::uint16_t value);
 		void writeI16(std::int16_t value);
 		void writeU32(std::uint32_t value);
@@ -36,6 +39,11 @@ namespace serial::vita49
 	{
 	public:
 		[[nodiscard]] static std::vector<std::uint8_t> serializeSignalData(const SignalDataPacket& packet);
+		[[nodiscard]] static SignalDataSerializationResult
+		serializeSignalDataFixedFullscale(std::uint32_t stream_id, std::uint64_t class_id, Timestamp timestamp,
+										  std::uint8_t packet_count, bool valid_data, bool calibrated_time,
+										  bool reference_lock, bool sample_loss, std::span<const ComplexType> samples,
+										  RealType fullscale);
 		[[nodiscard]] static std::vector<std::uint8_t> serializeContext(const ContextPacket& packet);
 	};
 }

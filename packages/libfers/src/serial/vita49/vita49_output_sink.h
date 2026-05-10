@@ -48,7 +48,7 @@ namespace serial::vita49
 
 		[[nodiscard]] StreamState& stateFor(std::uint32_t stream_id);
 		[[nodiscard]] const StreamState& stateFor(std::uint32_t stream_id) const;
-		[[nodiscard]] bool enqueuePacket(const SerializedPacket& packet);
+		[[nodiscard]] bool enqueuePacket(SerializedPacket&& packet);
 		void emitContext(std::uint32_t stream_id, RealType simulation_time, bool stream_open, bool stream_close);
 		void applyDropped(const DroppedDatagram& dropped);
 

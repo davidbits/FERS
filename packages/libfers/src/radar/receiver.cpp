@@ -125,6 +125,13 @@ namespace radar
 		_pulsed_interference_log.push_back(std::move(response));
 	}
 
+	void Receiver::prunePulsedInterferenceEndingBefore(const RealType cutoff_time) noexcept
+	{
+		std::scoped_lock lock(_interference_log_mutex);
+		std::erase_if(_pulsed_interference_log,
+					  [cutoff_time](const auto& response) { return response && response->endTime() <= cutoff_time; });
+	}
+
 	std::vector<std::unique_ptr<serial::Response>> Receiver::drainInbox() noexcept
 	{
 		std::scoped_lock lock(_inbox_mutex);

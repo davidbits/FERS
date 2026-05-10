@@ -160,6 +160,8 @@ TEST_CASE("Receiver inbox and interference log", "[radar][receiver]")
 
 	rx.addInterferenceToLog(makeResponse(&tx, waves));
 	REQUIRE(rx.getPulsedInterferenceLog().size() == 1);
+	rx.prunePulsedInterferenceEndingBefore(1.0);
+	REQUIRE(rx.getPulsedInterferenceLog().empty());
 }
 
 TEST_CASE("Receiver IF resampling preserves absolute output positions across schedule gaps", "[radar][receiver][fmcw]")

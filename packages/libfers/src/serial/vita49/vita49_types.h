@@ -77,12 +77,11 @@ namespace serial::vita49
 		Cif0ReferenceLevel = 1u << 25u,
 		Cif0DeviceIdentifier = 1u << 24u,
 		Cif0AsciiMetadata = 1u << 23u,
-		Cif0FersProfileFields = 1u << 22u,
 	};
 
 	constexpr std::uint32_t kFersContextCif0 = Cif0StateIndicators | Cif0PayloadFormat | Cif0SampleRate |
 		Cif0ReferenceFrequency | Cif0IfOffset | Cif0Bandwidth | Cif0ReferenceLevel | Cif0DeviceIdentifier |
-		Cif0AsciiMetadata | Cif0FersProfileFields;
+		Cif0AsciiMetadata;
 
 	enum ContextFlags : std::uint32_t
 	{
@@ -149,6 +148,12 @@ namespace serial::vita49
 		std::vector<SerializedPacket> packets;
 		std::uint64_t samples_emitted = 0;
 		std::uint64_t over_range_count = 0;
+	};
+
+	struct SignalDataSerializationResult
+	{
+		std::vector<std::uint8_t> bytes;
+		std::uint64_t clipped_sample_count = 0;
 	};
 
 	class PacketCountSequencer

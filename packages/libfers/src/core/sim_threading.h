@@ -32,6 +32,7 @@
 #include "core/parameters.h"
 #include "core/sim_events.h"
 #include "core/simulation_state.h"
+#include "signal/dsp_filters.h"
 #include "simulation/channel_model.h"
 
 namespace pool
@@ -215,11 +216,15 @@ namespace core
 		void flushStreamingOutputBlocks();
 
 		/// Flushes one receiver's pending live streaming output block.
-		void flushStreamingOutputBlock(std::size_t receiver_index);
+		void flushStreamingOutputBlock(std::size_t receiver_index, bool finish_downsampler = false);
 
 		/// Emits an already processed streaming block to the selected output sink.
 		void emitStreamingOutputBlock(std::size_t receiver_index, RealType first_sample_time, RealType sample_rate,
 									  std::span<const ComplexType> samples, std::uint64_t sample_start);
+
+		/// Returns an initialized stateful downsampler for one streaming receiver segment.
+		[[nodiscard]] fers_signal::DownsamplingSink&
+		streamingDownsampler(std::size_t receiver_index, std::uint64_t input_start_index, RealType segment_start_time);
 
 		/// Emits sink heartbeats on the continuous simulation clock up to the given time.
 		void emitContextHeartbeatsThrough(RealType simulation_time);
@@ -303,6 +308,10 @@ namespace core
 		std::vector<std::vector<ComplexType>> _streaming_output_processed_buffers; ///< Reused post-noise output blocks.
 		std::vector<RealType> _streaming_output_block_start_times; ///< Start time for pending live output blocks.
 		std::vector<std::uint64_t> _streaming_output_block_start_indices; ///< High-rate sample index for each block.
+		std::vector<std::unique_ptr<fers_signal::DownsamplingSink>>
+			_streaming_downsamplers; ///< Stateful downsamplers for non-dechirped streaming output.
+		std::vector<std::uint64_t> _streaming_downsample_base_indices; ///< Output index at segment start.
+		std::vector<RealType> _streaming_downsample_segment_start_times; ///< Segment start time at output sample 0.
 		std::vector<std::uint64_t> _streaming_output_sample_cursors; ///< Output sample cursor per receiver.
 		std::vector<std::uint32_t> _streaming_output_stream_ids; ///< Registered sink stream IDs for live receivers.
 		std::vector<bool> _streaming_output_stream_open; ///< Live receiver stream lifecycle state.
