@@ -12,6 +12,9 @@ build/
 build_cov/
 fixes.yaml
 .codex
+.code-review-graph/
+.code-review-graphignore
+.mcp.json
 entities.json
 mempalace.yaml
 
