@@ -864,7 +864,7 @@ impl FersContext {
         cancel_flag: &AtomicBool,
     ) -> Result<SimulationRunOutcome, String> {
         self.use_hdf5_output()?;
-        self.run_simulation_ex(app_handle, cancel_flag, false)
+        self.run_simulation_ex(app_handle, cancel_flag, true, false)
     }
 
     pub fn run_vita49_stream(
@@ -874,16 +874,23 @@ impl FersContext {
         config: &Vita49StreamConfig,
     ) -> Result<SimulationRunOutcome, String> {
         self.configure_vita49_stream(config)?;
-        self.run_simulation_ex(app_handle, cancel_flag, true)
+        self.run_simulation_ex(app_handle, cancel_flag, false, true)
     }
 
     fn run_simulation_ex(
         &self,
         app_handle: &AppHandle,
         cancel_flag: &AtomicBool,
+        emit_progress: bool,
         emit_vita49_telemetry: bool,
     ) -> Result<SimulationRunOutcome, String> {
-        let progress_user_data_ptr = app_handle as *const _ as *mut c_void;
+        let progress_callback: ffi::fers_progress_callback_t =
+            if emit_progress { Some(simulation_progress_callback) } else { None };
+        let progress_user_data_ptr = if emit_progress {
+            app_handle as *const _ as *mut c_void
+        } else {
+            std::ptr::null_mut()
+        };
         let cancel_user_data_ptr = cancel_flag as *const _ as *mut c_void;
         let telemetry_user_data_ptr = app_handle as *const _ as *mut c_void;
         let telemetry_callback: ffi::fers_vita49_telemetry_callback_t =
@@ -892,7 +899,7 @@ impl FersContext {
         let result = unsafe {
             ffi::fers_run_simulation_ex(
                 self.ptr,
-                Some(simulation_progress_callback),
+                progress_callback,
                 progress_user_data_ptr,
                 Some(simulation_cancel_callback),
                 cancel_user_data_ptr,

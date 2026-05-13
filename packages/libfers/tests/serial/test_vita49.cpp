@@ -576,6 +576,57 @@ TEST_CASE("VITA output sink emits live telemetry snapshots and packet traces", "
 	CHECK(std::ranges::all_of(packet_traces, [](const auto& trace) { return trace.sequence > 0u; }));
 }
 
+TEST_CASE("VITA output sink batches packet trace telemetry", "[serial][vita49][telemetry]")
+{
+	using namespace serial::vita49;
+
+	auto recording = std::make_unique<RecordingSender>();
+	std::size_t packet_callback_count = 0;
+	std::size_t largest_packet_batch = 0;
+	std::vector<core::ReceiverOutputPacketTrace> packet_traces;
+	Vita49OutputSink sink(
+		std::move(recording),
+		[&](const std::optional<core::OutputStats>&, std::span<const core::ReceiverOutputPacketTrace> packets)
+		{
+			if (!packets.empty())
+			{
+				++packet_callback_count;
+				largest_packet_batch = std::max(largest_packet_batch, packets.size());
+			}
+			packet_traces.insert(packet_traces.end(), packets.begin(), packets.end());
+		});
+	const core::OutputConfig config{.mode = core::OutputMode::Vita49Udp,
+									.vita49 = {.host = "127.0.0.1",
+											   .port = 1,
+											   .adc_fullscale = 1.0,
+											   .queue_depth = 128,
+											   .epoch_unix_nanoseconds = 1'700'000'000'000'000'000ull,
+											   .max_udp_payload = 1400}};
+	sink.initializeRun(config, "sim");
+
+	const core::ReceiverStreamDescriptor stream{.receiver_id = 8,
+												.receiver_name = "rx-batched",
+												.mode = "cw",
+												.sample_rate = 1.0e9,
+												.reference_frequency = 1.0e9,
+												.coordinate = {},
+												.initial_platform_state = {},
+												.fmcw = {}};
+	std::vector<ComplexType> samples(22'000, ComplexType(0.1, 0.2));
+	const core::ReceiverSampleBlock block{
+		.stream = stream, .first_sample_time = 0.0, .sample_rate = 1.0e9, .samples = samples, .sample_start = 0};
+
+	sink.submitBlock(block);
+	(void)sink.finalize();
+
+	const auto data_trace_count = std::ranges::count_if(packet_traces, [](const auto& trace)
+														{ return trace.event == "data" && trace.data_packet; });
+	CHECK(data_trace_count > 64);
+	CHECK(largest_packet_batch >= 64u);
+	CHECK(packet_callback_count < static_cast<std::size_t>(data_trace_count));
+	CHECK(std::ranges::all_of(packet_traces, [](const auto& trace) { return trace.sequence > 0u; }));
+}
+
 TEST_CASE("VITA output sink starts pacing at simulation start time", "[serial][vita49]")
 {
 	using namespace serial::vita49;

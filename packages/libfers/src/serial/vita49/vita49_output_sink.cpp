@@ -18,6 +18,8 @@ namespace serial::vita49
 	namespace
 	{
 		constexpr auto kStatsEmitInterval = std::chrono::milliseconds(250);
+		constexpr auto kPacketTraceEmitInterval = std::chrono::milliseconds(250);
+		constexpr std::size_t kPacketTraceBatchSize = 64;
 
 		[[nodiscard]] std::uint64_t defaultEpochNanoseconds()
 		{
@@ -71,6 +73,10 @@ namespace serial::vita49
 			_provided_sender ? std::move(_provided_sender) : std::make_unique<UdpSender>(), config.vita49.queue_depth);
 		_sender->open(config.vita49.host, config.vita49.port);
 		_sender->start(params::startTime());
+		_last_stats_emit = std::chrono::steady_clock::time_point::min();
+		_last_packet_trace_emit = std::chrono::steady_clock::now();
+		_pending_packet_traces.clear();
+		_trace_sequence = 0;
 		_initialized = true;
 		_finalized = false;
 		emitTelemetry({}, true);
@@ -306,13 +312,25 @@ namespace serial::vita49
 		for (auto& packet : packets)
 		{
 			packet.sequence = ++_trace_sequence;
+			_pending_packet_traces.push_back(std::move(packet));
 		}
 
-		if (!stats.has_value() && packets.empty())
+		std::vector<core::ReceiverOutputPacketTrace> packet_batch;
+		const bool trace_interval_elapsed = _last_packet_trace_emit == std::chrono::steady_clock::time_point::min() ||
+			now - _last_packet_trace_emit >= kPacketTraceEmitInterval;
+		if (!_pending_packet_traces.empty() &&
+			(force_stats || _pending_packet_traces.size() >= kPacketTraceBatchSize || trace_interval_elapsed))
+		{
+			packet_batch = std::move(_pending_packet_traces);
+			_pending_packet_traces.clear();
+			_last_packet_trace_emit = now;
+		}
+
+		if (!stats.has_value() && packet_batch.empty())
 		{
 			return;
 		}
-		_telemetry_callback(stats, packets);
+		_telemetry_callback(stats, packet_batch);
 	}
 
 	core::ReceiverOutputPacketTrace Vita49OutputSink::makeTrace(const SerializedPacket& packet, std::string event) const

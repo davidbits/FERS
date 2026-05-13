@@ -12,6 +12,7 @@
 #include <optional>
 #include <unordered_map>
 #include <unordered_set>
+#include <vector>
 
 #include "core/receiver_output.h"
 #include "serial/vita49/paced_sender.h"
@@ -71,6 +72,8 @@ namespace serial::vita49
 		std::unordered_map<std::uint32_t, StreamState> _streams;
 		mutable std::recursive_mutex _mutex;
 		std::chrono::steady_clock::time_point _last_stats_emit = std::chrono::steady_clock::time_point::min();
+		std::chrono::steady_clock::time_point _last_packet_trace_emit = std::chrono::steady_clock::time_point::min();
+		std::vector<core::ReceiverOutputPacketTrace> _pending_packet_traces;
 		std::uint64_t _trace_sequence = 0;
 		bool _initialized = false;
 		bool _finalized = false;
