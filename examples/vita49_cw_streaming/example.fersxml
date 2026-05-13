@@ -3,7 +3,7 @@
 <simulation name="Vita49CwStreamingScenario">
     <parameters>
         <starttime>0.0</starttime>
-        <endtime>0.02</endtime>
+        <endtime>10</endtime>
         <rate>100000.0</rate>
         <simSamplingRate>100000.0</simSamplingRate>
         <randomseed>20260513</randomseed>

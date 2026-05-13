@@ -59,7 +59,7 @@ fers_set_vita49_fullscale(context, 1.0);
 fers_set_vita49_epoch_unix_nanoseconds(context, 1700000000123456789ULL);
 ```
 
-The VITA epoch setter is optional. The full-scale setter is required before running in VITA mode. Additional tuning setters are available for maximum UDP payload and sender queue depth:
+The VITA epoch setter is optional. The full-scale setter is required before running in VITA mode. Additional tuning setters are available for maximum UDP payload and sender queue depth. When the queue is full, VITA output blocks the producer until the paced sender frees a slot:
 
 ```c
 fers_set_vita49_max_udp_payload(context, 1400);
@@ -105,7 +105,7 @@ After a run, applications can request JSON metadata describing the output files.
 
 Prefer this metadata over hard-coded output assumptions.
 
-When VITA 49.2 output is selected, the metadata includes a `vita49` section with endpoint, epoch, class ID, fixed full-scale, packet sizing, queue depth, and per-stream packet/sample counters when the streaming backend has populated them.
+When VITA 49.2 output is selected, the metadata includes a `vita49` section with endpoint, epoch, class ID, fixed full-scale, packet sizing, queue depth, and per-stream packet/sample counters when the streaming backend has populated them. Dropped packet/sample counters represent socket send failures, not queue overflow.
 
 ## KML Generation
 

@@ -145,8 +145,8 @@ namespace core
 		RealType reference_frequency = 0.0; ///< RF reference frequency in hertz.
 		std::uint64_t packets_emitted = 0; ///< Signal data packets emitted.
 		std::uint64_t samples_emitted = 0; ///< Complex samples emitted.
-		std::uint64_t packets_dropped = 0; ///< Data packets dropped before send.
-		std::uint64_t samples_dropped = 0; ///< Complex samples dropped before send.
+		std::uint64_t packets_dropped = 0; ///< Data packets lost to socket send failures.
+		std::uint64_t samples_dropped = 0; ///< Complex samples lost to socket send failures.
 		std::uint64_t over_range_count = 0; ///< Samples clipped by fixed full-scale scaling.
 		std::uint64_t late_packet_count = 0; ///< Packets sent after their scheduled time.
 		std::uint64_t context_packet_count = 0; ///< Context packets emitted for this stream.
@@ -162,7 +162,7 @@ namespace core
 		std::optional<std::uint64_t> epoch_unix_nanoseconds = std::nullopt; ///< Run epoch, if already fixed.
 		RealType adc_fullscale = 0.0; ///< Fixed ADC full-scale used for int16 IQ scaling.
 		std::uint16_t max_udp_payload = 1400; ///< Maximum UDP datagram payload in bytes.
-		std::uint32_t queue_depth = 1024; ///< Bounded sender queue depth in packets.
+		std::uint32_t queue_depth = 1024; ///< Bounded blocking sender queue depth in packets.
 		std::string class_id = "0xFA52530001000101"; ///< Internal placeholder VRT Class ID.
 		std::vector<Vita49StreamMetadata> streams = {}; ///< Per-receiver VRT stream metadata and stats.
 	};

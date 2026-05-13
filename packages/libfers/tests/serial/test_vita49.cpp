@@ -2,14 +2,17 @@
 // Copyright (c) 2026-present FERS Contributors (see AUTHORS.md).
 
 #include <algorithm>
+#include <atomic>
 #include <bit>
 #include <catch2/catch_test_macros.hpp>
 #include <chrono>
 #include <cstdint>
+#include <future>
 #include <iterator>
 #include <memory>
 #include <nlohmann/json.hpp>
 #include <stdexcept>
+#include <thread>
 #include <vector>
 
 #include "core/parameters.h"
@@ -92,6 +95,27 @@ namespace
 		void close() noexcept override { closed = true; }
 
 		bool closed = false;
+	};
+
+	class FailFirstSignalSender final : public serial::vita49::DatagramSender
+	{
+	public:
+		void open(const std::string&, std::uint16_t) override { opened = true; }
+		void send(const std::span<const std::uint8_t> bytes) override
+		{
+			if (!failed_signal_send && bytes.size() <= 64u)
+			{
+				failed_signal_send = true;
+				throw std::runtime_error("signal send failed");
+			}
+			sent.emplace_back(bytes.begin(), bytes.end());
+		}
+		void close() noexcept override { closed = true; }
+
+		bool opened = false;
+		bool closed = false;
+		bool failed_signal_send = false;
+		std::vector<std::vector<std::uint8_t>> sent;
 	};
 }
 
@@ -323,56 +347,59 @@ TEST_CASE("VITA stream registry allocates stable non-truncated stream IDs", "[se
 	REQUIRE(stream_a != static_cast<std::uint32_t>(a.receiver_id));
 }
 
-TEST_CASE("VITA queue overflow drops data and loss flags appear in next packet/context", "[serial][vita49]")
+TEST_CASE("VITA paced sender blocks at queue depth instead of dropping", "[serial][vita49]")
 {
 	using namespace serial::vita49;
+	using namespace std::chrono_literals;
 
 	auto recording = std::make_unique<RecordingSender>();
 	auto* recording_raw = recording.get();
 	PacedSender sender(std::move(recording), 1);
 	sender.open("127.0.0.1", 1);
+	sender.start(0.0);
 
 	const SerializedPacket first{.bytes = {0, 0, 0, 1},
 								 .stream_id = 9,
 								 .sample_count = 10,
-								 .first_sample_time = 1000.0,
+								 .first_sample_time = 0.08,
 								 .data_packet = true,
 								 .timestamp = Timestamp{}};
 	const SerializedPacket second{.bytes = {0, 0, 0, 2},
 								  .stream_id = 9,
 								  .sample_count = 12,
-								  .first_sample_time = 1000.1,
+								  .first_sample_time = 0.08,
 								  .data_packet = true,
 								  .timestamp = Timestamp{}};
 
 	const auto first_result = sender.enqueue(first);
-	const auto second_result = sender.enqueue(second);
+	std::atomic_bool second_enqueue_finished = false;
+	auto second_result_future = std::async(std::launch::async,
+										   [&]
+										   {
+											   auto result = sender.enqueue(second);
+											   second_enqueue_finished.store(true);
+											   return result;
+										   });
+	std::this_thread::sleep_for(20ms);
 
 	REQUIRE(recording_raw->opened);
 	REQUIRE(first_result.enqueued);
 	REQUIRE_FALSE(first_result.dropped);
-	REQUIRE_FALSE(second_result.enqueued);
-	REQUIRE(second_result.dropped);
-	REQUIRE(second_result.dropped->stream_id == 9u);
-	REQUIRE(second_result.dropped->sample_count == 12u);
+	REQUIRE_FALSE(second_enqueue_finished.load());
+	const auto second_result = second_result_future.get();
+	REQUIRE(second_result.enqueued);
+	REQUIRE_FALSE(second_result.dropped);
+	sender.stop();
 
-	auto context_recording = std::make_unique<RecordingSender>();
-	PacedSender context_sender(std::move(context_recording), 1);
-	context_sender.open("127.0.0.1", 1);
-	const SerializedPacket context_packet{.bytes = {0, 0, 0, 3},
-										  .stream_id = 9,
-										  .sample_count = 0,
-										  .first_sample_time = 1000.2,
-										  .data_packet = false,
-										  .context_packet = true,
-										  .timestamp = Timestamp{}};
-	REQUIRE(context_sender.enqueue(first).enqueued);
-	const auto context_result = context_sender.enqueue(context_packet);
-	REQUIRE(context_result.enqueued);
-	REQUIRE(context_result.dropped);
-	REQUIRE(context_result.dropped->data_packet);
-	REQUIRE(context_result.dropped->sample_count == 10u);
+	REQUIRE(recording_raw->sent.size() == 2u);
+	REQUIRE(sender.sentPacketCount(9) == 2u);
+	REQUIRE(sender.droppedDataPacketCount(9) == 0u);
+	REQUIRE(sender.droppedSampleCount(9) == 0u);
+}
 
+TEST_CASE("VITA packetizer encodes explicit sample loss flags", "[serial][vita49]")
+{
+	using namespace serial::vita49;
 	Vita49Packetizer packetizer(1'700'000'000'000'000'000ull, 1.0, 1400);
 	std::vector<ComplexType> samples{ComplexType(0.0, 0.0)};
 	const core::ReceiverStreamDescriptor stream{.receiver_id = 9,
@@ -426,7 +453,7 @@ TEST_CASE("VITA paced sender drains due packets on stop", "[serial][vita49]")
 	REQUIRE(sender.sentPacketCount(5) == 1u);
 }
 
-TEST_CASE("VITA paced sender stop drops far-future packets instead of bursting them", "[serial][vita49]")
+TEST_CASE("VITA paced sender stop drains future packets at wall-clock pace", "[serial][vita49]")
 {
 	using namespace serial::vita49;
 
@@ -439,14 +466,14 @@ TEST_CASE("VITA paced sender stop drops far-future packets instead of bursting t
 	const SerializedPacket packet{.bytes = {0, 0, 0, 1},
 								  .stream_id = 5,
 								  .sample_count = 1,
-								  .first_sample_time = 30.0,
+								  .first_sample_time = 0.08,
 								  .data_packet = true,
 								  .timestamp = Timestamp{}};
 	REQUIRE(sender.enqueue(packet).enqueued);
 	const SerializedPacket context_packet{.bytes = {0, 0, 0, 2},
 										  .stream_id = 5,
 										  .sample_count = 0,
-										  .first_sample_time = 30.0,
+										  .first_sample_time = 0.08,
 										  .data_packet = false,
 										  .context_packet = true,
 										  .timestamp = Timestamp{}};
@@ -455,12 +482,13 @@ TEST_CASE("VITA paced sender stop drops far-future packets instead of bursting t
 	sender.stop();
 	const auto elapsed = std::chrono::steady_clock::now() - start;
 
+	REQUIRE(elapsed >= std::chrono::milliseconds(50));
 	REQUIRE(elapsed < std::chrono::milliseconds(500));
-	REQUIRE(recording_raw->sent.empty());
-	REQUIRE(sender.sentPacketCount(5) == 0u);
-	REQUIRE(sender.droppedDataPacketCount(5) == 1u);
-	REQUIRE(sender.droppedContextPacketCount(5) == 1u);
-	REQUIRE(sender.droppedSampleCount(5) == 1u);
+	REQUIRE(recording_raw->sent.size() == 2u);
+	REQUIRE(sender.sentPacketCount(5) == 2u);
+	REQUIRE(sender.droppedDataPacketCount(5) == 0u);
+	REQUIRE(sender.droppedContextPacketCount(5) == 0u);
+	REQUIRE(sender.droppedSampleCount(5) == 0u);
 }
 
 TEST_CASE("VITA paced sender catches datagram send failures", "[serial][vita49]")
@@ -483,6 +511,8 @@ TEST_CASE("VITA paced sender catches datagram send failures", "[serial][vita49]"
 	REQUIRE_NOTHROW(sender.stop());
 	REQUIRE(throwing_raw->closed);
 	REQUIRE(sender.sendFailureCount(7) == 1u);
+	REQUIRE(sender.droppedDataPacketCount(7) == 1u);
+	REQUIRE(sender.droppedSampleCount(7) == 1u);
 }
 
 TEST_CASE("VITA output sink emits context, signal data, and stats through injected sender", "[serial][vita49]")
@@ -524,6 +554,50 @@ TEST_CASE("VITA output sink emits context, signal data, and stats through inject
 	CHECK(stats.streams.front().packets_emitted == 1u);
 	CHECK(stats.streams.front().context_packets >= 2u);
 	CHECK(stats.streams.front().over_range_count == 1u);
+}
+
+TEST_CASE("VITA output sink reports sample loss only for send failures", "[serial][vita49]")
+{
+	using namespace serial::vita49;
+
+	auto failing = std::make_unique<FailFirstSignalSender>();
+	auto* failing_raw = failing.get();
+	Vita49OutputSink sink(std::move(failing));
+	const core::OutputConfig config{.mode = core::OutputMode::Vita49Udp,
+									.vita49 = {.host = "127.0.0.1",
+											   .port = 1,
+											   .adc_fullscale = 1.0,
+											   .queue_depth = 8,
+											   .epoch_unix_nanoseconds = 1'700'000'000'000'000'000ull,
+											   .max_udp_payload = 1400}};
+	sink.initializeRun(config, "sim");
+
+	const core::ReceiverStreamDescriptor stream{.receiver_id = 43,
+												.receiver_name = "rx-loss",
+												.mode = "cw",
+												.sample_rate = 1.0,
+												.reference_frequency = 9.0e8,
+												.coordinate = {},
+												.initial_platform_state = {},
+												.fmcw = {}};
+	std::vector<ComplexType> samples{ComplexType(0.25, -0.25)};
+	const core::ReceiverSampleBlock block{
+		.stream = stream, .first_sample_time = 0.0, .sample_rate = 1.0, .samples = samples, .sample_start = 0};
+
+	sink.submitBlock(block);
+	const auto stats = sink.finalize();
+
+	REQUIRE(failing_raw->opened);
+	REQUIRE(failing_raw->closed);
+	REQUIRE(failing_raw->failed_signal_send);
+	REQUIRE(stats.streams.size() == 1u);
+	CHECK(stats.streams.front().packets_emitted == 0u);
+	CHECK(stats.streams.front().samples_emitted == 0u);
+	CHECK(stats.streams.front().packets_dropped == 1u);
+	CHECK(stats.streams.front().samples_dropped == 1u);
+	CHECK(stats.streams.front().context_packets >= 2u);
+	CHECK(std::ranges::any_of(failing_raw->sent, [](const auto& bytes)
+							  { return bytes.size() > 64u && (readU32(bytes, 32) & TrailerSampleLoss) != 0u; }));
 }
 
 TEST_CASE("VITA output sink emits live telemetry snapshots and packet traces", "[serial][vita49][telemetry]")
@@ -716,7 +790,7 @@ TEST_CASE("VITA output sink starts pacing at simulation start time", "[serial][v
 	REQUIRE(elapsed < std::chrono::milliseconds(500));
 }
 
-TEST_CASE("VITA output sink accounts shutdown drops in final stream stats", "[serial][vita49]")
+TEST_CASE("VITA output sink drains future packets before final stats", "[serial][vita49]")
 {
 	using namespace serial::vita49;
 
@@ -745,18 +819,21 @@ TEST_CASE("VITA output sink accounts shutdown drops in final stream stats", "[se
 												.fmcw = {}};
 	std::vector<ComplexType> samples{ComplexType(0.25, -0.25)};
 	const core::ReceiverSampleBlock block{
-		.stream = stream, .first_sample_time = 30.0, .sample_rate = 1.0, .samples = samples, .sample_start = 0};
+		.stream = stream, .first_sample_time = 0.08, .sample_rate = 1.0, .samples = samples, .sample_start = 0};
 
+	const auto start = std::chrono::steady_clock::now();
 	sink.submitBlock(block);
 	const auto stats = sink.finalize();
+	const auto elapsed = std::chrono::steady_clock::now() - start;
 
-	REQUIRE(recording_raw->sent.empty());
+	REQUIRE(elapsed >= std::chrono::milliseconds(50));
+	REQUIRE(recording_raw->sent.size() >= 3u);
 	REQUIRE(stats.streams.size() == 1u);
-	CHECK(stats.streams.front().packets_emitted == 0u);
-	CHECK(stats.streams.front().samples_emitted == 0u);
-	CHECK(stats.streams.front().context_packets == 0u);
-	CHECK(stats.streams.front().packets_dropped == 3u);
-	CHECK(stats.streams.front().samples_dropped == 1u);
+	CHECK(stats.streams.front().packets_emitted == 1u);
+	CHECK(stats.streams.front().samples_emitted == 1u);
+	CHECK(stats.streams.front().context_packets >= 2u);
+	CHECK(stats.streams.front().packets_dropped == 0u);
+	CHECK(stats.streams.front().samples_dropped == 0u);
 }
 
 #ifndef _WIN32

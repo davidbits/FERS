@@ -164,6 +164,9 @@ int fers_set_vita49_max_udp_payload(fers_context_t* context, uint16_t max_udp_pa
 /**
  * @brief Sets the bounded VITA 49.2 sender queue depth in packets.
  *
+ * When this queue is full, the simulation thread blocks until the pacing thread
+ * sends a packet and frees a slot.
+ *
  * @param context A valid `fers_context_t` handle.
  * @param queue_depth Queue depth in packets. Must be greater than zero.
  * @return 0 on success, non-zero on error.

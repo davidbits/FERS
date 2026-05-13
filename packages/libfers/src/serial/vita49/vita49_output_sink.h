@@ -56,6 +56,7 @@ namespace serial::vita49
 		[[nodiscard]] core::OutputStats snapshotStatsLocked() const;
 		[[nodiscard]] bool enqueuePacket(SerializedPacket&& packet);
 		void emitTelemetry(std::vector<core::ReceiverOutputPacketTrace> packets = {}, bool force_stats = false);
+		[[nodiscard]] std::vector<core::ReceiverOutputPacketTrace> consumeSenderDropsLocked();
 		[[nodiscard]] core::ReceiverOutputPacketTrace makeTrace(const SerializedPacket& packet,
 																std::string event) const;
 		[[nodiscard]] core::ReceiverOutputPacketTrace makeDropTrace(const DroppedDatagram& dropped) const;

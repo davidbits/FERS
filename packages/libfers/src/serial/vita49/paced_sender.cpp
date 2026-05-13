@@ -9,7 +9,6 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
-#include <iterator>
 #include <stdexcept>
 
 #if defined(__i386__) || defined(__x86_64__)
@@ -68,57 +67,29 @@ namespace serial::vita49
 
 	EnqueueResult PacedSender::enqueue(SerializedPacket packet)
 	{
-		std::lock_guard lock(_mutex);
+		std::unique_lock lock(_mutex);
+		if (!_started)
+		{
+			throw std::logic_error("PacedSender must be started before enqueue");
+		}
 		if (_stopping)
 		{
 			return EnqueueResult{
 				.enqueued = false,
-				.dropped = DroppedDatagram{.stream_id = packet.stream_id,
-										   .sample_count = packet.sample_count,
-										   .data_packet = packet.data_packet,
-										   .context_packet = packet.context_packet},
+				.dropped = std::nullopt,
 			};
 		}
 
-		if (_queue.size() >= _queue_depth)
+		_cv.wait(lock, [this] { return _stopping || queuedOrSendingCount() < _queue_depth; });
+		if (_stopping)
 		{
-			if (packet.data_packet)
-			{
-				return EnqueueResult{
-					.enqueued = false,
-					.dropped = DroppedDatagram{.stream_id = packet.stream_id,
-											   .sample_count = packet.sample_count,
-											   .data_packet = packet.data_packet,
-											   .context_packet = packet.context_packet},
-				};
-			}
-
-			auto dropped = dropQueuedDataPacketUnlocked();
-			if (!dropped)
-			{
-				return EnqueueResult{
-					.enqueued = false,
-					.dropped = DroppedDatagram{.stream_id = packet.stream_id,
-											   .sample_count = packet.sample_count,
-											   .data_packet = packet.data_packet,
-											   .context_packet = packet.context_packet},
-				};
-			}
-
-			_queue.push_back(std::move(packet));
-			if (_queue.back().data_packet)
-			{
-				_queued_data_packets.push_back(std::prev(_queue.end()));
-			}
-			_cv.notify_one();
-			return EnqueueResult{.enqueued = true, .dropped = dropped};
+			return EnqueueResult{
+				.enqueued = false,
+				.dropped = std::nullopt,
+			};
 		}
 
 		_queue.push_back(std::move(packet));
-		if (_queue.back().data_packet)
-		{
-			_queued_data_packets.push_back(std::prev(_queue.end()));
-		}
 		_cv.notify_one();
 		return EnqueueResult{.enqueued = true, .dropped = std::nullopt};
 	}
@@ -126,38 +97,18 @@ namespace serial::vita49
 	void PacedSender::flush()
 	{
 		std::unique_lock lock(_mutex);
-		while (!_queue.empty())
-		{
-			auto packet = std::move(_queue.front());
-			if (packet.data_packet && !_queued_data_packets.empty() && _queued_data_packets.front() == _queue.begin())
-			{
-				_queued_data_packets.pop_front();
-			}
-			_queue.pop_front();
-			const auto due = dueTime(packet);
-			if (std::chrono::steady_clock::now() < due && waitUntilDueOrStopping(lock, due))
-			{
-				recordDroppedUnlocked(packet);
-				continue;
-			}
-			lock.unlock();
-			sendOneUnlocked(std::move(packet), std::chrono::steady_clock::now());
-			lock.lock();
-		}
+		_cv.wait(lock, [this] { return _queue.empty() && !_send_in_progress; });
 	}
 
 	void PacedSender::stop()
 	{
-		bool drain_after_join = false;
 		{
 			std::lock_guard lock(_mutex);
 			if (!_started && !_thread.joinable())
 			{
-				clearQueuedPacketsAsDroppedUnlocked();
 				_sender->close();
 				return;
 			}
-			drain_after_join = _started;
 			_stopping = true;
 			_cv.notify_all();
 		}
@@ -167,19 +118,12 @@ namespace serial::vita49
 			_thread.join();
 		}
 
-		if (drain_after_join)
-		{
-			drainQueuedPackets();
-		}
-		else
-		{
-			std::lock_guard lock(_mutex);
-			clearQueuedPacketsAsDroppedUnlocked();
-		}
 		{
 			std::lock_guard lock(_mutex);
 			_started = false;
 			_stopping = false;
+			_send_in_progress = false;
+			_cv.notify_all();
 		}
 		_sender->close();
 	}
@@ -226,53 +170,52 @@ namespace serial::vita49
 		return found == _dropped_samples.end() ? 0 : found->second;
 	}
 
+	std::vector<DroppedDatagram> PacedSender::consumeDroppedDatagrams()
+	{
+		std::lock_guard lock(_mutex);
+		auto result = std::move(_pending_dropped_datagrams);
+		_pending_dropped_datagrams.clear();
+		return result;
+	}
+
 	void PacedSender::run()
 	{
 		std::unique_lock lock(_mutex);
 		while (true)
 		{
-			if (_stopping)
-			{
-				return;
-			}
 			if (_queue.empty())
 			{
+				if (_stopping)
+				{
+					return;
+				}
 				_cv.wait(lock, [this] { return _stopping || !_queue.empty(); });
 				continue;
 			}
 
 			const auto due = dueTime(_queue.front());
-			if (waitUntilDue(lock, due))
-			{
-				return;
-			}
+			waitUntilDue(lock, due);
 
 			auto packet = std::move(_queue.front());
-			if (packet.data_packet && !_queued_data_packets.empty() && _queued_data_packets.front() == _queue.begin())
-			{
-				_queued_data_packets.pop_front();
-			}
 			_queue.pop_front();
+			_send_in_progress = true;
 			const auto now = std::chrono::steady_clock::now();
 			lock.unlock();
 			sendOneUnlocked(std::move(packet), now);
 			lock.lock();
+			_send_in_progress = false;
+			_cv.notify_all();
 		}
 	}
 
-	bool PacedSender::waitUntilDue(std::unique_lock<std::mutex>& lock, const std::chrono::steady_clock::time_point due)
+	void PacedSender::waitUntilDue(std::unique_lock<std::mutex>& lock, const std::chrono::steady_clock::time_point due)
 	{
 		while (true)
 		{
-			if (_stopping)
-			{
-				return true;
-			}
-
 			const auto now = std::chrono::steady_clock::now();
 			if (now >= due)
 			{
-				return false;
+				return;
 			}
 
 			const auto remaining = due - now;
@@ -282,7 +225,7 @@ namespace serial::vita49
 					std::chrono::duration_cast<std::chrono::steady_clock::duration>(kCoarsePacingSleep);
 				const auto fine_spin = std::chrono::duration_cast<std::chrono::steady_clock::duration>(kFinePacingSpin);
 				const auto wait_duration = std::min(remaining - fine_spin, coarse_sleep);
-				_cv.wait_for(lock, wait_duration, [this] { return _stopping; });
+				_cv.wait_for(lock, wait_duration);
 				continue;
 			}
 
@@ -293,21 +236,6 @@ namespace serial::vita49
 			}
 			lock.lock();
 		}
-	}
-
-	bool PacedSender::waitUntilDueOrStopping(std::unique_lock<std::mutex>& lock,
-											 const std::chrono::steady_clock::time_point due)
-	{
-		while (!_stopping)
-		{
-			const auto now = std::chrono::steady_clock::now();
-			if (now >= due)
-			{
-				return false;
-			}
-			_cv.wait_until(lock, due, [this] { return _stopping; });
-		}
-		return true;
 	}
 
 	void PacedSender::sendOneUnlocked(SerializedPacket packet, const std::chrono::steady_clock::time_point now)
@@ -321,6 +249,8 @@ namespace serial::vita49
 		{
 			std::lock_guard lock(_mutex);
 			++_send_failures[packet.stream_id];
+			recordDroppedUnlocked(packet);
+			_pending_dropped_datagrams.push_back(makeDroppedDatagram(packet));
 			return;
 		}
 		std::lock_guard lock(_mutex);
@@ -345,39 +275,17 @@ namespace serial::vita49
 		}
 	}
 
-	void PacedSender::clearQueuedPacketsAsDroppedUnlocked()
+	DroppedDatagram PacedSender::makeDroppedDatagram(const SerializedPacket& packet) const noexcept
 	{
-		for (const auto& packet : _queue)
-		{
-			recordDroppedUnlocked(packet);
-		}
-		_queue.clear();
-		_queued_data_packets.clear();
+		return DroppedDatagram{.stream_id = packet.stream_id,
+							   .sample_count = packet.sample_count,
+							   .data_packet = packet.data_packet,
+							   .context_packet = packet.context_packet};
 	}
 
-	void PacedSender::drainQueuedPackets()
+	std::size_t PacedSender::queuedOrSendingCount() const noexcept
 	{
-		std::unique_lock lock(_mutex);
-		while (!_queue.empty())
-		{
-			auto packet = std::move(_queue.front());
-			_queue.pop_front();
-			if (packet.data_packet && !_queued_data_packets.empty())
-			{
-				_queued_data_packets.pop_front();
-			}
-
-			const auto due = dueTime(packet);
-			if (std::chrono::steady_clock::now() < due && waitUntilDueOrStopping(lock, due))
-			{
-				recordDroppedUnlocked(packet);
-				continue;
-			}
-			lock.unlock();
-			sendOneUnlocked(std::move(packet), std::chrono::steady_clock::now());
-			lock.lock();
-		}
-		_queued_data_packets.clear();
+		return _queue.size() + (_send_in_progress ? 1u : 0u);
 	}
 
 	std::chrono::steady_clock::time_point PacedSender::dueTime(const SerializedPacket& packet) const
@@ -387,25 +295,4 @@ namespace serial::vita49
 		return _steady_epoch + std::chrono::nanoseconds(nanos);
 	}
 
-	std::optional<DroppedDatagram> PacedSender::dropQueuedDataPacketUnlocked()
-	{
-		while (!_queued_data_packets.empty() && !_queued_data_packets.front()->data_packet)
-		{
-			_queued_data_packets.pop_front();
-		}
-
-		if (_queued_data_packets.empty())
-		{
-			return std::nullopt;
-		}
-
-		const auto found = _queued_data_packets.front();
-		_queued_data_packets.pop_front();
-		DroppedDatagram dropped{.stream_id = found->stream_id,
-								.sample_count = found->sample_count,
-								.data_packet = found->data_packet,
-								.context_packet = found->context_packet};
-		_queue.erase(found);
-		return dropped;
-	}
 }

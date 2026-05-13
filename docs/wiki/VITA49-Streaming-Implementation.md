@@ -17,7 +17,8 @@ This page is the implementation contract for the FERS VITA 49.2 UDP output backe
 - Context CIF0 uses only standard indicator bits; FERS-specific interpretation is identified by Class ID and profile-defined context payload, not by redefining reserved CIF0 bits.
 - ADC scaling: fixed full-scale only in VITA mode; HDF5 keeps existing full-buffer normalization.
 - Pacing: `std::chrono::steady_clock` scheduler mapped to UTC packet timestamps at run start.
-- Backpressure: bounded queue, drop unsent data packets, set sample-loss indicators, continue simulation.
+- Backpressure: bounded queue with blocking enqueue; producer waits for wall-clock paced send slots instead of dropping packets.
+- Loss indicators: set only for datagrams that fail during socket send.
 
 ## Runtime Selection
 
@@ -47,7 +48,7 @@ The CLI full-scale switch is required whenever `--vita49` is present. The API va
 
 ## Metadata Contract
 
-`fers_get_last_output_metadata_json` includes `vita49` only in VITA mode. The section contains endpoint, epoch, class ID, fixed full-scale, maximum UDP payload, queue depth, and a `streams` array. Each stream entry contains receiver ID/name, VRT Stream ID, sample rate, reference frequency, packets/samples emitted, packets/samples dropped, over-range count, late-packet count, context-packet count, and first/last Unix-picosecond timestamps.
+`fers_get_last_output_metadata_json` includes `vita49` only in VITA mode. The section contains endpoint, epoch, class ID, fixed full-scale, maximum UDP payload, queue depth, and a `streams` array. Each stream entry contains receiver ID/name, VRT Stream ID, sample rate, reference frequency, packets/samples emitted, socket-failed packets/samples, over-range count, late-packet count, context-packet count, and first/last Unix-picosecond timestamps.
 
 Current internal placeholder Class ID: `0xFA52530001000101`. This is not an assigned OUI and must stay documented in the ICD until replaced.
 

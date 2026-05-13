@@ -116,6 +116,7 @@ namespace serial::vita49
 		{
 			throw std::logic_error("VITA output sink has not been initialized");
 		}
+		emitTelemetry(consumeSenderDropsLocked(), false);
 		const auto stream_id = registerStream(block.stream);
 		auto& state = stateFor(stream_id);
 		if (!state.opened)
@@ -154,6 +155,7 @@ namespace serial::vita49
 	void Vita49OutputSink::emitContextHeartbeat(const RealType simulation_time)
 	{
 		std::scoped_lock lock(_mutex);
+		emitTelemetry(consumeSenderDropsLocked(), false);
 		for (auto& [stream_id, state] : _streams)
 		{
 			if (!state.closed && simulation_time - state.last_context_time >= 1.0)
@@ -166,6 +168,7 @@ namespace serial::vita49
 	void Vita49OutputSink::closeStream(const std::uint32_t stream_id)
 	{
 		std::scoped_lock lock(_mutex);
+		emitTelemetry(consumeSenderDropsLocked(), false);
 		auto& state = stateFor(stream_id);
 		if (!state.closed)
 		{
@@ -185,6 +188,12 @@ namespace serial::vita49
 			return stats;
 		}
 
+		if (_sender)
+		{
+			_sender->flush();
+			emitTelemetry(consumeSenderDropsLocked(), false);
+		}
+
 		for (auto& [stream_id, state] : _streams)
 		{
 			if (!state.closed)
@@ -197,6 +206,7 @@ namespace serial::vita49
 		if (_sender)
 		{
 			_sender->stop();
+			emitTelemetry(consumeSenderDropsLocked(), false);
 		}
 
 		core::OutputStats stats{.mode = core::OutputMode::Vita49Udp,
@@ -209,14 +219,6 @@ namespace serial::vita49
 			if (_sender)
 			{
 				state.stats.late_packet_count = _sender->latePacketCount(stream_id);
-				const auto dropped_data_packets = _sender->droppedDataPacketCount(stream_id);
-				const auto dropped_context_packets = _sender->droppedContextPacketCount(stream_id);
-				const auto dropped_samples = _sender->droppedSampleCount(stream_id);
-				state.stats.packets_dropped += dropped_data_packets + dropped_context_packets;
-				state.stats.samples_dropped += dropped_samples;
-				state.stats.packets_emitted -= std::min(state.stats.packets_emitted, dropped_data_packets);
-				state.stats.samples_emitted -= std::min(state.stats.samples_emitted, dropped_samples);
-				state.stats.context_packets -= std::min(state.stats.context_packets, dropped_context_packets);
 			}
 			stats.streams.push_back(state.stats);
 		}
@@ -268,6 +270,25 @@ namespace serial::vita49
 			stats.streams.push_back(std::move(stream_stats));
 		}
 		return stats;
+	}
+
+	std::vector<core::ReceiverOutputPacketTrace> Vita49OutputSink::consumeSenderDropsLocked()
+	{
+		std::vector<core::ReceiverOutputPacketTrace> traces;
+		if (!_sender)
+		{
+			return traces;
+		}
+
+		for (const auto& dropped : _sender->consumeDroppedDatagrams())
+		{
+			applyDropped(dropped);
+			if (_config.vita49.packet_trace_enabled)
+			{
+				traces.push_back(makeDropTrace(dropped));
+			}
+		}
+		return traces;
 	}
 
 	bool Vita49OutputSink::enqueuePacket(SerializedPacket&& packet)
@@ -419,6 +440,15 @@ namespace serial::vita49
 		auto& state = stateFor(dropped.stream_id);
 		++state.stats.packets_dropped;
 		state.stats.samples_dropped += dropped.sample_count;
+		if (dropped.data_packet || (!dropped.context_packet && dropped.sample_count > 0))
+		{
+			state.stats.packets_emitted -= std::min<std::uint64_t>(state.stats.packets_emitted, 1u);
+			state.stats.samples_emitted -= std::min(state.stats.samples_emitted, dropped.sample_count);
+		}
+		else if (dropped.context_packet)
+		{
+			state.stats.context_packets -= std::min<std::uint64_t>(state.stats.context_packets, 1u);
+		}
 		state.sample_loss_pending = true;
 	}
 
