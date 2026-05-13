@@ -526,6 +526,56 @@ TEST_CASE("VITA output sink emits context, signal data, and stats through inject
 	CHECK(stats.streams.front().over_range_count == 1u);
 }
 
+TEST_CASE("VITA output sink emits live telemetry snapshots and packet traces", "[serial][vita49][telemetry]")
+{
+	using namespace serial::vita49;
+
+	auto recording = std::make_unique<RecordingSender>();
+	std::vector<core::OutputStats> stats_snapshots;
+	std::vector<core::ReceiverOutputPacketTrace> packet_traces;
+	Vita49OutputSink sink(
+		std::move(recording),
+		[&](const std::optional<core::OutputStats>& stats, std::span<const core::ReceiverOutputPacketTrace> packets)
+		{
+			if (stats.has_value())
+			{
+				stats_snapshots.push_back(*stats);
+			}
+			packet_traces.insert(packet_traces.end(), packets.begin(), packets.end());
+		});
+	const core::OutputConfig config{.mode = core::OutputMode::Vita49Udp,
+									.vita49 = {.host = "127.0.0.1",
+											   .port = 1,
+											   .adc_fullscale = 1.0,
+											   .queue_depth = 8,
+											   .epoch_unix_nanoseconds = 1'700'000'000'000'000'000ull,
+											   .max_udp_payload = 1400}};
+	sink.initializeRun(config, "sim");
+
+	const core::ReceiverStreamDescriptor stream{.receiver_id = 7,
+												.receiver_name = "rx-live",
+												.mode = "cw",
+												.sample_rate = 4.0,
+												.reference_frequency = 1.0e9,
+												.coordinate = {},
+												.initial_platform_state = {},
+												.fmcw = {}};
+	std::vector<ComplexType> samples{ComplexType(0.1, 0.2), ComplexType(0.3, 0.4)};
+	const core::ReceiverSampleBlock block{
+		.stream = stream, .first_sample_time = 0.0, .sample_rate = 4.0, .samples = samples, .sample_start = 0};
+
+	sink.submitBlock(block);
+	const auto final_stats = sink.finalize();
+
+	REQUIRE_FALSE(stats_snapshots.empty());
+	REQUIRE(final_stats.streams.size() == 1u);
+	CHECK(stats_snapshots.back().streams.size() == 1u);
+	CHECK(stats_snapshots.back().streams.front().receiver_id == 7u);
+	CHECK(std::ranges::any_of(packet_traces, [](const auto& trace) { return trace.event == "context"; }));
+	CHECK(std::ranges::any_of(packet_traces, [](const auto& trace) { return trace.event == "data"; }));
+	CHECK(std::ranges::all_of(packet_traces, [](const auto& trace) { return trace.sequence > 0u; }));
+}
+
 TEST_CASE("VITA output sink starts pacing at simulation start time", "[serial][vita49]")
 {
 	using namespace serial::vita49;

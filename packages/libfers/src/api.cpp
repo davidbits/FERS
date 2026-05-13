@@ -27,6 +27,7 @@
 #include <mutex>
 #include <nlohmann/json.hpp>
 #include <optional>
+#include <span>
 #include <string>
 #include <utility>
 #include <vector>
@@ -230,6 +231,64 @@ namespace
 		return std::nullopt;
 	}
 
+	[[nodiscard]] nlohmann::json stream_stats_to_json(const core::ReceiverStreamStats& stream)
+	{
+		return {{"receiver_id", stream.receiver_id},
+				{"receiver_name", stream.receiver_name},
+				{"stream_id", stream.stream_id},
+				{"sample_rate", stream.sample_rate},
+				{"reference_frequency", stream.reference_frequency},
+				{"packets_emitted", stream.packets_emitted},
+				{"context_packets", stream.context_packets},
+				{"samples_emitted", stream.samples_emitted},
+				{"packets_dropped", stream.packets_dropped},
+				{"samples_dropped", stream.samples_dropped},
+				{"over_range_count", stream.over_range_count},
+				{"late_packet_count", stream.late_packet_count},
+				{"first_timestamp_unix_ps", stream.first_timestamp_unix_ps},
+				{"last_timestamp_unix_ps", stream.last_timestamp_unix_ps}};
+	}
+
+	[[nodiscard]] std::string output_stats_to_json_string(const core::OutputStats& stats)
+	{
+		nlohmann::json streams = nlohmann::json::array();
+		for (const auto& stream : stats.streams)
+		{
+			streams.push_back(stream_stats_to_json(stream));
+		}
+
+		nlohmann::json result = {{"mode", stats.mode == core::OutputMode::Vita49Udp ? "vita49_udp" : "hdf5"},
+								 {"epoch_unix_nanoseconds", nullptr},
+								 {"streams", streams}};
+		if (stats.epoch_unix_nanoseconds.has_value())
+		{
+			result["epoch_unix_nanoseconds"] = *stats.epoch_unix_nanoseconds;
+		}
+		return result.dump();
+	}
+
+	[[nodiscard]] std::string
+	packet_trace_batch_to_json_string(std::span<const core::ReceiverOutputPacketTrace> packets)
+	{
+		nlohmann::json batch = nlohmann::json::array();
+		for (const auto& packet : packets)
+		{
+			batch.push_back({{"sequence", packet.sequence},
+							 {"event", packet.event},
+							 {"stream_id", packet.stream_id},
+							 {"byte_count", packet.byte_count},
+							 {"sample_count", packet.sample_count},
+							 {"first_sample_time", packet.first_sample_time},
+							 {"timestamp_unix_ps", packet.timestamp_unix_ps},
+							 {"data_packet", packet.data_packet},
+							 {"context_packet", packet.context_packet},
+							 {"dropped", packet.dropped},
+							 {"over_range", packet.over_range},
+							 {"sample_loss", packet.sample_loss}});
+		}
+		return batch.dump();
+	}
+
 	std::mutex log_callback_mutex; ///< Guards C API log callback state.
 	fers_log_callback_t log_callback = nullptr; ///< Registered C API log callback, if any.
 	void* log_callback_user_data = nullptr; ///< Opaque user data passed to the registered log callback.
@@ -336,6 +395,30 @@ int fers_set_output_directory(fers_context_t* context, const char* out_dir)
 	catch (const std::exception& e)
 	{
 		handle_api_exception(e, "fers_set_output_directory");
+		return 1;
+	}
+}
+
+int fers_use_hdf5_output(fers_context_t* context)
+{
+	last_error_message.clear();
+	if (context == nullptr)
+	{
+		set_api_error("Invalid arguments: context is NULL.");
+		return -1;
+	}
+
+	auto* ctx = reinterpret_cast<FersContext*>(context);
+	try
+	{
+		core::OutputConfig config = ctx->getOutputConfig();
+		config.mode = core::OutputMode::Hdf5;
+		ctx->setOutputConfig(std::move(config));
+		return 0;
+	}
+	catch (const std::exception& e)
+	{
+		handle_api_exception(e, "fers_use_hdf5_output");
 		return 1;
 	}
 }
@@ -976,49 +1059,105 @@ void fers_free_string(char* str)
 	}
 }
 
-int fers_run_simulation(fers_context_t* context, fers_progress_callback_t callback, void* user_data)
+namespace
 {
-	last_error_message.clear();
-	if (context == nullptr)
+	int run_simulation_common(fers_context_t* context, fers_progress_callback_t progress_callback,
+							  void* progress_user_data, fers_cancel_callback_t cancel_callback, void* cancel_user_data,
+							  fers_vita49_telemetry_callback_t vita49_telemetry_callback,
+							  void* vita49_telemetry_user_data, const char* function_name,
+							  const char* invalid_context_message)
 	{
-		last_error_message = "Invalid context provided to fers_run_simulation.";
-		LOG(logging::Level::ERROR, last_error_message);
-		return -1;
-	}
-
-	auto* ctx = reinterpret_cast<FersContext*>(context);
-
-	// Wrap the C-style callback in a std::function for easier use in C++.
-	// This also handles the case where the callback is null.
-	std::function<void(const std::string&, int, int)> progress_fn;
-	if (callback != nullptr)
-	{
-		progress_fn = [callback, user_data](const std::string& msg, const int current, const int total)
-		{ callback(msg.c_str(), current, total, user_data); };
-	}
-
-	try
-	{
-		if (const auto validation_error = validate_vita49_config_for_run(ctx->getOutputConfig()))
+		last_error_message.clear();
+		if (context == nullptr)
 		{
-			set_api_error(*validation_error);
-			return 1;
+			last_error_message = invalid_context_message;
+			LOG(logging::Level::ERROR, last_error_message);
+			return -1;
 		}
 
-		pool::ThreadPool pool(params::renderThreads());
+		auto* ctx = reinterpret_cast<FersContext*>(context);
 
-		ctx->clearLastOutputMetadata();
-		auto output_metadata =
-			core::runEventDrivenSim(ctx->getWorld(), pool, progress_fn, ctx->getOutputDir(), ctx->getOutputConfig());
-		ctx->setLastOutputMetadata(output_metadata);
+		std::function<void(const std::string&, int, int)> progress_fn;
+		if (progress_callback != nullptr)
+		{
+			progress_fn =
+				[progress_callback, progress_user_data](const std::string& msg, const int current, const int total)
+			{ progress_callback(msg.c_str(), current, total, progress_user_data); };
+		}
 
-		return 0;
+		std::function<bool()> cancel_fn;
+		if (cancel_callback != nullptr)
+		{
+			cancel_fn = [cancel_callback, cancel_user_data] { return cancel_callback(cancel_user_data) != 0; };
+		}
+
+		core::ReceiverOutputTelemetryCallback telemetry_fn;
+		if (vita49_telemetry_callback != nullptr)
+		{
+			telemetry_fn = [vita49_telemetry_callback,
+							vita49_telemetry_user_data](const std::optional<core::OutputStats>& stats,
+														std::span<const core::ReceiverOutputPacketTrace> packets)
+			{
+				std::string stats_json;
+				std::string packet_batch_json;
+				const char* stats_ptr = nullptr;
+				const char* packet_batch_ptr = nullptr;
+
+				if (stats.has_value())
+				{
+					stats_json = output_stats_to_json_string(*stats);
+					stats_ptr = stats_json.c_str();
+				}
+				if (!packets.empty())
+				{
+					packet_batch_json = packet_trace_batch_to_json_string(packets);
+					packet_batch_ptr = packet_batch_json.c_str();
+				}
+
+				vita49_telemetry_callback(stats_ptr, packet_batch_ptr, vita49_telemetry_user_data);
+			};
+		}
+
+		try
+		{
+			if (const auto validation_error = validate_vita49_config_for_run(ctx->getOutputConfig()))
+			{
+				set_api_error(*validation_error);
+				return 1;
+			}
+
+			pool::ThreadPool pool(params::renderThreads());
+
+			ctx->clearLastOutputMetadata();
+			bool cancelled = false;
+			auto output_metadata =
+				core::runEventDrivenSim(ctx->getWorld(), pool, progress_fn, ctx->getOutputDir(), ctx->getOutputConfig(),
+										std::move(cancel_fn), &cancelled, std::move(telemetry_fn));
+			ctx->setLastOutputMetadata(output_metadata);
+
+			return cancelled ? 2 : 0;
+		}
+		catch (const std::exception& e)
+		{
+			handle_api_exception(e, function_name);
+			return 1;
+		}
 	}
-	catch (const std::exception& e)
-	{
-		handle_api_exception(e, "fers_run_simulation");
-		return 1;
-	}
+}
+
+int fers_run_simulation(fers_context_t* context, fers_progress_callback_t callback, void* user_data)
+{
+	return run_simulation_common(context, callback, user_data, nullptr, nullptr, nullptr, nullptr,
+								 "fers_run_simulation", "Invalid context provided to fers_run_simulation.");
+}
+
+int fers_run_simulation_ex(fers_context_t* context, fers_progress_callback_t progress_callback,
+						   void* progress_user_data, fers_cancel_callback_t cancel_callback, void* cancel_user_data,
+						   fers_vita49_telemetry_callback_t vita49_telemetry_callback, void* vita49_telemetry_user_data)
+{
+	return run_simulation_common(context, progress_callback, progress_user_data, cancel_callback, cancel_user_data,
+								 vita49_telemetry_callback, vita49_telemetry_user_data, "fers_run_simulation_ex",
+								 "Invalid context provided to fers_run_simulation_ex.");
 }
 
 int fers_generate_kml(const fers_context_t* context, const char* output_kml_filepath)

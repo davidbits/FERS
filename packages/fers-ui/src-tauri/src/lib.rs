@@ -31,7 +31,14 @@
 
 mod fers_api;
 
-use std::{fs, path::PathBuf, sync::Mutex};
+use std::{
+    fs,
+    path::PathBuf,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Mutex,
+    },
+};
 use tauri::{AppHandle, Emitter, Manager, State};
 
 /// Data structure for a single motion waypoint received from the UI.
@@ -111,6 +118,26 @@ pub struct InterpolatedRotationPoint {
 /// may invoke commands from multiple threads concurrently. This alias simplifies
 /// the function signatures of Tauri commands.
 type FersState = Mutex<fers_api::FersContext>;
+
+#[derive(Default)]
+struct SimulationControlState {
+    cancel_requested: AtomicBool,
+    running: AtomicBool,
+}
+
+impl SimulationControlState {
+    fn try_start(&self) -> Result<(), String> {
+        self.running
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .map_err(|_| "A simulation is already running.".to_string())?;
+        self.cancel_requested.store(false, Ordering::SeqCst);
+        Ok(())
+    }
+
+    fn finish(&self) {
+        self.running.store(false, Ordering::SeqCst);
+    }
+}
 
 // --- Tauri Commands ---
 
@@ -269,7 +296,11 @@ fn update_scenario_from_json(
 /// * `simulation-error` - Emitted with a `String` error message on failure.
 /// * `simulation-progress` - Emitted periodically with `{ message: String, current: i32, total: i32 }`.
 #[tauri::command]
-fn run_simulation(app_handle: AppHandle) -> Result<(), String> {
+fn run_simulation(
+    app_handle: AppHandle,
+    control_state: State<'_, SimulationControlState>,
+) -> Result<(), String> {
+    control_state.try_start()?;
     // Clone the AppHandle so we can move it into the background thread.
     let app_handle_clone = app_handle.clone();
 
@@ -277,14 +308,14 @@ fn run_simulation(app_handle: AppHandle) -> Result<(), String> {
     std::thread::spawn(move || {
         // Retrieve the managed state within the new thread.
         let fers_state: State<'_, FersState> = app_handle_clone.state();
-        let result = fers_state
-            .lock()
-            .map_err(|e| e.to_string())
-            .and_then(|context| context.run_simulation(&app_handle_clone));
+        let control_state: State<'_, SimulationControlState> = app_handle_clone.state();
+        let result = fers_state.lock().map_err(|e| e.to_string()).and_then(|context| {
+            context.run_simulation(&app_handle_clone, &control_state.cancel_requested)
+        });
 
         // Emit an event to the frontend based on the simulation result.
         match result {
-            Ok(metadata_json) => {
+            Ok(fers_api::SimulationRunOutcome::Completed(metadata_json)) => {
                 app_handle_clone
                     .emit("simulation-output-metadata", metadata_json)
                     .expect("Failed to emit simulation-output-metadata event");
@@ -292,15 +323,78 @@ fn run_simulation(app_handle: AppHandle) -> Result<(), String> {
                     .emit("simulation-complete", ())
                     .expect("Failed to emit simulation-complete event");
             }
+            Ok(fers_api::SimulationRunOutcome::Cancelled(metadata_json)) => {
+                app_handle_clone
+                    .emit("simulation-output-metadata", metadata_json.clone())
+                    .expect("Failed to emit simulation-output-metadata event");
+                app_handle_clone
+                    .emit("simulation-cancelled", metadata_json)
+                    .expect("Failed to emit simulation-cancelled event");
+            }
             Err(e) => {
                 app_handle_clone
                     .emit("simulation-error", e)
                     .expect("Failed to emit simulation-error event");
             }
         }
+        control_state.finish();
     });
 
     // Return immediately, allowing the UI to remain responsive.
+    Ok(())
+}
+
+#[tauri::command]
+fn start_vita49_stream(
+    app_handle: AppHandle,
+    config: fers_api::Vita49StreamConfig,
+    control_state: State<'_, SimulationControlState>,
+) -> Result<(), String> {
+    control_state.try_start()?;
+    let app_handle_clone = app_handle.clone();
+
+    std::thread::spawn(move || {
+        let fers_state: State<'_, FersState> = app_handle_clone.state();
+        let control_state: State<'_, SimulationControlState> = app_handle_clone.state();
+        let result = fers_state.lock().map_err(|e| e.to_string()).and_then(|context| {
+            context.run_vita49_stream(&app_handle_clone, &control_state.cancel_requested, &config)
+        });
+
+        match result {
+            Ok(fers_api::SimulationRunOutcome::Completed(metadata_json)) => {
+                app_handle_clone
+                    .emit("vita49-output-metadata", metadata_json.clone())
+                    .expect("Failed to emit vita49-output-metadata event");
+                app_handle_clone
+                    .emit("vita49-stream-complete", metadata_json)
+                    .expect("Failed to emit vita49-stream-complete event");
+            }
+            Ok(fers_api::SimulationRunOutcome::Cancelled(metadata_json)) => {
+                app_handle_clone
+                    .emit("vita49-output-metadata", metadata_json.clone())
+                    .expect("Failed to emit vita49-output-metadata event");
+                app_handle_clone
+                    .emit("simulation-cancelled", metadata_json.clone())
+                    .expect("Failed to emit simulation-cancelled event");
+                app_handle_clone
+                    .emit("vita49-stream-cancelled", metadata_json)
+                    .expect("Failed to emit vita49-stream-cancelled event");
+            }
+            Err(e) => {
+                app_handle_clone
+                    .emit("vita49-stream-error", e)
+                    .expect("Failed to emit vita49-stream-error event");
+            }
+        }
+        control_state.finish();
+    });
+
+    Ok(())
+}
+
+#[tauri::command]
+fn stop_simulation(control_state: State<'_, SimulationControlState>) -> Result<(), String> {
+    control_state.cancel_requested.store(true, Ordering::SeqCst);
     Ok(())
 }
 
@@ -546,6 +640,7 @@ pub fn run() {
         })
         // Store the FersContext as managed state, accessible from all commands
         .manage(Mutex::new(context))
+        .manage(SimulationControlState::default())
         // Register all Tauri commands that can be invoked from the frontend
         .invoke_handler(tauri::generate_handler![
             load_scenario_from_xml_file,
@@ -553,6 +648,8 @@ pub fn run() {
             get_scenario_as_xml,
             update_scenario_from_json,
             run_simulation,
+            start_vita49_stream,
+            stop_simulation,
             export_output_metadata_json,
             generate_kml,
             get_interpolated_motion_path,
@@ -630,5 +727,18 @@ mod tests {
         // Since it's a completely uninitialized new context with no XML/JSON loaded yet,
         // it correctly delegates to the backend and evaluates safely without segfaults.
         assert!(result.is_ok() || result.is_err());
+    }
+
+    #[test]
+    fn test_simulation_control_cancel_flag_does_not_require_context_lock() {
+        let control = SimulationControlState::default();
+        control.try_start().unwrap();
+
+        assert!(!control.cancel_requested.load(Ordering::SeqCst));
+        control.cancel_requested.store(true, Ordering::SeqCst);
+        assert!(control.cancel_requested.load(Ordering::SeqCst));
+
+        control.finish();
+        assert!(!control.running.load(Ordering::SeqCst));
     }
 }

@@ -1,3 +1,4 @@
+#include <atomic>
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_string.hpp>
 #include <filesystem>
@@ -48,6 +49,12 @@ namespace
 		state->seen_user_data = user_data;
 		state->levels.push_back(level);
 		state->lines.emplace_back(line ? line : "");
+	}
+
+	int requestCancel(void* user_data)
+	{
+		auto* cancel = static_cast<std::atomic_bool*>(user_data);
+		return cancel->load() ? 1 : 0;
 	}
 }
 
@@ -335,6 +342,45 @@ TEST_CASE("API run simulation rejects VITA49 mode without fullscale", "[api][run
 	api_test::ApiString error = api_test::lastError();
 	REQUIRE(error.get() != nullptr);
 	REQUIRE_THAT(error.str(), ContainsSubstring("VITA49 fullscale must be a positive finite value"));
+}
+
+TEST_CASE("API HDF5 reset clears stale VITA49 output mode", "[api][runtime][vita49]")
+{
+	api_test::ParamGuard guard;
+	api_test::clearLastError();
+	api_test::Context context;
+	REQUIRE(context.get() != nullptr);
+
+	const std::string xml = api_test::minimalScenarioXml("API HDF5 Reset");
+	REQUIRE(fers_load_scenario_from_xml_string(context.get(), xml.c_str(), 0) == 0);
+	REQUIRE(fers_enable_vita49_udp_output(context.get(), "127.0.0.1", 4991) == 0);
+	REQUIRE(fers_use_hdf5_output(context.get()) == 0);
+
+	REQUIRE(fers_run_simulation(context.get(), nullptr, nullptr) == 0);
+
+	api_test::ApiString metadata_json(fers_get_last_output_metadata_json(context.get()));
+	REQUIRE(metadata_json.get() != nullptr);
+	const auto metadata = api_test::json::parse(metadata_json.str());
+	CHECK_FALSE(metadata.contains("vita49"));
+}
+
+TEST_CASE("API extended simulation reports cooperative cancellation with metadata", "[api][runtime]")
+{
+	api_test::ParamGuard guard;
+	api_test::clearLastError();
+	api_test::Context context;
+	REQUIRE(context.get() != nullptr);
+
+	const std::string xml = api_test::minimalScenarioXml("API Cancel Runtime");
+	REQUIRE(fers_load_scenario_from_xml_string(context.get(), xml.c_str(), 0) == 0);
+
+	std::atomic_bool cancel{true};
+	REQUIRE(fers_run_simulation_ex(context.get(), nullptr, nullptr, requestCancel, &cancel, nullptr, nullptr) == 2);
+
+	api_test::ApiString metadata_json(fers_get_last_output_metadata_json(context.get()));
+	REQUIRE(metadata_json.get() != nullptr);
+	const auto metadata = api_test::json::parse(metadata_json.str());
+	CHECK(metadata.at("simulation_name").get<std::string>() == "API Cancel Runtime");
 }
 
 TEST_CASE("API run simulation accepts a minimal valid scenario", "[api][runtime]")

@@ -17,6 +17,8 @@ namespace serial::vita49
 {
 	namespace
 	{
+		constexpr auto kStatsEmitInterval = std::chrono::milliseconds(250);
+
 		[[nodiscard]] std::uint64_t defaultEpochNanoseconds()
 		{
 			const auto now = std::chrono::system_clock::now().time_since_epoch();
@@ -24,7 +26,11 @@ namespace serial::vita49
 		}
 	}
 
-	Vita49OutputSink::Vita49OutputSink(std::unique_ptr<DatagramSender> sender) : _provided_sender(std::move(sender)) {}
+	Vita49OutputSink::Vita49OutputSink(std::unique_ptr<DatagramSender> sender,
+									   core::ReceiverOutputTelemetryCallback telemetry_callback) :
+		_telemetry_callback(std::move(telemetry_callback)), _provided_sender(std::move(sender))
+	{
+	}
 
 	Vita49OutputSink::~Vita49OutputSink()
 	{
@@ -67,6 +73,7 @@ namespace serial::vita49
 		_sender->start(params::startTime());
 		_initialized = true;
 		_finalized = false;
+		emitTelemetry({}, true);
 	}
 
 	std::uint32_t Vita49OutputSink::registerStream(const core::ReceiverStreamDescriptor& stream)
@@ -83,6 +90,7 @@ namespace serial::vita49
 			state.stats.sample_rate = stream.sample_rate;
 			state.stats.reference_frequency = stream.reference_frequency;
 			_streams.emplace(stream_id, std::move(state));
+			emitTelemetry({}, true);
 		}
 		return stream_id;
 	}
@@ -92,6 +100,7 @@ namespace serial::vita49
 		std::scoped_lock lock(_mutex);
 		emitContext(stream_id, first_sample_time, true, false);
 		stateFor(stream_id).opened = true;
+		emitTelemetry({}, true);
 	}
 
 	void Vita49OutputSink::submitBlock(const core::ReceiverSampleBlock& block)
@@ -156,6 +165,7 @@ namespace serial::vita49
 		{
 			emitContext(stream_id, state.last_context_time, false, true);
 			state.closed = true;
+			emitTelemetry({}, true);
 		}
 	}
 
@@ -164,15 +174,8 @@ namespace serial::vita49
 		std::scoped_lock lock(_mutex);
 		if (_finalized)
 		{
-			core::OutputStats stats{.mode = core::OutputMode::Vita49Udp,
-									.epoch_unix_nanoseconds = _packetizer
-										? std::optional<std::uint64_t>(_packetizer->epochUnixNanoseconds())
-										: std::nullopt,
-									.streams = {}};
-			for (auto& [stream_id, state] : _streams)
-			{
-				stats.streams.push_back(state.stats);
-			}
+			auto stats = snapshotStatsLocked();
+			emitTelemetry({}, true);
 			return stats;
 		}
 
@@ -212,7 +215,14 @@ namespace serial::vita49
 			stats.streams.push_back(state.stats);
 		}
 		_finalized = true;
+		emitTelemetry({}, true);
 		return stats;
+	}
+
+	core::OutputStats Vita49OutputSink::snapshotStats() const
+	{
+		std::scoped_lock lock(_mutex);
+		return snapshotStatsLocked();
 	}
 
 	Vita49OutputSink::StreamState& Vita49OutputSink::stateFor(const std::uint32_t stream_id)
@@ -235,6 +245,25 @@ namespace serial::vita49
 		return found->second;
 	}
 
+	core::OutputStats Vita49OutputSink::snapshotStatsLocked() const
+	{
+		core::OutputStats stats{.mode = core::OutputMode::Vita49Udp,
+								.epoch_unix_nanoseconds = _packetizer
+									? std::optional<std::uint64_t>(_packetizer->epochUnixNanoseconds())
+									: std::nullopt,
+								.streams = {}};
+		for (const auto& [stream_id, state] : _streams)
+		{
+			auto stream_stats = state.stats;
+			if (_sender)
+			{
+				stream_stats.late_packet_count = _sender->latePacketCount(stream_id);
+			}
+			stats.streams.push_back(std::move(stream_stats));
+		}
+		return stats;
+	}
+
 	bool Vita49OutputSink::enqueuePacket(SerializedPacket&& packet)
 	{
 		if (!_sender)
@@ -242,12 +271,83 @@ namespace serial::vita49
 			throw std::logic_error("VITA paced sender is unavailable");
 		}
 
+		std::vector<core::ReceiverOutputPacketTrace> traces;
+		auto sent_trace = makeTrace(packet, packet.context_packet ? "context" : "data");
 		const auto result = _sender->enqueue(std::move(packet));
 		if (result.dropped)
 		{
 			applyDropped(*result.dropped);
+			traces.push_back(makeDropTrace(*result.dropped));
 		}
+		if (result.enqueued)
+		{
+			traces.push_back(std::move(sent_trace));
+		}
+		emitTelemetry(std::move(traces), false);
 		return result.enqueued;
+	}
+
+	void Vita49OutputSink::emitTelemetry(std::vector<core::ReceiverOutputPacketTrace> packets, const bool force_stats)
+	{
+		if (!_telemetry_callback)
+		{
+			return;
+		}
+
+		std::optional<core::OutputStats> stats;
+		const auto now = std::chrono::steady_clock::now();
+		if (force_stats || _last_stats_emit == std::chrono::steady_clock::time_point::min() ||
+			now - _last_stats_emit >= kStatsEmitInterval)
+		{
+			stats = snapshotStatsLocked();
+			_last_stats_emit = now;
+		}
+
+		for (auto& packet : packets)
+		{
+			packet.sequence = ++_trace_sequence;
+		}
+
+		if (!stats.has_value() && packets.empty())
+		{
+			return;
+		}
+		_telemetry_callback(stats, packets);
+	}
+
+	core::ReceiverOutputPacketTrace Vita49OutputSink::makeTrace(const SerializedPacket& packet, std::string event) const
+	{
+		return core::ReceiverOutputPacketTrace{
+			.sequence = 0,
+			.event = std::move(event),
+			.stream_id = packet.stream_id,
+			.byte_count = packet.bytes.size(),
+			.sample_count = packet.sample_count,
+			.first_sample_time = packet.first_sample_time,
+			.timestamp_unix_ps = _packetizer
+				? saturatedUnixPicoseconds(_packetizer->epochUnixNanoseconds(), packet.first_sample_time)
+				: 0,
+			.data_packet = packet.data_packet,
+			.context_packet = packet.context_packet,
+			.dropped = false,
+			.over_range = packet.over_range,
+			.sample_loss = packet.sample_loss};
+	}
+
+	core::ReceiverOutputPacketTrace Vita49OutputSink::makeDropTrace(const DroppedDatagram& dropped) const
+	{
+		return core::ReceiverOutputPacketTrace{.sequence = 0,
+											   .event = "drop",
+											   .stream_id = dropped.stream_id,
+											   .byte_count = 0,
+											   .sample_count = dropped.sample_count,
+											   .first_sample_time = 0.0,
+											   .timestamp_unix_ps = 0,
+											   .data_packet = dropped.data_packet,
+											   .context_packet = dropped.context_packet,
+											   .dropped = true,
+											   .over_range = false,
+											   .sample_loss = true};
 	}
 
 	void Vita49OutputSink::emitContext(const std::uint32_t stream_id, const RealType simulation_time,
@@ -297,5 +397,9 @@ namespace serial::vita49
 		state.sample_loss_pending = true;
 	}
 
-	std::unique_ptr<core::ReceiverOutputSink> makeVita49OutputSink() { return std::make_unique<Vita49OutputSink>(); }
+	std::unique_ptr<core::ReceiverOutputSink>
+	makeVita49OutputSink(core::ReceiverOutputTelemetryCallback telemetry_callback)
+	{
+		return std::make_unique<Vita49OutputSink>(nullptr, std::move(telemetry_callback));
+	}
 }

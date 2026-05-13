@@ -7,6 +7,7 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <span>
@@ -122,6 +123,25 @@ namespace core
 		std::vector<ReceiverStreamStats> streams;
 	};
 
+	struct ReceiverOutputPacketTrace
+	{
+		std::uint64_t sequence = 0;
+		std::string event;
+		std::uint32_t stream_id = 0;
+		std::uint64_t byte_count = 0;
+		std::uint64_t sample_count = 0;
+		RealType first_sample_time = 0.0;
+		std::uint64_t timestamp_unix_ps = 0;
+		bool data_packet = false;
+		bool context_packet = false;
+		bool dropped = false;
+		bool over_range = false;
+		bool sample_loss = false;
+	};
+
+	using ReceiverOutputTelemetryCallback =
+		std::function<void(const std::optional<OutputStats>&, std::span<const ReceiverOutputPacketTrace>)>;
+
 	class ReceiverOutputSink
 	{
 	public:
@@ -134,5 +154,6 @@ namespace core
 		virtual void emitContextHeartbeat(RealType simulation_time) = 0;
 		virtual void closeStream(std::uint32_t stream_id) = 0;
 		virtual OutputStats finalize() = 0;
+		[[nodiscard]] virtual OutputStats snapshotStats() const { return {}; }
 	};
 }

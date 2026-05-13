@@ -30,6 +30,7 @@
 #include "core/output_config.h"
 #include "core/output_metadata.h"
 #include "core/parameters.h"
+#include "core/receiver_output.h"
 #include "core/sim_events.h"
 #include "core/simulation_state.h"
 #include "signal/dsp_filters.h"
@@ -117,12 +118,15 @@ namespace core
 		 */
 		SimulationEngine(World* world, pool::ThreadPool& pool, std::shared_ptr<ProgressReporter> reporter,
 						 std::string output_dir, std::shared_ptr<OutputMetadataCollector> metadata_collector = nullptr,
-						 ReceiverOutputSink* output_sink = nullptr);
+						 ReceiverOutputSink* output_sink = nullptr, std::function<bool()> cancel_callback = nullptr);
 
 		/**
 		 * @brief Starts and runs the main simulation loop until completion.
 		 */
 		void run();
+
+		/// Returns true after cooperative cancellation has been requested.
+		[[nodiscard]] bool cancelled() const noexcept { return _cancelled; }
 
 		/**
 		 * @brief Advances the time-stepped inner loop for active streaming systems.
@@ -278,6 +282,9 @@ namespace core
 		 */
 		void reportSimulationProgress(RealType t_current);
 
+		/// Polls the host cancellation callback and latches the result.
+		[[nodiscard]] bool isCancellationRequested();
+
 		/// Collects streaming sources active anywhere within the requested time window.
 		[[nodiscard]] std::vector<ActiveStreamingSource> collectStreamingSourcesForWindow(RealType start_time,
 																						  RealType end_time) const;
@@ -293,6 +300,8 @@ namespace core
 		std::vector<std::jthread> _finalizer_threads; ///< Collection of dedicated pulsed finalizer threads.
 		std::shared_ptr<OutputMetadataCollector> _metadata_collector; ///< Collector for generated output metadata.
 		ReceiverOutputSink* _output_sink = nullptr; ///< Selected receiver output sink.
+		std::function<bool()> _cancel_callback; ///< Optional cooperative cancellation callback.
+		bool _cancelled = false; ///< Latched cancellation state.
 
 		std::chrono::steady_clock::time_point _last_report_time; ///< Timestamp of the last progress report.
 		int _last_reported_percent = -1; ///< The last reported percentage to prevent redundant updates.
@@ -335,5 +344,7 @@ namespace core
 	 */
 	OutputMetadata runEventDrivenSim(World* world, pool::ThreadPool& pool,
 									 const std::function<void(const std::string&, int, int)>& progress_callback,
-									 const std::string& output_dir, const OutputConfig& output_config = OutputConfig{});
+									 const std::string& output_dir, const OutputConfig& output_config = OutputConfig{},
+									 std::function<bool()> cancel_callback = nullptr, bool* cancelled = nullptr,
+									 ReceiverOutputTelemetryCallback telemetry_callback = nullptr);
 }

@@ -1,0 +1,70 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE simulation SYSTEM "fers-xml.dtd">
+<simulation name="Vita49CwStreamingScenario">
+    <parameters>
+        <starttime>0.0</starttime>
+        <endtime>0.02</endtime>
+        <rate>100000.0</rate>
+        <simSamplingRate>100000.0</simSamplingRate>
+        <randomseed>20260513</randomseed>
+        <adc_bits>12</adc_bits>
+        <origin latitude="-33.957652" longitude="18.4611991" altitude="111.01"/>
+        <coordinatesystem frame="ENU"/>
+    </parameters>
+
+    <antenna name="VitaCwIsotropicAntenna" pattern="isotropic">
+        <efficiency>1.0</efficiency>
+    </antenna>
+
+    <waveform name="VitaCwTone">
+        <power>1.0</power>
+        <carrier_frequency>2.4e9</carrier_frequency>
+        <cw/>
+    </waveform>
+
+    <timing name="VitaCwClock">
+        <frequency>10.0e6</frequency>
+    </timing>
+
+    <platform name="VitaCwTransmitterPlatform">
+        <motionpath interpolation="static">
+            <positionwaypoint>
+                <x>0.0</x>
+                <y>0.0</y>
+                <altitude>10.0</altitude>
+                <time>0.0</time>
+            </positionwaypoint>
+        </motionpath>
+        <fixedrotation>
+            <startazimuth>90.0</startazimuth>
+            <startelevation>0.0</startelevation>
+            <azimuthrate>0.0</azimuthrate>
+            <elevationrate>0.0</elevationrate>
+        </fixedrotation>
+        <transmitter name="VitaCwTransmitter" waveform="VitaCwTone" antenna="VitaCwIsotropicAntenna"
+                     timing="VitaCwClock">
+            <cw_mode/>
+        </transmitter>
+    </platform>
+
+    <platform name="VitaCwReceiverPlatform">
+        <motionpath interpolation="static">
+            <positionwaypoint>
+                <x>100.0</x>
+                <y>0.0</y>
+                <altitude>10.0</altitude>
+                <time>0.0</time>
+            </positionwaypoint>
+        </motionpath>
+        <fixedrotation>
+            <startazimuth>270.0</startazimuth>
+            <startelevation>0.0</startelevation>
+            <azimuthrate>0.0</azimuthrate>
+            <elevationrate>0.0</elevationrate>
+        </fixedrotation>
+        <receiver name="VitaCwReceiver" antenna="VitaCwIsotropicAntenna" timing="VitaCwClock">
+            <cw_mode/>
+            <noise_temp>0.0</noise_temp>
+        </receiver>
+    </platform>
+</simulation>

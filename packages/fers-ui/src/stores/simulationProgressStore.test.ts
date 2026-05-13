@@ -208,4 +208,43 @@ describe('simulation output metadata', () => {
             1e6, 2e6,
         ]);
     });
+
+    test('preserves VITA49 metadata section', () => {
+        const metadata = {
+            ...baseMetadata,
+            files: [],
+            vita49: {
+                endpoint: '127.0.0.1:4991',
+                endpoint_host: '127.0.0.1',
+                endpoint_port: 4991,
+                epoch_unix_nanoseconds: 1700000000123456800,
+                class_id: '0xFA52530001000101',
+                adc_fullscale: 1,
+                max_udp_payload: 1400,
+                queue_depth: 1024,
+                streams: [
+                    {
+                        receiver_id: 10,
+                        receiver_name: 'Rx',
+                        stream_id: 1234,
+                        sample_rate: 1e6,
+                        reference_frequency: 9.6e9,
+                        packets_emitted: 4,
+                        samples_emitted: 512,
+                        packets_dropped: 0,
+                        samples_dropped: 0,
+                        over_range_count: 0,
+                        late_packet_count: 0,
+                        context_packet_count: 2,
+                        first_timestamp_unix_ps: 1,
+                        last_timestamp_unix_ps: 2,
+                    },
+                ],
+            },
+        } satisfies RawSimulationOutputMetadata;
+
+        expect(normalizeSimulationOutputMetadata(metadata).vita49).toEqual(
+            metadata.vita49
+        );
+    });
 });

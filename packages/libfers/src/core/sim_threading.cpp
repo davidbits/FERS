@@ -579,10 +579,11 @@ namespace core
 	SimulationEngine::SimulationEngine(World* world, pool::ThreadPool& pool, std::shared_ptr<ProgressReporter> reporter,
 									   std::string output_dir,
 									   std::shared_ptr<OutputMetadataCollector> metadata_collector,
-									   ReceiverOutputSink* output_sink) :
+									   ReceiverOutputSink* output_sink, std::function<bool()> cancel_callback) :
 		_world(world), _pool(pool), _reporter(std::move(reporter)), _metadata_collector(std::move(metadata_collector)),
-		_output_sink(output_sink), _last_report_time(std::chrono::steady_clock::now()),
-		_next_context_heartbeat_time(params::startTime() + 1.0), _output_dir(std::move(output_dir))
+		_output_sink(output_sink), _cancel_callback(std::move(cancel_callback)),
+		_last_report_time(std::chrono::steady_clock::now()), _next_context_heartbeat_time(params::startTime() + 1.0),
+		_output_dir(std::move(output_dir))
 	{
 		_streaming_tracker_caches.resize(_world->getReceivers().size());
 		_if_pulse_tracker_caches.resize(_world->getReceivers().size());
@@ -632,10 +633,18 @@ namespace core
 
 		while (!event_queue.empty() && state.t_current <= end_time)
 		{
+			if (isCancellationRequested())
+			{
+				break;
+			}
 			const Event event = event_queue.top();
 			event_queue.pop();
 
 			processStreamingPhysics(event.timestamp);
+			if (isCancellationRequested())
+			{
+				break;
+			}
 			flushFmcwIfBlocks();
 			flushStreamingOutputBlocks();
 
@@ -648,7 +657,7 @@ namespace core
 		const bool has_active_if_overrender =
 			std::ranges::any_of(_world->getReceivers(), [](const auto& receiver)
 								{ return receiver->isActive() && receiver->hasFmcwIfResamplingSink(); });
-		if (has_active_if_overrender)
+		if (!isCancellationRequested() && has_active_if_overrender)
 		{
 			processStreamingPhysics(end_time);
 		}
@@ -915,7 +924,7 @@ namespace core
 			return next_deadline;
 		};
 
-		while (t_current < t_event)
+		while (t_current < t_event && !isCancellationRequested())
 		{
 			cleanupInactiveStreamingSources(t_current);
 
@@ -934,6 +943,10 @@ namespace core
 			const auto end_index = streamingSampleIndexAtOrAfter(chunk_end, dt_sim);
 			for (size_t sample_index = start_index; sample_index < end_index; ++sample_index)
 			{
+				if (((sample_index - start_index) % 1024) == 0 && isCancellationRequested())
+				{
+					break;
+				}
 				const RealType t_step = params::startTime() + static_cast<RealType>(sample_index) * dt_sim;
 
 				for (std::size_t receiver_index = 0; receiver_index < _world->getReceivers().size(); ++receiver_index)
@@ -1676,6 +1689,25 @@ namespace core
 
 	void SimulationEngine::updateProgress() { reportSimulationProgress(_world->getSimulationState().t_current); }
 
+	bool SimulationEngine::isCancellationRequested()
+	{
+		if (_cancelled)
+		{
+			return true;
+		}
+		if (_cancel_callback && _cancel_callback())
+		{
+			_cancelled = true;
+			LOG(Level::INFO, "Simulation cancellation requested.");
+			if (_reporter)
+			{
+				_reporter->report("Simulation cancelled", 100, 100);
+			}
+			return true;
+		}
+		return false;
+	}
+
 	void SimulationEngine::reportSimulationProgress(const RealType t_current)
 	{
 		if (!_reporter)
@@ -1781,21 +1813,27 @@ namespace core
 		LOG(Level::INFO, "All finalization tasks complete.");
 		if (_reporter)
 		{
-			_reporter->report("Simulation complete", 100, 100);
+			_reporter->report(_cancelled ? "Simulation cancelled" : "Simulation complete", 100, 100);
 		}
 		LOG(Level::INFO, "Event-driven simulation loop finished.");
 	}
 
 	OutputMetadata runEventDrivenSim(World* world, pool::ThreadPool& pool,
 									 const std::function<void(const std::string&, int, int)>& progress_callback,
-									 const std::string& output_dir, const OutputConfig& output_config)
+									 const std::string& output_dir, const OutputConfig& output_config,
+									 std::function<bool()> cancel_callback, bool* cancelled,
+									 ReceiverOutputTelemetryCallback telemetry_callback)
 	{
+		if (cancelled != nullptr)
+		{
+			*cancelled = false;
+		}
 		auto reporter = std::make_shared<ProgressReporter>(progress_callback);
 		auto metadata_collector = std::make_shared<OutputMetadataCollector>(output_dir);
 		std::unique_ptr<ReceiverOutputSink> output_sink;
 		if (isVita49Enabled(output_config))
 		{
-			output_sink = serial::vita49::makeVita49OutputSink();
+			output_sink = serial::vita49::makeVita49OutputSink(std::move(telemetry_callback));
 			output_sink->initializeRun(output_config, params::params.simulation_name);
 		}
 		else
@@ -1804,8 +1842,13 @@ namespace core
 			output_sink->initializeRun(output_config, params::params.simulation_name);
 		}
 
-		SimulationEngine engine(world, pool, reporter, output_dir, metadata_collector, output_sink.get());
+		SimulationEngine engine(world, pool, reporter, output_dir, metadata_collector, output_sink.get(),
+								std::move(cancel_callback));
 		engine.run();
+		if (cancelled != nullptr)
+		{
+			*cancelled = engine.cancelled();
+		}
 		const auto stats = output_sink->finalize();
 		auto metadata = metadata_collector->snapshot();
 		if (output_sink)

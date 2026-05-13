@@ -6,8 +6,10 @@
 
 #pragma once
 
+#include <chrono>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -22,7 +24,8 @@ namespace serial::vita49
 	class Vita49OutputSink final : public core::ReceiverOutputSink
 	{
 	public:
-		explicit Vita49OutputSink(std::unique_ptr<DatagramSender> sender = nullptr);
+		explicit Vita49OutputSink(std::unique_ptr<DatagramSender> sender = nullptr,
+								  core::ReceiverOutputTelemetryCallback telemetry_callback = nullptr);
 		~Vita49OutputSink() override;
 
 		void initializeRun(const core::OutputConfig& config, std::string simulation_name) override;
@@ -32,6 +35,7 @@ namespace serial::vita49
 		void emitContextHeartbeat(RealType simulation_time) override;
 		void closeStream(std::uint32_t stream_id) override;
 		core::OutputStats finalize() override;
+		[[nodiscard]] core::OutputStats snapshotStats() const override;
 
 	private:
 		struct StreamState
@@ -48,21 +52,30 @@ namespace serial::vita49
 
 		[[nodiscard]] StreamState& stateFor(std::uint32_t stream_id);
 		[[nodiscard]] const StreamState& stateFor(std::uint32_t stream_id) const;
+		[[nodiscard]] core::OutputStats snapshotStatsLocked() const;
 		[[nodiscard]] bool enqueuePacket(SerializedPacket&& packet);
+		void emitTelemetry(std::vector<core::ReceiverOutputPacketTrace> packets = {}, bool force_stats = false);
+		[[nodiscard]] core::ReceiverOutputPacketTrace makeTrace(const SerializedPacket& packet,
+																std::string event) const;
+		[[nodiscard]] core::ReceiverOutputPacketTrace makeDropTrace(const DroppedDatagram& dropped) const;
 		void emitContext(std::uint32_t stream_id, RealType simulation_time, bool stream_open, bool stream_close);
 		void applyDropped(const DroppedDatagram& dropped);
 
 		core::OutputConfig _config;
 		std::string _simulation_name;
+		core::ReceiverOutputTelemetryCallback _telemetry_callback;
 		std::unique_ptr<DatagramSender> _provided_sender;
 		StreamRegistry _registry;
 		std::unique_ptr<Vita49Packetizer> _packetizer;
 		std::unique_ptr<PacedSender> _sender;
 		std::unordered_map<std::uint32_t, StreamState> _streams;
 		mutable std::recursive_mutex _mutex;
+		std::chrono::steady_clock::time_point _last_stats_emit = std::chrono::steady_clock::time_point::min();
+		std::uint64_t _trace_sequence = 0;
 		bool _initialized = false;
 		bool _finalized = false;
 	};
 
-	[[nodiscard]] std::unique_ptr<core::ReceiverOutputSink> makeVita49OutputSink();
+	[[nodiscard]] std::unique_ptr<core::ReceiverOutputSink>
+	makeVita49OutputSink(core::ReceiverOutputTelemetryCallback telemetry_callback = nullptr);
 }

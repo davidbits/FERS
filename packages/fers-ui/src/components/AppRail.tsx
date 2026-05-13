@@ -3,6 +3,7 @@
 
 import InfoOutlinedIcon from '@mui/icons-material/InfoOutlined';
 import PlayArrowIcon from '@mui/icons-material/PlayArrow';
+import PodcastsIcon from '@mui/icons-material/Podcasts';
 import SettingsIcon from '@mui/icons-material/Settings';
 import TerminalIcon from '@mui/icons-material/Terminal';
 import ViewInArIcon from '@mui/icons-material/ViewInAr';
@@ -28,6 +29,7 @@ const views = [
     { id: 'scenario', label: 'Scenario Builder', icon: <ViewInArIcon /> },
     { id: 'assets', label: 'Asset Library', icon: <WidgetsIcon /> },
     { id: 'simulation', label: 'Simulation Run', icon: <PlayArrowIcon /> },
+    { id: 'vita49', label: 'VITA49 Streams', icon: <PodcastsIcon /> },
 ];
 
 export default function AppRail({

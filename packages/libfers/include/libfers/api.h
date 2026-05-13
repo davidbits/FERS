@@ -40,6 +40,30 @@ typedef struct fers_context fers_context_t; // NOLINT(*-use-using)
 typedef void (*fers_progress_callback_t)(const char* message, int current, int total,
 										 void* user_data); // NOLINT(*-use-using)
 
+/**
+ * @brief A function pointer type for cooperative simulation cancellation.
+ *
+ * The callback should return non-zero when the active simulation should stop.
+ * It is polled between event-loop iterations and streaming sample chunks.
+ *
+ * @param user_data An opaque pointer passed back to the caller.
+ * @return Non-zero to request cancellation, zero to continue.
+ */
+typedef int (*fers_cancel_callback_t)(void* user_data); // NOLINT(*-use-using)
+
+/**
+ * @brief A function pointer type for VITA 49.2 live telemetry callbacks.
+ *
+ * The JSON strings are valid only for the duration of the callback. Either
+ * argument may be NULL when that payload has not changed.
+ *
+ * @param stats_json Full stream-counter snapshot JSON, or NULL.
+ * @param packet_batch_json Packet trace batch JSON array, or NULL.
+ * @param user_data An opaque pointer passed back to the caller.
+ */
+typedef void (*fers_vita49_telemetry_callback_t)(const char* stats_json, const char* packet_batch_json,
+												 void* user_data); // NOLINT(*-use-using)
+
 
 // --- Context Lifecycle ---
 
@@ -78,6 +102,17 @@ void fers_context_destroy(fers_context_t* context);
  * @return 0 on success, non-zero on error.
  */
 int fers_set_output_directory(fers_context_t* context, const char* out_dir);
+
+/**
+ * @brief Resets the context output mode to the default HDF5 output.
+ *
+ * Runtime-only VITA 49.2 endpoint settings are retained for later VITA runs,
+ * but the selected output mode is changed back to HDF5.
+ *
+ * @param context A valid `fers_context_t` handle.
+ * @return 0 on success, non-zero on error.
+ */
+int fers_use_hdf5_output(fers_context_t* context);
 
 /**
  * @brief Enables VITA 49.2 UDP receiver output for a context.
@@ -449,6 +484,26 @@ void fers_free_string(char* str);
  *         `fers_get_last_error_message()` to retrieve error details.
  */
 int fers_run_simulation(fers_context_t* context, fers_progress_callback_t callback, void* user_data);
+
+/**
+ * @brief Runs the simulation with optional progress, cancellation, and VITA telemetry callbacks.
+ *
+ * Return values match `fers_run_simulation`, except 2 means the run was
+ * cooperatively cancelled after output finalization and metadata collection.
+ *
+ * @param context A valid `fers_context_t` handle containing a loaded scenario.
+ * @param progress_callback Optional progress callback. Can be NULL.
+ * @param progress_user_data Opaque pointer passed to the progress callback.
+ * @param cancel_callback Optional cancellation callback. Can be NULL.
+ * @param cancel_user_data Opaque pointer passed to the cancellation callback.
+ * @param vita49_telemetry_callback Optional VITA live telemetry callback. Can be NULL.
+ * @param vita49_telemetry_user_data Opaque pointer passed to the VITA telemetry callback.
+ * @return 0 on success, 2 on cancellation, a non-zero error code on failure.
+ */
+int fers_run_simulation_ex(fers_context_t* context, fers_progress_callback_t progress_callback,
+						   void* progress_user_data, fers_cancel_callback_t cancel_callback, void* cancel_user_data,
+						   fers_vita49_telemetry_callback_t vita49_telemetry_callback,
+						   void* vita49_telemetry_user_data);
 
 
 // --- Utility Functions ---
