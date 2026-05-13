@@ -30,7 +30,13 @@ import {
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { dirname } from '@tauri-apps/api/path';
-import React, { useEffect, useMemo, useState } from 'react';
+import React, {
+    useCallback,
+    useEffect,
+    useMemo,
+    useRef,
+    useState,
+} from 'react';
 import { useScenarioStore } from '@/stores/scenarioStore';
 import { getBlockingFmcwValidationMessage } from '@/stores/scenarioStore/fmcwValidation';
 import {
@@ -44,11 +50,16 @@ import {
     useVita49StreamingStore,
     type Vita49PacketTraceEvent,
     type Vita49StreamStatsEvent,
+    type Vita49TelemetryPoll,
     validateVita49Config,
 } from '@/stores/vita49StreamingStore';
 
-const parsePayload = <T,>(payload: T | string): T =>
-    typeof payload === 'string' ? (JSON.parse(payload) as T) : payload;
+const TELEMETRY_POLL_INTERVAL_MS = 100;
+const TELEMETRY_POLL_ERROR_INTERVAL_MS = 250;
+const TELEMETRY_POLL_PACKET_LIMIT = 1000;
+const PACKET_TRACE_TABLE_HEIGHT = 420;
+const PACKET_TRACE_ROW_HEIGHT = 36;
+const PACKET_TRACE_OVERSCAN = 8;
 
 const formatMetric = (value: number | null | undefined) =>
     value === null || value === undefined
@@ -103,42 +114,109 @@ export const Vita49StreamingView = React.memo(function Vita49StreamingView() {
     const [droppedOnly, setDroppedOnly] = useState(false);
     const [overRangeOnly, setOverRangeOnly] = useState(false);
     const [sampleLossOnly, setSampleLossOnly] = useState(false);
+    const [packetTraceScrollTop, setPacketTraceScrollTop] = useState(0);
+    const packetTraceContainerRef = useRef<HTMLDivElement | null>(null);
+    const pendingTelemetryRef = useRef<{
+        stats: Vita49StreamStatsEvent | null;
+        packets: Vita49PacketTraceEvent[];
+        omittedPacketTraceEvents: number;
+    }>({
+        stats: null,
+        packets: [],
+        omittedPacketTraceEvents: 0,
+    });
+    const telemetryFlushFrameRef = useRef<number | null>(null);
+    const isRunning = runState === 'running' || runState === 'stopping';
+    const configErrors = validateVita49Config(config);
+
+    const appendTelemetry = useCallback(
+        (telemetry: Vita49TelemetryPoll) => {
+            if (telemetry.stats) {
+                setStreamStats(telemetry.stats);
+            }
+            if (
+                telemetry.packets.length > 0 ||
+                telemetry.omitted_packet_trace_events > 0
+            ) {
+                appendPacketBatch(
+                    telemetry.packets,
+                    telemetry.omitted_packet_trace_events
+                );
+            }
+        },
+        [appendPacketBatch, setStreamStats]
+    );
+
+    const flushPendingTelemetry = useCallback(() => {
+        if (telemetryFlushFrameRef.current !== null) {
+            window.cancelAnimationFrame(telemetryFlushFrameRef.current);
+            telemetryFlushFrameRef.current = null;
+        }
+
+        const pending = pendingTelemetryRef.current;
+        pendingTelemetryRef.current = {
+            stats: null,
+            packets: [],
+            omittedPacketTraceEvents: 0,
+        };
+
+        if (pending.stats) {
+            setStreamStats(pending.stats);
+        }
+        if (
+            pending.packets.length > 0 ||
+            pending.omittedPacketTraceEvents > 0
+        ) {
+            appendPacketBatch(
+                pending.packets,
+                pending.omittedPacketTraceEvents
+            );
+        }
+    }, [appendPacketBatch, setStreamStats]);
+
+    const drainAvailableTelemetry = useCallback(async () => {
+        flushPendingTelemetry();
+        let hasMore = false;
+        do {
+            const telemetry = await invoke<Vita49TelemetryPoll>(
+                'poll_vita49_telemetry',
+                { maxPackets: TELEMETRY_POLL_PACKET_LIMIT }
+            );
+            appendTelemetry(telemetry);
+            hasMore = telemetry.has_more;
+        } while (hasMore);
+        flushPendingTelemetry();
+    }, [appendTelemetry, flushPendingTelemetry]);
 
     useEffect(() => {
         let active = true;
         const unlisteners = Promise.all([
-            listen<string>('vita49-stream-stats', (event) => {
-                if (!active) return;
-                setStreamStats(
-                    parsePayload<Vita49StreamStatsEvent>(event.payload)
-                );
-            }),
-            listen<string>('vita49-packet-batch', (event) => {
-                if (!active) return;
-                appendPacketBatch(
-                    parsePayload<Vita49PacketTraceEvent[]>(event.payload)
-                );
-            }),
             listen<string>('vita49-output-metadata', (event) => {
                 if (!active) return;
                 const metadata = normalizeSimulationOutputMetadata(
                     JSON.parse(event.payload) as RawSimulationOutputMetadata
                 );
-                completeRun(metadata);
+                void drainAvailableTelemetry().finally(() => {
+                    if (active) completeRun(metadata);
+                });
             }),
             listen<string>('vita49-stream-complete', (event) => {
                 if (!active) return;
                 const metadata = normalizeSimulationOutputMetadata(
                     JSON.parse(event.payload) as RawSimulationOutputMetadata
                 );
-                completeRun(metadata);
+                void drainAvailableTelemetry().finally(() => {
+                    if (active) completeRun(metadata);
+                });
             }),
             listen<string>('vita49-stream-cancelled', (event) => {
                 if (!active) return;
                 const metadata = normalizeSimulationOutputMetadata(
                     JSON.parse(event.payload) as RawSimulationOutputMetadata
                 );
-                cancelRun(metadata);
+                void drainAvailableTelemetry().finally(() => {
+                    if (active) cancelRun(metadata);
+                });
             }),
             listen<string>('vita49-stream-error', (event) => {
                 if (!active) return;
@@ -153,14 +231,77 @@ export const Vita49StreamingView = React.memo(function Vita49StreamingView() {
                 listeners.forEach((unlisten) => unlisten())
             );
         };
-    }, [
-        appendPacketBatch,
-        cancelRun,
-        completeRun,
-        failRun,
-        setStreamStats,
-        showError,
-    ]);
+    }, [cancelRun, completeRun, drainAvailableTelemetry, failRun, showError]);
+
+    useEffect(() => {
+        if (!isRunning) {
+            return;
+        }
+
+        let cancelled = false;
+        let pollTimer: ReturnType<typeof setTimeout> | null = null;
+
+        const scheduleFlush = () => {
+            if (telemetryFlushFrameRef.current !== null) {
+                return;
+            }
+            telemetryFlushFrameRef.current = window.requestAnimationFrame(
+                flushPendingTelemetry
+            );
+        };
+
+        const queueTelemetry = (telemetry: Vita49TelemetryPoll) => {
+            const pending = pendingTelemetryRef.current;
+            pending.stats = telemetry.stats ?? pending.stats;
+            pending.packets.push(...telemetry.packets);
+            pending.omittedPacketTraceEvents +=
+                telemetry.omitted_packet_trace_events;
+            scheduleFlush();
+        };
+
+        const pollTelemetry = async () => {
+            if (cancelled) {
+                return;
+            }
+
+            try {
+                let hasMore = false;
+                do {
+                    const telemetry = await invoke<Vita49TelemetryPoll>(
+                        'poll_vita49_telemetry',
+                        { maxPackets: TELEMETRY_POLL_PACKET_LIMIT }
+                    );
+                    queueTelemetry(telemetry);
+                    hasMore = telemetry.has_more;
+                } while (!cancelled && hasMore);
+
+                if (!cancelled) {
+                    pollTimer = setTimeout(
+                        pollTelemetry,
+                        TELEMETRY_POLL_INTERVAL_MS
+                    );
+                }
+            } catch (err) {
+                console.error('Failed to poll VITA49 telemetry:', err);
+                if (!cancelled) {
+                    pollTimer = setTimeout(
+                        pollTelemetry,
+                        TELEMETRY_POLL_ERROR_INTERVAL_MS
+                    );
+                }
+            }
+        };
+
+        void pollTelemetry();
+
+        return () => {
+            cancelled = true;
+            if (pollTimer !== null) {
+                clearTimeout(pollTimer);
+            }
+            flushPendingTelemetry();
+        };
+    }, [flushPendingTelemetry, isRunning]);
 
     const streamRows = useMemo(
         () => mergeVita49StreamRows(expectedStreams, streamStats),
@@ -231,8 +372,43 @@ export const Vita49StreamingView = React.memo(function Vita49StreamingView() {
         ]
     );
 
-    const isRunning = runState === 'running' || runState === 'stopping';
-    const configErrors = validateVita49Config(config);
+    useEffect(() => {
+        setPacketTraceScrollTop(0);
+        if (packetTraceContainerRef.current) {
+            packetTraceContainerRef.current.scrollTop = 0;
+        }
+    }, [
+        droppedOnly,
+        overRangeOnly,
+        packetKindFilter,
+        sampleLossOnly,
+        streamFilter,
+    ]);
+
+    const packetTraceWindow = useMemo(() => {
+        const rawStart = Math.max(
+            0,
+            Math.floor(packetTraceScrollTop / PACKET_TRACE_ROW_HEIGHT) -
+                PACKET_TRACE_OVERSCAN
+        );
+        const start = Math.min(filteredPackets.length, rawStart);
+        const end = Math.min(
+            filteredPackets.length,
+            Math.ceil(
+                (packetTraceScrollTop + PACKET_TRACE_TABLE_HEIGHT) /
+                    PACKET_TRACE_ROW_HEIGHT
+            ) + PACKET_TRACE_OVERSCAN
+        );
+        return {
+            start,
+            end,
+            packets: filteredPackets.slice(start, end),
+            topSpacerHeight: start * PACKET_TRACE_ROW_HEIGHT,
+            bottomSpacerHeight:
+                Math.max(0, filteredPackets.length - end) *
+                PACKET_TRACE_ROW_HEIGHT,
+        };
+    }, [filteredPackets, packetTraceScrollTop]);
 
     const getEffectiveOutputDir = async () => {
         if (outputDirectory) return outputDirectory;
@@ -423,6 +599,25 @@ export const Vita49StreamingView = React.memo(function Vita49StreamingView() {
                                     })
                                 }
                             />
+                            <Stack
+                                direction="row"
+                                alignItems="center"
+                                justifyContent="space-between"
+                                spacing={1}
+                            >
+                                <Typography variant="body2">
+                                    Packet trace
+                                </Typography>
+                                <Switch
+                                    checked={config.traceEnabled}
+                                    disabled={isRunning}
+                                    onChange={(event) =>
+                                        setConfig({
+                                            traceEnabled: event.target.checked,
+                                        })
+                                    }
+                                />
+                            </Stack>
                             <TextField
                                 label="Trace ring"
                                 size="small"
@@ -719,7 +914,13 @@ export const Vita49StreamingView = React.memo(function Vita49StreamingView() {
                         events omitted
                     </Alert>
                 )}
-                <TableContainer sx={{ maxHeight: 420 }}>
+                <TableContainer
+                    ref={packetTraceContainerRef}
+                    onScroll={(event) =>
+                        setPacketTraceScrollTop(event.currentTarget.scrollTop)
+                    }
+                    sx={{ maxHeight: PACKET_TRACE_TABLE_HEIGHT }}
+                >
                     <Table size="small" stickyHeader>
                         <TableHead>
                             <TableRow>
@@ -734,7 +935,19 @@ export const Vita49StreamingView = React.memo(function Vita49StreamingView() {
                             </TableRow>
                         </TableHead>
                         <TableBody>
-                            {filteredPackets.map((packet) => (
+                            {packetTraceWindow.topSpacerHeight > 0 && (
+                                <TableRow
+                                    sx={{
+                                        height: `${packetTraceWindow.topSpacerHeight}px`,
+                                    }}
+                                >
+                                    <TableCell
+                                        colSpan={8}
+                                        sx={{ p: 0, border: 0 }}
+                                    />
+                                </TableRow>
+                            )}
+                            {packetTraceWindow.packets.map((packet) => (
                                 <TableRow key={packet.sequence}>
                                     <TableCell align="right">
                                         {packet.sequence}
@@ -782,6 +995,18 @@ export const Vita49StreamingView = React.memo(function Vita49StreamingView() {
                                     </TableCell>
                                 </TableRow>
                             ))}
+                            {packetTraceWindow.bottomSpacerHeight > 0 && (
+                                <TableRow
+                                    sx={{
+                                        height: `${packetTraceWindow.bottomSpacerHeight}px`,
+                                    }}
+                                >
+                                    <TableCell
+                                        colSpan={8}
+                                        sx={{ p: 0, border: 0 }}
+                                    />
+                                </TableRow>
+                            )}
                             {filteredPackets.length === 0 && (
                                 <TableRow>
                                     <TableCell colSpan={8}>

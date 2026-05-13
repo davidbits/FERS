@@ -28,6 +28,7 @@ namespace core
 		std::uint32_t queue_depth = 1024;
 		std::optional<std::uint64_t> epoch_unix_nanoseconds = std::nullopt;
 		std::uint16_t max_udp_payload = 1400;
+		bool packet_trace_enabled = true;
 	};
 
 	struct OutputConfig

@@ -325,6 +325,14 @@ TEST_CASE("API VITA49 setters validate control-plane inputs", "[api][runtime][vi
 	api_test::ApiString queue_error = api_test::lastError();
 	REQUIRE(queue_error.get() != nullptr);
 	REQUIRE_THAT(queue_error.str(), ContainsSubstring("queue depth"));
+
+	REQUIRE(fers_set_vita49_packet_trace_enabled(nullptr, 0) == -1);
+	api_test::ApiString trace_error = api_test::lastError();
+	REQUIRE(trace_error.get() != nullptr);
+	REQUIRE_THAT(trace_error.str(), ContainsSubstring("context is NULL"));
+
+	REQUIRE(fers_set_vita49_packet_trace_enabled(context.get(), 0) == 0);
+	REQUIRE(fers_set_vita49_packet_trace_enabled(context.get(), 1) == 0);
 }
 
 TEST_CASE("API run simulation rejects VITA49 mode without fullscale", "[api][runtime][vita49]")

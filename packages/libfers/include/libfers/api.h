@@ -171,6 +171,18 @@ int fers_set_vita49_max_udp_payload(fers_context_t* context, uint16_t max_udp_pa
 int fers_set_vita49_queue_depth(fers_context_t* context, uint32_t queue_depth);
 
 /**
+ * @brief Enables or disables VITA 49.2 packet trace telemetry.
+ *
+ * Stream counter telemetry is unaffected. Disabling packet trace telemetry avoids
+ * per-packet diagnostic record creation for UI runs that only need live counters.
+ *
+ * @param context A valid `fers_context_t` handle.
+ * @param enabled Non-zero to enable packet trace telemetry, zero to disable it.
+ * @return 0 on success, non-zero on error.
+ */
+int fers_set_vita49_packet_trace_enabled(fers_context_t* context, int enabled);
+
+/**
  * @brief Log levels for the FERS library.
  */
 typedef enum // NOLINT(*-use-using)

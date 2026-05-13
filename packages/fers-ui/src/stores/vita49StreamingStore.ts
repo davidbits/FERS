@@ -27,6 +27,7 @@ export type Vita49RuntimeConfig = {
     epochUnixNanoseconds: string;
     maxUdpPayload: number;
     queueDepth: number;
+    traceEnabled: boolean;
     packetTraceRingSize: number;
 };
 
@@ -37,6 +38,8 @@ export type Vita49BackendConfig = {
     epoch_unix_nanoseconds: string | null;
     max_udp_payload: number;
     queue_depth: number;
+    trace_enabled: boolean;
+    packet_trace_ring_size: number;
 };
 
 export type Vita49StreamCounter = {
@@ -78,6 +81,13 @@ export type Vita49PacketTraceEvent = {
     sample_loss: boolean;
 };
 
+export type Vita49TelemetryPoll = {
+    stats: Vita49StreamStatsEvent | null;
+    packets: Vita49PacketTraceEvent[];
+    omitted_packet_trace_events: number;
+    has_more: boolean;
+};
+
 export type Vita49StreamRow = {
     key: string;
     receiverId: number;
@@ -107,6 +117,7 @@ export const DEFAULT_VITA49_CONFIG: Vita49RuntimeConfig = {
     epochUnixNanoseconds: '',
     maxUdpPayload: 1400,
     queueDepth: 1024,
+    traceEnabled: true,
     packetTraceRingSize: 500,
 };
 
@@ -181,6 +192,8 @@ export const toVita49BackendConfig = (
                 : null,
         max_udp_payload: config.maxUdpPayload,
         queue_depth: config.queueDepth,
+        trace_enabled: config.traceEnabled,
+        packet_trace_ring_size: config.packetTraceRingSize,
     };
 };
 
@@ -320,7 +333,10 @@ type Vita49StreamingStore = {
     startRun: (expectedStreams: Vita49StreamRow[]) => void;
     markStopping: () => void;
     setStreamStats: (stats: Vita49StreamStatsEvent) => void;
-    appendPacketBatch: (packets: Vita49PacketTraceEvent[]) => void;
+    appendPacketBatch: (
+        packets: Vita49PacketTraceEvent[],
+        omittedPacketTraceEvents?: number
+    ) => void;
     completeRun: (metadata: SimulationOutputMetadata | null) => void;
     cancelRun: (metadata: SimulationOutputMetadata | null) => void;
     failRun: (error: string) => void;
@@ -361,7 +377,7 @@ export const useVita49StreamingStore = create<Vita49StreamingStore>()(
                             : state.runState,
                 })),
             setStreamStats: (streamStats) => set({ streamStats }),
-            appendPacketBatch: (packets) =>
+            appendPacketBatch: (packets, omittedPacketTraceEvents = 0) =>
                 set((state) => {
                     const ringSize = state.config.packetTraceRingSize;
                     const combined = [...state.packetTrace, ...packets];
@@ -370,7 +386,9 @@ export const useVita49StreamingStore = create<Vita49StreamingStore>()(
                         packetTrace:
                             overflow > 0 ? combined.slice(overflow) : combined,
                         omittedPacketTraceEvents:
-                            state.omittedPacketTraceEvents + overflow,
+                            state.omittedPacketTraceEvents +
+                            omittedPacketTraceEvents +
+                            overflow,
                     };
                 }),
             completeRun: (metadata) =>
@@ -398,6 +416,22 @@ export const useVita49StreamingStore = create<Vita49StreamingStore>()(
         {
             name: 'fers-vita49-streaming',
             partialize: (state) => ({ config: state.config }),
+            merge: (persisted, current) => {
+                const persistedState =
+                    persisted && typeof persisted === 'object'
+                        ? (persisted as Partial<
+                              Pick<Vita49StreamingStore, 'config'>
+                          >)
+                        : {};
+                return {
+                    ...current,
+                    ...persistedState,
+                    config: {
+                        ...DEFAULT_VITA49_CONFIG,
+                        ...persistedState.config,
+                    },
+                };
+            },
         }
     )
 );

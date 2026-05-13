@@ -278,16 +278,23 @@ namespace serial::vita49
 		}
 
 		std::vector<core::ReceiverOutputPacketTrace> traces;
-		auto sent_trace = makeTrace(packet, packet.context_packet ? "context" : "data");
+		std::optional<core::ReceiverOutputPacketTrace> sent_trace;
+		if (_config.vita49.packet_trace_enabled)
+		{
+			sent_trace = makeTrace(packet, packet.context_packet ? "context" : "data");
+		}
 		const auto result = _sender->enqueue(std::move(packet));
+		if (_config.vita49.packet_trace_enabled && result.dropped)
+		{
+			traces.push_back(makeDropTrace(*result.dropped));
+		}
 		if (result.dropped)
 		{
 			applyDropped(*result.dropped);
-			traces.push_back(makeDropTrace(*result.dropped));
 		}
-		if (result.enqueued)
+		if (result.enqueued && sent_trace.has_value())
 		{
-			traces.push_back(std::move(sent_trace));
+			traces.push_back(std::move(*sent_trace));
 		}
 		emitTelemetry(std::move(traces), false);
 		return result.enqueued;

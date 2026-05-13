@@ -64,8 +64,12 @@ describe('VITA49 streaming config', () => {
                 ...DEFAULT_VITA49_CONFIG,
                 epochMode: 'fixed',
                 epochUnixNanoseconds: '1700000000123456789',
-            }).epoch_unix_nanoseconds
-        ).toBe('1700000000123456789');
+            })
+        ).toMatchObject({
+            epoch_unix_nanoseconds: '1700000000123456789',
+            trace_enabled: true,
+            packet_trace_ring_size: DEFAULT_VITA49_CONFIG.packetTraceRingSize,
+        });
     });
 });
 
@@ -178,5 +182,23 @@ describe('VITA49 packet trace ring', () => {
             3, 4, 5,
         ]);
         expect(state.omittedPacketTraceEvents).toBe(2);
+    });
+
+    test('adds backend omitted packet count when appending polled batches', () => {
+        useVita49StreamingStore.setState({
+            config: { ...DEFAULT_VITA49_CONFIG, packetTraceRingSize: 5 },
+            packetTrace: [],
+            omittedPacketTraceEvents: 0,
+        });
+
+        useVita49StreamingStore
+            .getState()
+            .appendPacketBatch([1, 2].map(packet), 7);
+
+        const state = useVita49StreamingStore.getState();
+        expect(state.packetTrace.map((entry) => entry.sequence)).toEqual([
+            1, 2,
+        ]);
+        expect(state.omittedPacketTraceEvents).toBe(7);
     });
 });

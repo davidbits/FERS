@@ -32,11 +32,12 @@
 mod fers_api;
 
 use std::{
+    collections::VecDeque,
     fs,
     path::PathBuf,
     sync::{
         atomic::{AtomicBool, Ordering},
-        Mutex,
+        mpsc, Mutex,
     },
 };
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -118,6 +119,88 @@ pub struct InterpolatedRotationPoint {
 /// may invoke commands from multiple threads concurrently. This alias simplifies
 /// the function signatures of Tauri commands.
 type FersState = Mutex<fers_api::FersContext>;
+
+const DEFAULT_VITA49_TELEMETRY_PACKET_LIMIT: usize = 500;
+const MAX_VITA49_TELEMETRY_PACKET_LIMIT: usize = 1_000_000;
+
+type Vita49TelemetryState = Mutex<Vita49TelemetryBuffer>;
+
+#[derive(Default)]
+struct Vita49TelemetryBuffer {
+    latest_stats: Option<serde_json::Value>,
+    stats_dirty: bool,
+    packets: VecDeque<serde_json::Value>,
+    omitted_packet_trace_events: u64,
+    packet_limit: usize,
+    trace_enabled: bool,
+}
+
+#[derive(serde::Serialize)]
+struct Vita49TelemetryPoll {
+    stats: Option<serde_json::Value>,
+    packets: Vec<serde_json::Value>,
+    omitted_packet_trace_events: u64,
+    has_more: bool,
+}
+
+impl Vita49TelemetryBuffer {
+    fn reset(&mut self, trace_enabled: bool, packet_limit: usize) {
+        self.latest_stats = None;
+        self.stats_dirty = false;
+        self.packets.clear();
+        self.omitted_packet_trace_events = 0;
+        let requested_limit =
+            if packet_limit == 0 { DEFAULT_VITA49_TELEMETRY_PACKET_LIMIT } else { packet_limit };
+        self.packet_limit = requested_limit.clamp(1, MAX_VITA49_TELEMETRY_PACKET_LIMIT);
+        self.trace_enabled = trace_enabled;
+    }
+
+    fn ingest(&mut self, message: fers_api::Vita49TelemetryMessage) {
+        if let Some(stats_json) = message.stats_json {
+            if let Ok(stats) = serde_json::from_str(&stats_json) {
+                self.latest_stats = Some(stats);
+                self.stats_dirty = true;
+            }
+        }
+
+        if !self.trace_enabled {
+            return;
+        }
+
+        if let Some(packet_batch_json) = message.packet_batch_json {
+            let Ok(batch) = serde_json::from_str::<Vec<serde_json::Value>>(&packet_batch_json)
+            else {
+                return;
+            };
+            for packet in batch {
+                if self.packets.len() >= self.packet_limit {
+                    self.packets.pop_front();
+                    self.omitted_packet_trace_events += 1;
+                }
+                self.packets.push_back(packet);
+            }
+        }
+    }
+
+    fn poll(&mut self, max_packets: usize) -> Vita49TelemetryPoll {
+        let packet_count = max_packets.max(1).min(self.packets.len());
+        let packets = self.packets.drain(..packet_count).collect();
+        let omitted_packet_trace_events = self.omitted_packet_trace_events;
+        self.omitted_packet_trace_events = 0;
+        let stats = if self.stats_dirty {
+            self.stats_dirty = false;
+            self.latest_stats.clone()
+        } else {
+            None
+        };
+        Vita49TelemetryPoll {
+            stats,
+            packets,
+            omitted_packet_trace_events,
+            has_more: !self.packets.is_empty(),
+        }
+    }
+}
 
 #[derive(Default)]
 struct SimulationControlState {
@@ -356,9 +439,35 @@ fn start_vita49_stream(
     std::thread::spawn(move || {
         let fers_state: State<'_, FersState> = app_handle_clone.state();
         let control_state: State<'_, SimulationControlState> = app_handle_clone.state();
-        let result = fers_state.lock().map_err(|e| e.to_string()).and_then(|context| {
-            context.run_vita49_stream(&app_handle_clone, &control_state.cancel_requested, &config)
+        let telemetry_state: State<'_, Vita49TelemetryState> = app_handle_clone.state();
+        if let Ok(mut telemetry) = telemetry_state.lock() {
+            telemetry.reset(config.trace_enabled, config.packet_trace_ring_size);
+        }
+
+        let (telemetry_sender, telemetry_receiver) =
+            mpsc::channel::<fers_api::Vita49TelemetryMessage>();
+        let telemetry_worker_app_handle = app_handle_clone.clone();
+        let telemetry_worker = std::thread::spawn(move || {
+            let telemetry_state: State<'_, Vita49TelemetryState> =
+                telemetry_worker_app_handle.state();
+            for message in telemetry_receiver {
+                let Ok(mut telemetry) = telemetry_state.lock() else {
+                    break;
+                };
+                telemetry.ingest(message);
+            }
         });
+
+        let result = fers_state.lock().map_err(|e| e.to_string()).and_then(|context| {
+            context.run_vita49_stream(
+                &app_handle_clone,
+                &control_state.cancel_requested,
+                &config,
+                Some(&telemetry_sender),
+            )
+        });
+        drop(telemetry_sender);
+        let _ = telemetry_worker.join();
 
         match result {
             Ok(fers_api::SimulationRunOutcome::Completed(metadata_json)) => {
@@ -390,6 +499,14 @@ fn start_vita49_stream(
     });
 
     Ok(())
+}
+
+#[tauri::command]
+fn poll_vita49_telemetry(
+    max_packets: usize,
+    telemetry_state: State<'_, Vita49TelemetryState>,
+) -> Result<Vita49TelemetryPoll, String> {
+    Ok(telemetry_state.lock().map_err(|e| e.to_string())?.poll(max_packets))
 }
 
 #[tauri::command]
@@ -641,6 +758,7 @@ pub fn run() {
         // Store the FersContext as managed state, accessible from all commands
         .manage(Mutex::new(context))
         .manage(SimulationControlState::default())
+        .manage(Vita49TelemetryState::default())
         // Register all Tauri commands that can be invoked from the frontend
         .invoke_handler(tauri::generate_handler![
             load_scenario_from_xml_file,
@@ -649,6 +767,7 @@ pub fn run() {
             update_scenario_from_json,
             run_simulation,
             start_vita49_stream,
+            poll_vita49_telemetry,
             stop_simulation,
             export_output_metadata_json,
             generate_kml,

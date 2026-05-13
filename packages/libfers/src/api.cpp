@@ -548,6 +548,22 @@ int fers_set_vita49_queue_depth(fers_context_t* context, const std::uint32_t que
 	return 0;
 }
 
+int fers_set_vita49_packet_trace_enabled(fers_context_t* context, const int enabled)
+{
+	last_error_message.clear();
+	if (context == nullptr)
+	{
+		set_api_error("Invalid arguments: context is NULL.");
+		return -1;
+	}
+
+	auto* ctx = reinterpret_cast<FersContext*>(context);
+	core::OutputConfig config = ctx->getOutputConfig();
+	config.vita49.packet_trace_enabled = enabled != 0;
+	ctx->setOutputConfig(std::move(config));
+	return 0;
+}
+
 int fers_load_scenario_from_xml_file(fers_context_t* context, const char* xml_filepath, const int validate)
 {
 	last_error_message.clear();
