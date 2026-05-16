@@ -51,6 +51,7 @@ import {
     type Vita49PacketTraceEvent,
     type Vita49StreamStatsEvent,
     type Vita49TelemetryPoll,
+    type Vita49Timestamp,
     validateVita49Config,
 } from '@/stores/vita49StreamingStore';
 
@@ -65,6 +66,54 @@ const formatMetric = (value: number | null | undefined) =>
     value === null || value === undefined
         ? '-'
         : value.toLocaleString(undefined, { maximumSignificantDigits: 6 });
+
+const formatExact = (value: string | number | null | undefined) =>
+    value === null || value === undefined ? '-' : String(value);
+
+const formatSeconds = (value: number | null | undefined) =>
+    value === null || value === undefined
+        ? '-'
+        : `${value.toLocaleString(undefined, { maximumSignificantDigits: 9 })} s`;
+
+const formatVita49Timestamp = (
+    timestamp: Vita49Timestamp | null | undefined
+) => {
+    if (!timestamp) {
+        return '-';
+    }
+
+    const second = Number(timestamp.integer_seconds);
+    if (!Number.isFinite(second)) {
+        return '-';
+    }
+
+    const base = new Date(second * 1000).toISOString().replace('.000Z', '');
+    const fractionalPicoseconds = Math.trunc(timestamp.fractional_picoseconds)
+        .toString()
+        .padStart(12, '0')
+        .replace(/0+$/, '');
+    return fractionalPicoseconds
+        ? `${base}.${fractionalPicoseconds}Z`
+        : `${base}Z`;
+};
+
+const formatSimulationSpan = (
+    start: number | null | undefined,
+    end: number | null | undefined
+) => {
+    const first = formatSeconds(start);
+    const last = formatSeconds(end);
+    return first === '-' && last === '-' ? '-' : `${first} - ${last}`;
+};
+
+const formatTimestampSpan = (
+    start: Vita49Timestamp | null | undefined,
+    end: Vita49Timestamp | null | undefined
+) => {
+    const first = formatVita49Timestamp(start);
+    const last = formatVita49Timestamp(end);
+    return first === '-' && last === '-' ? '-' : `${first} - ${last}`;
+};
 
 const formatStreamId = (streamId: number | null | undefined) =>
     streamId === null || streamId === undefined
@@ -707,7 +756,7 @@ export const Vita49StreamingView = React.memo(function Vita49StreamingView() {
                                         Epoch
                                     </Typography>
                                     <Typography variant="h6">
-                                        {formatMetric(
+                                        {formatExact(
                                             streamStats?.epoch_unix_nanoseconds ??
                                                 finalVita49Metadata?.epoch_unix_nanoseconds
                                         )}
@@ -780,8 +829,8 @@ export const Vita49StreamingView = React.memo(function Vita49StreamingView() {
                                 <TableCell align="right">Drops</TableCell>
                                 <TableCell align="right">Late</TableCell>
                                 <TableCell align="right">Context</TableCell>
-                                <TableCell>First</TableCell>
-                                <TableCell>Last</TableCell>
+                                <TableCell>Simulation span</TableCell>
+                                <TableCell>UTC span</TableCell>
                             </TableRow>
                         </TableHead>
                         <TableBody>
@@ -825,10 +874,16 @@ export const Vita49StreamingView = React.memo(function Vita49StreamingView() {
                                         {formatMetric(row.contextPackets)}
                                     </TableCell>
                                     <TableCell>
-                                        {formatMetric(row.firstTimestampUnixPs)}
+                                        {formatSimulationSpan(
+                                            row.firstSampleTime,
+                                            row.endSampleTime
+                                        )}
                                     </TableCell>
                                     <TableCell>
-                                        {formatMetric(row.lastTimestampUnixPs)}
+                                        {formatTimestampSpan(
+                                            row.firstTimestamp,
+                                            row.endTimestamp
+                                        )}
                                     </TableCell>
                                 </TableRow>
                             ))}
@@ -925,8 +980,10 @@ export const Vita49StreamingView = React.memo(function Vita49StreamingView() {
                 </Stack>
                 {omittedPacketTraceEvents > 0 && (
                     <Alert severity="info" sx={{ mb: 2 }}>
-                        {formatMetric(omittedPacketTraceEvents)} packet trace
-                        events omitted
+                        Showing last {formatMetric(packetTrace.length)} trace
+                        events; {formatMetric(omittedPacketTraceEvents)} older
+                        trace events discarded from trace history. Stream
+                        packets and samples unaffected.
                     </Alert>
                 )}
                 <TableContainer
@@ -945,7 +1002,7 @@ export const Vita49StreamingView = React.memo(function Vita49StreamingView() {
                                 <TableCell align="right">Bytes</TableCell>
                                 <TableCell align="right">Samples</TableCell>
                                 <TableCell align="right">t</TableCell>
-                                <TableCell align="right">Unix ps</TableCell>
+                                <TableCell align="right">UTC</TableCell>
                                 <TableCell>Flags</TableCell>
                             </TableRow>
                         </TableHead>
@@ -978,10 +1035,14 @@ export const Vita49StreamingView = React.memo(function Vita49StreamingView() {
                                         {formatMetric(packet.sample_count)}
                                     </TableCell>
                                     <TableCell align="right">
-                                        {formatMetric(packet.first_sample_time)}
+                                        {formatSeconds(
+                                            packet.first_sample_time
+                                        )}
                                     </TableCell>
                                     <TableCell align="right">
-                                        {formatMetric(packet.timestamp_unix_ps)}
+                                        {formatVita49Timestamp(
+                                            packet.timestamp
+                                        )}
                                     </TableCell>
                                     <TableCell>
                                         <Stack direction="row" spacing={0.5}>

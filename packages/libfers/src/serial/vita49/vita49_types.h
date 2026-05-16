@@ -176,8 +176,6 @@ namespace serial::vita49
 										   std::uint8_t packet_count, std::uint16_t packet_size_words) noexcept;
 
 	[[nodiscard]] Timestamp timestampFromEpoch(std::uint64_t epoch_unix_nanoseconds, RealType sample_time_seconds);
-	[[nodiscard]] std::uint64_t saturatedUnixPicoseconds(std::uint64_t epoch_unix_nanoseconds,
-														 RealType sample_time_seconds) noexcept;
 	[[nodiscard]] std::uint32_t makeTrailer(bool valid_data, bool calibrated_time, bool reference_lock, bool over_range,
 											bool sample_loss) noexcept;
 	[[nodiscard]] std::uint32_t makeContextStateIndicators(bool valid_data, bool calibrated_time, bool reference_lock,

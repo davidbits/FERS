@@ -76,6 +76,11 @@ export type SimulationOutputFmcwSourceMetadata =
         segments: SimulationOutputFmcwSourceSegmentMetadata[];
     };
 
+export type SimulationOutputVita49Timestamp = {
+    integer_seconds: number;
+    fractional_picoseconds: number;
+};
+
 export type SimulationOutputVita49StreamMetadata = {
     receiver_id: number;
     receiver_name: string;
@@ -89,15 +94,17 @@ export type SimulationOutputVita49StreamMetadata = {
     over_range_count: number;
     late_packet_count: number;
     context_packet_count: number;
-    first_timestamp_unix_ps: number;
-    last_timestamp_unix_ps: number;
+    first_sample_time: number | null;
+    end_sample_time: number | null;
+    first_timestamp: SimulationOutputVita49Timestamp | null;
+    end_timestamp: SimulationOutputVita49Timestamp | null;
 };
 
 export type SimulationOutputVita49Metadata = {
     endpoint: string;
     endpoint_host: string;
     endpoint_port: number;
-    epoch_unix_nanoseconds: number | null;
+    epoch_unix_nanoseconds: string | null;
     class_id: string;
     adc_fullscale: number;
     max_udp_payload: number;

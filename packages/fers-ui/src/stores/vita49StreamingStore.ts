@@ -7,7 +7,10 @@ import type { ScenarioData } from './scenarioStore';
 import type {
     SimulationOutputMetadata,
     SimulationOutputVita49Metadata,
+    SimulationOutputVita49Timestamp,
 } from './simulationProgressStore';
+
+export type Vita49Timestamp = SimulationOutputVita49Timestamp;
 
 export type Vita49RunState =
     | 'idle'
@@ -57,13 +60,15 @@ export type Vita49StreamCounter = {
     samples_dropped: number;
     over_range_count: number;
     late_packet_count: number;
-    first_timestamp_unix_ps: number;
-    last_timestamp_unix_ps: number;
+    first_sample_time: number | null;
+    end_sample_time: number | null;
+    first_timestamp: Vita49Timestamp | null;
+    end_timestamp: Vita49Timestamp | null;
 };
 
 export type Vita49StreamStatsEvent = {
     mode: 'vita49_udp' | 'hdf5';
-    epoch_unix_nanoseconds: number | null;
+    epoch_unix_nanoseconds: string | null;
     streams: Vita49StreamCounter[];
 };
 
@@ -74,7 +79,7 @@ export type Vita49PacketTraceEvent = {
     byte_count: number;
     sample_count: number;
     first_sample_time: number;
-    timestamp_unix_ps: number;
+    timestamp: Vita49Timestamp | null;
     data_packet: boolean;
     context_packet: boolean;
     dropped: boolean;
@@ -105,8 +110,10 @@ export type Vita49StreamRow = {
     samplesDropped: number;
     overRangeCount: number;
     latePacketCount: number;
-    firstTimestampUnixPs: number | null;
-    lastTimestampUnixPs: number | null;
+    firstSampleTime: number | null;
+    endSampleTime: number | null;
+    firstTimestamp: Vita49Timestamp | null;
+    endTimestamp: Vita49Timestamp | null;
     backendObserved: boolean;
 };
 
@@ -248,8 +255,10 @@ export const deriveExpectedVita49Streams = (
                 samplesDropped: 0,
                 overRangeCount: 0,
                 latePacketCount: 0,
-                firstTimestampUnixPs: null,
-                lastTimestampUnixPs: null,
+                firstSampleTime: null,
+                endSampleTime: null,
+                firstTimestamp: null,
+                endTimestamp: null,
                 backendObserved: false,
             });
         }
@@ -275,8 +284,10 @@ const rowFromCounter = (counter: Vita49StreamCounter): Vita49StreamRow => ({
     samplesDropped: counter.samples_dropped,
     overRangeCount: counter.over_range_count,
     latePacketCount: counter.late_packet_count,
-    firstTimestampUnixPs: counter.first_timestamp_unix_ps || null,
-    lastTimestampUnixPs: counter.last_timestamp_unix_ps || null,
+    firstSampleTime: counter.first_sample_time,
+    endSampleTime: counter.end_sample_time,
+    firstTimestamp: counter.first_timestamp,
+    endTimestamp: counter.end_timestamp,
     backendObserved: true,
 });
 
@@ -309,8 +320,10 @@ export const mergeVita49StreamRows = (
             samplesDropped: counter.samples_dropped,
             overRangeCount: counter.over_range_count,
             latePacketCount: counter.late_packet_count,
-            firstTimestampUnixPs: counter.first_timestamp_unix_ps || null,
-            lastTimestampUnixPs: counter.last_timestamp_unix_ps || null,
+            firstSampleTime: counter.first_sample_time,
+            endSampleTime: counter.end_sample_time,
+            firstTimestamp: counter.first_timestamp,
+            endTimestamp: counter.end_timestamp,
             backendObserved: true,
         });
     }

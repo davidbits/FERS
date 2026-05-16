@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <optional>
 #include <stdexcept>
 
 #include "core/parameters.h"
@@ -25,6 +26,26 @@ namespace serial::vita49
 		{
 			const auto now = std::chrono::system_clock::now().time_since_epoch();
 			return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(now).count());
+		}
+
+		[[nodiscard]] core::Vita49Timestamp toCoreTimestamp(const Timestamp& timestamp) noexcept
+		{
+			return core::Vita49Timestamp{.integer_seconds = timestamp.integer_seconds,
+										 .fractional_picoseconds = timestamp.fractional_picoseconds};
+		}
+
+		[[nodiscard]] std::optional<core::Vita49Timestamp>
+		tryCoreTimestampFromEpoch(const std::uint64_t epoch_unix_nanoseconds,
+								  const RealType sample_time_seconds) noexcept
+		{
+			try
+			{
+				return toCoreTimestamp(timestampFromEpoch(epoch_unix_nanoseconds, sample_time_seconds));
+			}
+			catch (...)
+			{
+				return std::nullopt;
+			}
 		}
 	}
 
@@ -124,26 +145,33 @@ namespace serial::vita49
 			openStream(stream_id, block.first_sample_time);
 		}
 
+		const RealType sample_rate = block.sample_rate > 0.0 ? block.sample_rate : state.stats.sample_rate;
 		auto result = _packetizer->packetize(block, stream_id, state.packet_counts, state.sample_loss_pending);
 		state.sample_loss_pending = false;
 		for (auto& packet : result.packets)
 		{
 			const auto packet_sample_count = packet.sample_count;
 			const auto packet_first_sample_time = packet.first_sample_time;
+			const auto packet_end_sample_time = sample_rate > 0.0
+				? packet_first_sample_time + static_cast<RealType>(packet_sample_count) / sample_rate
+				: packet_first_sample_time;
 			const auto packet_over_range = packet.over_range;
+			const auto packet_timestamp = toCoreTimestamp(packet.timestamp);
+			const auto packet_end_timestamp =
+				tryCoreTimestampFromEpoch(_packetizer->epochUnixNanoseconds(), packet_end_sample_time);
 			if (!enqueuePacket(std::move(packet)))
 			{
 				continue;
 			}
 			state.stats.samples_emitted += packet_sample_count;
 			++state.stats.packets_emitted;
-			const auto packet_ps =
-				saturatedUnixPicoseconds(_packetizer->epochUnixNanoseconds(), packet_first_sample_time);
-			if (state.stats.first_timestamp_unix_ps == 0)
+			if (!state.stats.first_sample_time.has_value())
 			{
-				state.stats.first_timestamp_unix_ps = packet_ps;
+				state.stats.first_sample_time = packet_first_sample_time;
+				state.stats.first_timestamp = packet_timestamp;
 			}
-			state.stats.last_timestamp_unix_ps = packet_ps;
+			state.stats.end_sample_time = packet_end_sample_time;
+			state.stats.end_timestamp = packet_end_timestamp;
 			if (packet_over_range)
 			{
 				state.over_range_pending = true;
@@ -363,21 +391,18 @@ namespace serial::vita49
 
 	core::ReceiverOutputPacketTrace Vita49OutputSink::makeTrace(const SerializedPacket& packet, std::string event) const
 	{
-		return core::ReceiverOutputPacketTrace{
-			.sequence = 0,
-			.event = std::move(event),
-			.stream_id = packet.stream_id,
-			.byte_count = packet.bytes.size(),
-			.sample_count = packet.sample_count,
-			.first_sample_time = packet.first_sample_time,
-			.timestamp_unix_ps = _packetizer
-				? saturatedUnixPicoseconds(_packetizer->epochUnixNanoseconds(), packet.first_sample_time)
-				: 0,
-			.data_packet = packet.data_packet,
-			.context_packet = packet.context_packet,
-			.dropped = false,
-			.over_range = packet.over_range,
-			.sample_loss = packet.sample_loss};
+		return core::ReceiverOutputPacketTrace{.sequence = 0,
+											   .event = std::move(event),
+											   .stream_id = packet.stream_id,
+											   .byte_count = packet.bytes.size(),
+											   .sample_count = packet.sample_count,
+											   .first_sample_time = packet.first_sample_time,
+											   .timestamp = toCoreTimestamp(packet.timestamp),
+											   .data_packet = packet.data_packet,
+											   .context_packet = packet.context_packet,
+											   .dropped = false,
+											   .over_range = packet.over_range,
+											   .sample_loss = packet.sample_loss};
 	}
 
 	core::ReceiverOutputPacketTrace Vita49OutputSink::makeDropTrace(const DroppedDatagram& dropped) const
@@ -388,7 +413,7 @@ namespace serial::vita49
 											   .byte_count = 0,
 											   .sample_count = dropped.sample_count,
 											   .first_sample_time = 0.0,
-											   .timestamp_unix_ps = 0,
+											   .timestamp = std::nullopt,
 											   .data_packet = dropped.data_packet,
 											   .context_packet = dropped.context_packet,
 											   .dropped = true,

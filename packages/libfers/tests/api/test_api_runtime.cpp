@@ -440,6 +440,21 @@ TEST_CASE("VITA49 metadata section records runtime output config", "[api][runtim
 										  .max_udp_payload = 1200};
 	core::OutputMetadata output_metadata;
 	output_metadata.vita49 = core::vita49MetadataFromConfig(config);
+	core::Vita49StreamMetadata stream;
+	stream.receiver_id = 10;
+	stream.receiver_name = "Rx";
+	stream.stream_id = 0x12345678u;
+	stream.sample_rate = 100000.0;
+	stream.reference_frequency = 10000000.0;
+	stream.packets_emitted = 2930;
+	stream.samples_emitted = 1000000;
+	stream.context_packet_count = 12;
+	stream.first_sample_time = 0.0;
+	stream.end_sample_time = 10.0;
+	stream.first_timestamp =
+		core::Vita49Timestamp{.integer_seconds = 1700000000, .fractional_picoseconds = 123456789000};
+	stream.end_timestamp = core::Vita49Timestamp{.integer_seconds = 1700000010, .fractional_picoseconds = 123456789000};
+	output_metadata.vita49->streams.push_back(stream);
 
 	const auto metadata = api_test::json::parse(core::outputMetadataToJsonString(output_metadata));
 	REQUIRE(metadata.contains("vita49"));
@@ -447,13 +462,21 @@ TEST_CASE("VITA49 metadata section records runtime output config", "[api][runtim
 	CHECK(vita49.at("endpoint").get<std::string>() == "127.0.0.1:4991");
 	CHECK(vita49.at("endpoint_host").get<std::string>() == "127.0.0.1");
 	CHECK(vita49.at("endpoint_port").get<std::uint16_t>() == 4991);
-	CHECK(vita49.at("epoch_unix_nanoseconds").get<std::uint64_t>() == 1700000000123456789ULL);
+	CHECK(vita49.at("epoch_unix_nanoseconds").get<std::string>() == "1700000000123456789");
 	CHECK(vita49.at("class_id").get<std::string>() == "0xFA52530001000101");
 	CHECK(vita49.at("adc_fullscale").get<double>() == 2.5);
 	CHECK(vita49.at("max_udp_payload").get<std::uint16_t>() == 1200);
 	CHECK(vita49.at("queue_depth").get<std::uint32_t>() == 17);
 	REQUIRE(vita49.at("streams").is_array());
-	CHECK(vita49.at("streams").empty());
+	REQUIRE(vita49.at("streams").size() == 1u);
+	const auto& json_stream = vita49.at("streams").front();
+	CHECK(json_stream.at("samples_emitted").get<std::uint64_t>() == 1000000ULL);
+	CHECK(json_stream.at("first_sample_time").get<double>() == 0.0);
+	CHECK(json_stream.at("end_sample_time").get<double>() == 10.0);
+	CHECK(json_stream.at("first_timestamp").at("integer_seconds").get<std::uint32_t>() == 1700000000u);
+	CHECK(json_stream.at("end_timestamp").at("integer_seconds").get<std::uint32_t>() == 1700000010u);
+	CHECK_FALSE(json_stream.contains("first_timestamp_unix_ps"));
+	CHECK_FALSE(json_stream.contains("last_timestamp_unix_ps"));
 }
 
 TEST_CASE("API VITA49 completion waits for wall-clock stream drain", "[api][runtime][vita49]")

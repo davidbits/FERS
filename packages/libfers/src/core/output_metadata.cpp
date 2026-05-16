@@ -268,6 +268,16 @@ namespace core
 		/// Converts one VITA stream metadata entry to JSON.
 		nlohmann::json vita49StreamToJson(const Vita49StreamMetadata& stream)
 		{
+			auto timestampToJson = [](const std::optional<Vita49Timestamp>& timestamp) -> nlohmann::json
+			{
+				if (!timestamp.has_value())
+				{
+					return nullptr;
+				}
+				return {{"integer_seconds", timestamp->integer_seconds},
+						{"fractional_picoseconds", timestamp->fractional_picoseconds}};
+			};
+
 			return {{"receiver_id", stream.receiver_id},
 					{"receiver_name", stream.receiver_name},
 					{"stream_id", stream.stream_id},
@@ -280,8 +290,14 @@ namespace core
 					{"over_range_count", stream.over_range_count},
 					{"late_packet_count", stream.late_packet_count},
 					{"context_packet_count", stream.context_packet_count},
-					{"first_timestamp_unix_ps", stream.first_timestamp_unix_ps},
-					{"last_timestamp_unix_ps", stream.last_timestamp_unix_ps}};
+					{"first_sample_time",
+					 stream.first_sample_time.has_value() ? nlohmann::json(*stream.first_sample_time)
+														  : nlohmann::json(nullptr)},
+					{"end_sample_time",
+					 stream.end_sample_time.has_value() ? nlohmann::json(*stream.end_sample_time)
+														: nlohmann::json(nullptr)},
+					{"first_timestamp", timestampToJson(stream.first_timestamp)},
+					{"end_timestamp", timestampToJson(stream.end_timestamp)}};
 		}
 
 		/// Converts VITA output metadata to JSON.
@@ -304,7 +320,7 @@ namespace core
 									 {"streams", streams}};
 			if (vita49.epoch_unix_nanoseconds.has_value())
 			{
-				result["epoch_unix_nanoseconds"] = *vita49.epoch_unix_nanoseconds;
+				result["epoch_unix_nanoseconds"] = std::to_string(*vita49.epoch_unix_nanoseconds);
 			}
 			return result;
 		}

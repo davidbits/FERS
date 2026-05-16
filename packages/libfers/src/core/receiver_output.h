@@ -17,6 +17,7 @@
 #include "core/config.h"
 #include "core/output_config.h"
 #include "core/sim_id.h"
+#include "core/vita49_timestamp.h"
 
 namespace core
 {
@@ -112,8 +113,10 @@ namespace core
 		std::uint64_t samples_dropped = 0;
 		std::uint64_t over_range_count = 0;
 		std::uint64_t late_packet_count = 0;
-		std::uint64_t first_timestamp_unix_ps = 0;
-		std::uint64_t last_timestamp_unix_ps = 0;
+		std::optional<RealType> first_sample_time = std::nullopt;
+		std::optional<RealType> end_sample_time = std::nullopt;
+		std::optional<Vita49Timestamp> first_timestamp = std::nullopt;
+		std::optional<Vita49Timestamp> end_timestamp = std::nullopt;
 	};
 
 	struct OutputStats
@@ -131,7 +134,7 @@ namespace core
 		std::uint64_t byte_count = 0;
 		std::uint64_t sample_count = 0;
 		RealType first_sample_time = 0.0;
-		std::uint64_t timestamp_unix_ps = 0;
+		std::optional<Vita49Timestamp> timestamp = std::nullopt;
 		bool data_packet = false;
 		bool context_packet = false;
 		bool dropped = false;

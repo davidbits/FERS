@@ -7,6 +7,7 @@ import type { ScenarioData } from './scenarioStore/types';
 import {
     DEFAULT_VITA49_CONFIG,
     deriveExpectedVita49Streams,
+    mergeVita49StreamRows,
     toVita49BackendConfig,
     useVita49StreamingStore,
     type Vita49PacketTraceEvent,
@@ -20,7 +21,7 @@ const packet = (sequence: number): Vita49PacketTraceEvent => ({
     byte_count: 128,
     sample_count: 24,
     first_sample_time: 0,
-    timestamp_unix_ps: 0,
+    timestamp: { integer_seconds: 1_700_000_000, fractional_picoseconds: 0 },
     data_packet: true,
     context_packet: false,
     dropped: false,
@@ -186,6 +187,58 @@ describe('VITA49 run lifecycle', () => {
 
         useVita49StreamingStore.getState().completeRun(null);
         expect(useVita49StreamingStore.getState().runState).toBe('completed');
+    });
+});
+
+describe('VITA49 telemetry rows', () => {
+    test('maps exact VRT timestamp objects and simulation span', () => {
+        const rows = mergeVita49StreamRows([], {
+            mode: 'vita49_udp',
+            epoch_unix_nanoseconds: '1700000000123456789',
+            streams: [
+                {
+                    receiver_id: 7,
+                    receiver_name: 'Rx',
+                    stream_id: 1234,
+                    sample_rate: 100000,
+                    reference_frequency: 10000000,
+                    packets_emitted: 2930,
+                    samples_emitted: 1000000,
+                    packets_dropped: 0,
+                    samples_dropped: 0,
+                    over_range_count: 0,
+                    late_packet_count: 0,
+                    context_packets: 12,
+                    first_sample_time: 0,
+                    end_sample_time: 10,
+                    first_timestamp: {
+                        integer_seconds: 1700000000,
+                        fractional_picoseconds: 123456789000,
+                    },
+                    end_timestamp: {
+                        integer_seconds: 1700000010,
+                        fractional_picoseconds: 123456789000,
+                    },
+                },
+            ],
+        });
+
+        expect(rows).toMatchObject([
+            {
+                receiverId: 7,
+                samplesEmitted: 1000000,
+                firstSampleTime: 0,
+                endSampleTime: 10,
+                firstTimestamp: {
+                    integer_seconds: 1700000000,
+                    fractional_picoseconds: 123456789000,
+                },
+                endTimestamp: {
+                    integer_seconds: 1700000010,
+                    fractional_picoseconds: 123456789000,
+                },
+            },
+        ]);
     });
 });
 

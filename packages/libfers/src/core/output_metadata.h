@@ -15,6 +15,7 @@
 #include "core/config.h"
 #include "core/output_config.h"
 #include "core/sim_id.h"
+#include "core/vita49_timestamp.h"
 
 namespace core
 {
@@ -150,8 +151,10 @@ namespace core
 		std::uint64_t over_range_count = 0; ///< Samples clipped by fixed full-scale scaling.
 		std::uint64_t late_packet_count = 0; ///< Packets sent after their scheduled time.
 		std::uint64_t context_packet_count = 0; ///< Context packets emitted for this stream.
-		std::uint64_t first_timestamp_unix_ps = 0; ///< First signal timestamp in Unix picoseconds.
-		std::uint64_t last_timestamp_unix_ps = 0; ///< Last signal timestamp in Unix picoseconds.
+		std::optional<RealType> first_sample_time = std::nullopt; ///< First signal sample time in seconds.
+		std::optional<RealType> end_sample_time = std::nullopt; ///< Exclusive stream end sample time in seconds.
+		std::optional<Vita49Timestamp> first_timestamp = std::nullopt; ///< First VRT UTC timestamp.
+		std::optional<Vita49Timestamp> end_timestamp = std::nullopt; ///< Exclusive stream end VRT UTC timestamp.
 	};
 
 	/// Metadata for the VITA 49.2 UDP output backend.

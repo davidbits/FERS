@@ -233,20 +233,36 @@ namespace
 
 	[[nodiscard]] nlohmann::json stream_stats_to_json(const core::ReceiverStreamStats& stream)
 	{
-		return {{"receiver_id", stream.receiver_id},
-				{"receiver_name", stream.receiver_name},
-				{"stream_id", stream.stream_id},
-				{"sample_rate", stream.sample_rate},
-				{"reference_frequency", stream.reference_frequency},
-				{"packets_emitted", stream.packets_emitted},
-				{"context_packets", stream.context_packets},
-				{"samples_emitted", stream.samples_emitted},
-				{"packets_dropped", stream.packets_dropped},
-				{"samples_dropped", stream.samples_dropped},
-				{"over_range_count", stream.over_range_count},
-				{"late_packet_count", stream.late_packet_count},
-				{"first_timestamp_unix_ps", stream.first_timestamp_unix_ps},
-				{"last_timestamp_unix_ps", stream.last_timestamp_unix_ps}};
+		auto timestamp_to_json = [](const std::optional<core::Vita49Timestamp>& timestamp) -> nlohmann::json
+		{
+			if (!timestamp.has_value())
+			{
+				return nullptr;
+			}
+			return {{"integer_seconds", timestamp->integer_seconds},
+					{"fractional_picoseconds", timestamp->fractional_picoseconds}};
+		};
+
+		return {
+			{"receiver_id", stream.receiver_id},
+			{"receiver_name", stream.receiver_name},
+			{"stream_id", stream.stream_id},
+			{"sample_rate", stream.sample_rate},
+			{"reference_frequency", stream.reference_frequency},
+			{"packets_emitted", stream.packets_emitted},
+			{"context_packets", stream.context_packets},
+			{"samples_emitted", stream.samples_emitted},
+			{"packets_dropped", stream.packets_dropped},
+			{"samples_dropped", stream.samples_dropped},
+			{"over_range_count", stream.over_range_count},
+			{"late_packet_count", stream.late_packet_count},
+			{"first_sample_time",
+			 stream.first_sample_time.has_value() ? nlohmann::json(*stream.first_sample_time)
+												  : nlohmann::json(nullptr)},
+			{"end_sample_time",
+			 stream.end_sample_time.has_value() ? nlohmann::json(*stream.end_sample_time) : nlohmann::json(nullptr)},
+			{"first_timestamp", timestamp_to_json(stream.first_timestamp)},
+			{"end_timestamp", timestamp_to_json(stream.end_timestamp)}};
 	}
 
 	[[nodiscard]] std::string output_stats_to_json_string(const core::OutputStats& stats)
@@ -262,7 +278,7 @@ namespace
 								 {"streams", streams}};
 		if (stats.epoch_unix_nanoseconds.has_value())
 		{
-			result["epoch_unix_nanoseconds"] = *stats.epoch_unix_nanoseconds;
+			result["epoch_unix_nanoseconds"] = std::to_string(*stats.epoch_unix_nanoseconds);
 		}
 		return result.dump();
 	}
@@ -270,6 +286,16 @@ namespace
 	[[nodiscard]] std::string
 	packet_trace_batch_to_json_string(std::span<const core::ReceiverOutputPacketTrace> packets)
 	{
+		auto timestamp_to_json = [](const std::optional<core::Vita49Timestamp>& timestamp) -> nlohmann::json
+		{
+			if (!timestamp.has_value())
+			{
+				return nullptr;
+			}
+			return {{"integer_seconds", timestamp->integer_seconds},
+					{"fractional_picoseconds", timestamp->fractional_picoseconds}};
+		};
+
 		nlohmann::json batch = nlohmann::json::array();
 		for (const auto& packet : packets)
 		{
@@ -279,7 +305,7 @@ namespace
 							 {"byte_count", packet.byte_count},
 							 {"sample_count", packet.sample_count},
 							 {"first_sample_time", packet.first_sample_time},
-							 {"timestamp_unix_ps", packet.timestamp_unix_ps},
+							 {"timestamp", timestamp_to_json(packet.timestamp)},
 							 {"data_packet", packet.data_packet},
 							 {"context_packet", packet.context_packet},
 							 {"dropped", packet.dropped},

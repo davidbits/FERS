@@ -692,11 +692,28 @@ TEST_CASE("VITA output sink emits live telemetry snapshots and packet traces", "
 
 	REQUIRE_FALSE(stats_snapshots.empty());
 	REQUIRE(final_stats.streams.size() == 1u);
+	const auto& stream_stats = final_stats.streams.front();
+	REQUIRE(stream_stats.first_sample_time.has_value());
+	REQUIRE(stream_stats.end_sample_time.has_value());
+	REQUIRE(stream_stats.first_timestamp.has_value());
+	REQUIRE(stream_stats.end_timestamp.has_value());
+	CHECK(*stream_stats.first_sample_time == 0.0);
+	CHECK(*stream_stats.end_sample_time == 0.5);
+	CHECK(stream_stats.first_timestamp->integer_seconds == 1700000000u);
+	CHECK(stream_stats.first_timestamp->fractional_picoseconds == 0u);
+	CHECK(stream_stats.end_timestamp->integer_seconds == 1700000000u);
+	CHECK(stream_stats.end_timestamp->fractional_picoseconds == 500000000000u);
 	CHECK(stats_snapshots.back().streams.size() == 1u);
 	CHECK(stats_snapshots.back().streams.front().receiver_id == 7u);
 	CHECK(std::ranges::any_of(packet_traces, [](const auto& trace) { return trace.event == "context"; }));
 	CHECK(std::ranges::any_of(packet_traces, [](const auto& trace) { return trace.event == "data"; }));
 	CHECK(std::ranges::all_of(packet_traces, [](const auto& trace) { return trace.sequence > 0u; }));
+	const auto data_trace =
+		std::ranges::find_if(packet_traces, [](const auto& trace) { return trace.event == "data"; });
+	REQUIRE(data_trace != packet_traces.end());
+	REQUIRE(data_trace->timestamp.has_value());
+	CHECK(data_trace->timestamp->integer_seconds == 1700000000u);
+	CHECK(data_trace->timestamp->fractional_picoseconds == 0u);
 }
 
 TEST_CASE("VITA output sink batches packet trace telemetry", "[serial][vita49][telemetry]")

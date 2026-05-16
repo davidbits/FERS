@@ -82,8 +82,10 @@ namespace core
 										.over_range_count = stats.over_range_count,
 										.late_packet_count = stats.late_packet_count,
 										.context_packet_count = stats.context_packets,
-										.first_timestamp_unix_ps = stats.first_timestamp_unix_ps,
-										.last_timestamp_unix_ps = stats.last_timestamp_unix_ps};
+										.first_sample_time = stats.first_sample_time,
+										.end_sample_time = stats.end_sample_time,
+										.first_timestamp = stats.first_timestamp,
+										.end_timestamp = stats.end_timestamp};
 		}
 
 		[[nodiscard]] bool isStreamingReceiver(const Receiver* const receiver) noexcept

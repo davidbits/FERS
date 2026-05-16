@@ -98,28 +98,6 @@ namespace serial::vita49
 		return Timestamp{.integer_seconds = integer_seconds, .fractional_picoseconds = fractional_picoseconds};
 	}
 
-	std::uint64_t saturatedUnixPicoseconds(const std::uint64_t epoch_unix_nanoseconds,
-										   const RealType sample_time_seconds) noexcept
-	{
-		if (!std::isfinite(sample_time_seconds))
-		{
-			return 0;
-		}
-
-		const long double picoseconds = static_cast<long double>(epoch_unix_nanoseconds) * 1'000.0L +
-			static_cast<long double>(sample_time_seconds) * 1'000'000'000'000.0L;
-		if (picoseconds <= 0.0L)
-		{
-			return 0;
-		}
-		const long double max = static_cast<long double>(std::numeric_limits<std::uint64_t>::max());
-		if (picoseconds >= max)
-		{
-			return std::numeric_limits<std::uint64_t>::max();
-		}
-		return static_cast<std::uint64_t>(std::llround(picoseconds));
-	}
-
 	std::uint32_t makeTrailer(const bool valid_data, const bool calibrated_time, const bool reference_lock,
 							  const bool over_range, const bool sample_loss) noexcept
 	{
