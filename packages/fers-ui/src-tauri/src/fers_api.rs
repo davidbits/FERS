@@ -58,6 +58,7 @@ mod ffi {
 
 static LOG_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 const FERS_RUN_CANCELLED: i32 = 2;
+const VITA49_DRAIN_MESSAGE: &str = "Waiting for VITA output stream drain...";
 
 #[derive(serde::Deserialize, Clone, Debug)]
 pub struct Vita49StreamConfig {
@@ -405,6 +406,26 @@ extern "C" fn simulation_progress_callback(
     app_handle
         .emit("simulation-progress", payload)
         .expect("Failed to emit simulation-progress event");
+}
+
+extern "C" fn vita49_lifecycle_callback(
+    message: *const c_char,
+    _current: i32,
+    _total: i32,
+    user_data: *mut c_void,
+) {
+    if user_data.is_null() || message.is_null() {
+        return;
+    }
+
+    let app_handle = unsafe { &*(user_data as *const AppHandle) };
+    let message_str = unsafe { CStr::from_ptr(message) }.to_string_lossy().into_owned();
+
+    if message_str == VITA49_DRAIN_MESSAGE {
+        app_handle
+            .emit("vita49-stream-draining", message_str)
+            .expect("Failed to emit vita49-stream-draining event");
+    }
 }
 
 extern "C" fn simulation_cancel_callback(user_data: *mut c_void) -> i32 {
@@ -893,7 +914,12 @@ impl FersContext {
         cancel_flag: &AtomicBool,
     ) -> Result<SimulationRunOutcome, String> {
         self.use_hdf5_output()?;
-        self.run_simulation_ex(app_handle, cancel_flag, true, None)
+        self.run_simulation_ex(
+            cancel_flag,
+            Some(simulation_progress_callback),
+            app_handle as *const _ as *mut c_void,
+            None,
+        )
     }
 
     pub fn run_vita49_stream(
@@ -904,23 +930,21 @@ impl FersContext {
         telemetry_sender: Option<&Vita49TelemetrySender>,
     ) -> Result<SimulationRunOutcome, String> {
         self.configure_vita49_stream(config)?;
-        self.run_simulation_ex(app_handle, cancel_flag, false, telemetry_sender)
+        self.run_simulation_ex(
+            cancel_flag,
+            Some(vita49_lifecycle_callback),
+            app_handle as *const _ as *mut c_void,
+            telemetry_sender,
+        )
     }
 
     fn run_simulation_ex(
         &self,
-        app_handle: &AppHandle,
         cancel_flag: &AtomicBool,
-        emit_progress: bool,
+        progress_callback: ffi::fers_progress_callback_t,
+        progress_user_data_ptr: *mut c_void,
         telemetry_sender: Option<&Vita49TelemetrySender>,
     ) -> Result<SimulationRunOutcome, String> {
-        let progress_callback: ffi::fers_progress_callback_t =
-            if emit_progress { Some(simulation_progress_callback) } else { None };
-        let progress_user_data_ptr = if emit_progress {
-            app_handle as *const _ as *mut c_void
-        } else {
-            std::ptr::null_mut()
-        };
         let cancel_user_data_ptr = cancel_flag as *const _ as *mut c_void;
         let telemetry_user_data_ptr = telemetry_sender
             .map(|sender| sender as *const _ as *mut c_void)

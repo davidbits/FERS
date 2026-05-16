@@ -13,6 +13,7 @@ export type Vita49RunState =
     | 'idle'
     | 'running'
     | 'stopping'
+    | 'draining'
     | 'completed'
     | 'failed'
     | 'cancelled';
@@ -332,6 +333,7 @@ type Vita49StreamingStore = {
     setConfig: (config: Partial<Vita49RuntimeConfig>) => void;
     startRun: (expectedStreams: Vita49StreamRow[]) => void;
     markStopping: () => void;
+    markDraining: () => void;
     setStreamStats: (stats: Vita49StreamStatsEvent) => void;
     appendPacketBatch: (
         packets: Vita49PacketTraceEvent[],
@@ -374,6 +376,14 @@ export const useVita49StreamingStore = create<Vita49StreamingStore>()(
                     runState:
                         state.runState === 'running'
                             ? 'stopping'
+                            : state.runState,
+                })),
+            markDraining: () =>
+                set((state) => ({
+                    runState:
+                        state.runState === 'running' ||
+                        state.runState === 'stopping'
+                            ? 'draining'
                             : state.runState,
                 })),
             setStreamStats: (streamStats) => set({ streamStats }),

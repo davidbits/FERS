@@ -24,6 +24,7 @@ namespace
 		int calls = 0;
 		void* seen_user_data = nullptr;
 		std::vector<std::string> messages;
+		std::vector<std::chrono::steady_clock::time_point> message_times;
 	};
 
 	struct LogCallbackState
@@ -40,6 +41,7 @@ namespace
 		++state->calls;
 		state->seen_user_data = user_data;
 		state->messages.emplace_back(message ? message : "");
+		state->message_times.push_back(std::chrono::steady_clock::now());
 	}
 
 	void recordLog(fers_log_level_t level, const char* line, void* user_data)
@@ -452,6 +454,50 @@ TEST_CASE("VITA49 metadata section records runtime output config", "[api][runtim
 	CHECK(vita49.at("queue_depth").get<std::uint32_t>() == 17);
 	REQUIRE(vita49.at("streams").is_array());
 	CHECK(vita49.at("streams").empty());
+}
+
+TEST_CASE("API VITA49 completion waits for wall-clock stream drain", "[api][runtime][vita49]")
+{
+	api_test::ParamGuard guard;
+	api_test::clearLastError();
+	api_test::Context context;
+	REQUIRE(context.get() != nullptr);
+
+	std::string xml = api_test::previewScenarioXml("API VITA Drain Timing");
+	auto replace_once = [](std::string& value, const std::string& from, const std::string& to)
+	{
+		const auto pos = value.find(from);
+		REQUIRE(pos != std::string::npos);
+		value.replace(pos, from.size(), to);
+	};
+	replace_once(xml, "<endtime>0.1</endtime>", "<endtime>0.2</endtime>");
+	replace_once(xml, "<rate>1000000</rate>", "<rate>100000</rate>");
+	REQUIRE(fers_load_scenario_from_xml_string(context.get(), xml.c_str(), 0) == 0);
+	REQUIRE(fers_enable_vita49_udp_output(context.get(), "127.0.0.1", 4991) == 0);
+	REQUIRE(fers_set_vita49_fullscale(context.get(), 1.0) == 0);
+
+	CallbackState state;
+	const auto start = std::chrono::steady_clock::now();
+	REQUIRE(fers_run_simulation(context.get(), recordProgress, &state) == 0);
+
+	auto drain_time = std::chrono::steady_clock::time_point{};
+	auto completion_time = std::chrono::steady_clock::time_point{};
+	for (std::size_t i = 0; i < state.messages.size(); ++i)
+	{
+		if (state.messages.at(i) == "Waiting for VITA output stream drain...")
+		{
+			drain_time = state.message_times.at(i);
+		}
+		if (state.messages.at(i) == "Simulation complete")
+		{
+			completion_time = state.message_times.at(i);
+		}
+	}
+
+	REQUIRE(drain_time != std::chrono::steady_clock::time_point{});
+	REQUIRE(completion_time != std::chrono::steady_clock::time_point{});
+	CHECK(drain_time <= completion_time);
+	CHECK(completion_time >= start + std::chrono::milliseconds(180));
 }
 
 TEST_CASE("API run simulation invokes progress callbacks with caller user data", "[api][runtime]")

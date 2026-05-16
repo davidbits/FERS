@@ -87,6 +87,21 @@ namespace
 		std::vector<std::vector<std::uint8_t>> sent;
 	};
 
+	class TimedRecordingSender final : public serial::vita49::DatagramSender
+	{
+	public:
+		void open(const std::string&, std::uint16_t) override {}
+		void send(const std::span<const std::uint8_t> bytes) override
+		{
+			send_times.push_back(std::chrono::steady_clock::now());
+			sent.emplace_back(bytes.begin(), bytes.end());
+		}
+		void close() noexcept override {}
+
+		std::vector<std::chrono::steady_clock::time_point> send_times;
+		std::vector<std::vector<std::uint8_t>> sent;
+	};
+
 	class ThrowingSender final : public serial::vita49::DatagramSender
 	{
 	public:
@@ -489,6 +504,40 @@ TEST_CASE("VITA paced sender stop drains future packets at wall-clock pace", "[s
 	REQUIRE(sender.droppedDataPacketCount(5) == 0u);
 	REQUIRE(sender.droppedContextPacketCount(5) == 0u);
 	REQUIRE(sender.droppedSampleCount(5) == 0u);
+}
+
+TEST_CASE("VITA paced sender never sends packets before scheduled wall-clock time", "[serial][vita49]")
+{
+	using namespace serial::vita49;
+	using namespace std::chrono_literals;
+
+	auto recording = std::make_unique<TimedRecordingSender>();
+	auto* recording_raw = recording.get();
+	PacedSender sender(std::move(recording), 4);
+	sender.open("127.0.0.1", 1);
+	const auto wall_start = std::chrono::steady_clock::now();
+	sender.start(0.0);
+
+	const SerializedPacket first{.bytes = {0, 0, 0, 1},
+								 .stream_id = 5,
+								 .sample_count = 1,
+								 .first_sample_time = 0.04,
+								 .data_packet = true,
+								 .timestamp = Timestamp{}};
+	const SerializedPacket second{.bytes = {0, 0, 0, 2},
+								  .stream_id = 5,
+								  .sample_count = 1,
+								  .first_sample_time = 0.09,
+								  .data_packet = true,
+								  .timestamp = Timestamp{}};
+	REQUIRE(sender.enqueue(first).enqueued);
+	REQUIRE(sender.enqueue(second).enqueued);
+	sender.stop();
+
+	REQUIRE(recording_raw->send_times.size() == 2u);
+	CHECK(recording_raw->send_times.at(0) >= wall_start + 40ms);
+	CHECK(recording_raw->send_times.at(1) >= wall_start + 90ms);
+	CHECK(recording_raw->sent.size() == 2u);
 }
 
 TEST_CASE("VITA paced sender catches datagram send failures", "[serial][vita49]")

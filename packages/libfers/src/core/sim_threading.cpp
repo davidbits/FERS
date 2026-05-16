@@ -1769,10 +1769,10 @@ namespace core
 
 	void SimulationEngine::shutdown()
 	{
-		LOG(Level::INFO, "Main simulation loop finished. Waiting for finalization tasks...");
+		LOG(Level::INFO, "Simulation compute loop finished. Waiting for receiver finalization tasks...");
 		if (_reporter)
 		{
-			_reporter->report("Main simulation finished. Waiting for data export...", 100, 100);
+			_reporter->report("Simulation compute finished. Waiting for receiver finalization...", 100, 100);
 		}
 
 		for (std::size_t receiver_index = 0; receiver_index < _world->getReceivers().size(); ++receiver_index)
@@ -1811,11 +1811,6 @@ namespace core
 		}
 
 		LOG(Level::INFO, "All finalization tasks complete.");
-		if (_reporter)
-		{
-			_reporter->report(_cancelled ? "Simulation cancelled" : "Simulation complete", 100, 100);
-		}
-		LOG(Level::INFO, "Event-driven simulation loop finished.");
 	}
 
 	OutputMetadata runEventDrivenSim(World* world, pool::ThreadPool& pool,
@@ -1849,7 +1844,14 @@ namespace core
 		{
 			*cancelled = engine.cancelled();
 		}
+		if (isVita49Enabled(output_config))
+		{
+			LOG(Level::INFO, "Waiting for VITA output stream drain...");
+			reporter->report("Waiting for VITA output stream drain...", 100, 100);
+		}
 		const auto stats = output_sink->finalize();
+		reporter->report(engine.cancelled() ? "Simulation cancelled" : "Simulation complete", 100, 100);
+		LOG(Level::INFO, "Event-driven simulation loop finished.");
 		auto metadata = metadata_collector->snapshot();
 		if (output_sink)
 		{

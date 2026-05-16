@@ -165,6 +165,30 @@ describe('VITA49 expected stream derivation', () => {
     });
 });
 
+describe('VITA49 run lifecycle', () => {
+    test('tracks draining between active streaming and completion', () => {
+        useVita49StreamingStore.setState({
+            runState: 'idle',
+            expectedStreams: [],
+            streamStats: null,
+            packetTrace: [],
+            omittedPacketTraceEvents: 0,
+            finalMetadata: null,
+            finalVita49Metadata: null,
+            error: null,
+        });
+
+        useVita49StreamingStore.getState().startRun([]);
+        expect(useVita49StreamingStore.getState().runState).toBe('running');
+
+        useVita49StreamingStore.getState().markDraining();
+        expect(useVita49StreamingStore.getState().runState).toBe('draining');
+
+        useVita49StreamingStore.getState().completeRun(null);
+        expect(useVita49StreamingStore.getState().runState).toBe('completed');
+    });
+});
+
 describe('VITA49 packet trace ring', () => {
     test('bounds packets and counts omitted events', () => {
         useVita49StreamingStore.setState({

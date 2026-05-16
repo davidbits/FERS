@@ -89,6 +89,7 @@ export const Vita49StreamingView = React.memo(function Vita49StreamingView() {
     const setConfig = useVita49StreamingStore((state) => state.setConfig);
     const startRun = useVita49StreamingStore((state) => state.startRun);
     const markStopping = useVita49StreamingStore((state) => state.markStopping);
+    const markDraining = useVita49StreamingStore((state) => state.markDraining);
     const setStreamStats = useVita49StreamingStore(
         (state) => state.setStreamStats
     );
@@ -126,7 +127,10 @@ export const Vita49StreamingView = React.memo(function Vita49StreamingView() {
         omittedPacketTraceEvents: 0,
     });
     const telemetryFlushFrameRef = useRef<number | null>(null);
-    const isRunning = runState === 'running' || runState === 'stopping';
+    const isRunning =
+        runState === 'running' ||
+        runState === 'stopping' ||
+        runState === 'draining';
     const configErrors = validateVita49Config(config);
 
     const appendTelemetry = useCallback(
@@ -209,6 +213,10 @@ export const Vita49StreamingView = React.memo(function Vita49StreamingView() {
                     if (active) completeRun(metadata);
                 });
             }),
+            listen<string>('vita49-stream-draining', () => {
+                if (!active) return;
+                markDraining();
+            }),
             listen<string>('vita49-stream-cancelled', (event) => {
                 if (!active) return;
                 const metadata = normalizeSimulationOutputMetadata(
@@ -231,7 +239,14 @@ export const Vita49StreamingView = React.memo(function Vita49StreamingView() {
                 listeners.forEach((unlisten) => unlisten())
             );
         };
-    }, [cancelRun, completeRun, drainAvailableTelemetry, failRun, showError]);
+    }, [
+        cancelRun,
+        completeRun,
+        drainAvailableTelemetry,
+        failRun,
+        markDraining,
+        showError,
+    ]);
 
     useEffect(() => {
         if (!isRunning) {
