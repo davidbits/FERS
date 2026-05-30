@@ -264,6 +264,12 @@ namespace serial::vita49
 
 	std::vector<std::uint8_t> Vita49Serializer::serializeContext(const ContextPacket& packet)
 	{
+		if (packet.cif0 != kFersContextCif0)
+		{
+			throw std::invalid_argument(
+				"Unsupported VITA 49.2 context CIF0: FERS serializer only supports kFersContextCif0");
+		}
+
 		ByteWriter payload;
 		payload.writeU32(packet.cif0);
 		payload.writeU32(packet.state_indicators);

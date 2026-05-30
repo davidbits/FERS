@@ -24,7 +24,7 @@ Windows:
 | `--kml` | Export KML and do not run the simulation. |
 | `--kml=<file>` | Export KML to a specific file and do not run the simulation. |
 | `--no-validate` | Skip XML schema validation before loading. |
-| `--vita49 host:port` | Stream receiver output as VITA 49.2 UDP to one endpoint. |
+| `--vita49 host:port` | Stream receiver output as the FERS VITA 49.2 UDP profile. |
 | `--vita49-fullscale <positive-real>` | Required with `--vita49`; fixed ADC full-scale for int16 IQ scaling. |
 | `--vita49-epoch <unix-nanoseconds>` | Optional deterministic VITA stream epoch for replay. |
 | `--log-level=<level>` | Set logging detail. Use `TRACE`, `DEBUG`, `INFO`, `WARNING`, `ERROR`, or `FATAL`. |

@@ -115,7 +115,7 @@ int fers_set_output_directory(fers_context_t* context, const char* out_dir);
 int fers_use_hdf5_output(fers_context_t* context);
 
 /**
- * @brief Enables VITA 49.2 UDP receiver output for a context.
+ * @brief Enables the FERS VITA 49.2 UDP streaming profile for a context.
  *
  * HDF5 remains the default until this function succeeds. The host is copied by
  * the library and may be freed by the caller after the call returns.
@@ -128,7 +128,7 @@ int fers_use_hdf5_output(fers_context_t* context);
 int fers_enable_vita49_udp_output(fers_context_t* context, const char* host, uint16_t port);
 
 /**
- * @brief Sets the fixed ADC full-scale value used by VITA 49.2 int16 IQ output.
+ * @brief Sets the fixed ADC full-scale value used by the FERS VITA 49.2 int16 IQ profile.
  *
  * VITA mode requires a positive finite full-scale before simulation starts.
  * HDF5 output keeps its existing full-buffer scaling behavior.
@@ -140,7 +140,7 @@ int fers_enable_vita49_udp_output(fers_context_t* context, const char* host, uin
 int fers_set_vita49_fullscale(fers_context_t* context, double fullscale);
 
 /**
- * @brief Sets a deterministic VITA 49.2 stream epoch as Unix nanoseconds.
+ * @brief Sets a deterministic FERS VITA 49.2 stream epoch as Unix nanoseconds.
  *
  * The epoch must fit the VRT 32-bit UTC seconds timestamp field.
  *
@@ -151,7 +151,7 @@ int fers_set_vita49_fullscale(fers_context_t* context, double fullscale);
 int fers_set_vita49_epoch_unix_nanoseconds(fers_context_t* context, uint64_t epoch_unix_nanoseconds);
 
 /**
- * @brief Sets the VITA 49.2 UDP maximum payload size in bytes.
+ * @brief Sets the FERS VITA 49.2 UDP profile maximum payload size in bytes.
  *
  * The default is 1400 bytes to avoid ordinary IP fragmentation.
  *
@@ -162,7 +162,7 @@ int fers_set_vita49_epoch_unix_nanoseconds(fers_context_t* context, uint64_t epo
 int fers_set_vita49_max_udp_payload(fers_context_t* context, uint16_t max_udp_payload);
 
 /**
- * @brief Sets the bounded VITA 49.2 sender queue depth in packets.
+ * @brief Sets the bounded FERS VITA 49.2 sender queue depth in packets.
  *
  * When this queue is full, the simulation thread blocks until the pacing thread
  * sends a packet and frees a slot.
@@ -174,7 +174,7 @@ int fers_set_vita49_max_udp_payload(fers_context_t* context, uint16_t max_udp_pa
 int fers_set_vita49_queue_depth(fers_context_t* context, uint32_t queue_depth);
 
 /**
- * @brief Enables or disables VITA 49.2 packet trace telemetry.
+ * @brief Enables or disables FERS VITA 49.2 packet trace telemetry.
  *
  * Stream counter telemetry is unaffected. Disabling packet trace telemetry avoids
  * per-packet diagnostic record creation for UI runs that only need live counters.

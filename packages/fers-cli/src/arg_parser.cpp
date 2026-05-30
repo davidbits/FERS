@@ -351,7 +351,7 @@ Options:
                           name with a .kml extension in the output directory.
   --out-dir=<dir>         Set the output directory for simulation results and default KML output.
                           Defaults to the directory containing the script file.
-  --vita49 host:port      Stream receiver output as VITA 49.2 UDP to one endpoint.
+  --vita49 host:port      Stream receiver output as the FERS VITA 49.2 UDP profile.
   --vita49-fullscale <x>  Set required positive fixed ADC full-scale for VITA int16 IQ output.
   --vita49-epoch <ns>     Set optional deterministic VITA epoch as Unix nanoseconds.
   --log-level=<level>     Set the logging level (TRACE, DEBUG, INFO, WARNING, ERROR, FATAL)

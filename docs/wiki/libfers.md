@@ -51,7 +51,7 @@ If your application has a UI, run the simulation on a background thread and use 
 
 The simulation writes the same HDF5 files as `fers-cli`. See [[Using FERS]] for output file structure.
 
-HDF5 is the default output backend. Applications can select the VITA 49.2 UDP backend at runtime:
+HDF5 is the default output backend. Applications can select the FERS VITA 49.2 UDP profile backend at runtime:
 
 ```c
 fers_enable_vita49_udp_output(context, "127.0.0.1", 4991);

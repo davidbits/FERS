@@ -5,6 +5,7 @@
 #include <atomic>
 #include <bit>
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/matchers/catch_matchers_string.hpp>
 #include <chrono>
 #include <cstdint>
 #include <future>
@@ -30,6 +31,8 @@
 #include <sys/socket.h>
 #include <unistd.h>
 #endif
+
+using Catch::Matchers::ContainsSubstring;
 
 namespace
 {
@@ -290,6 +293,29 @@ TEST_CASE("VITA context packet serializes CIF and fields in profile order", "[se
 	REQUIRE(metadata.at("fmcw").at("dechirp_reference_source") == "transmitter");
 	REQUIRE(metadata.at("fmcw").at("dechirp_reference_transmitter_id") == 0x1234u);
 	REQUIRE(metadata.at("fmcw").at("dechirp_reference_transmitter_name") == "tx-lo");
+}
+
+TEST_CASE("VITA context serializer rejects unsupported CIF0", "[serial][vita49]")
+{
+	using namespace serial::vita49;
+
+	const core::ReceiverStreamDescriptor stream{.receiver_id = 1,
+												.receiver_name = "rx",
+												.mode = "cw",
+												.sample_rate = 1.0,
+												.reference_frequency = 1.0e9,
+												.coordinate = {},
+												.initial_platform_state = {},
+												.fmcw = {}};
+	auto context = Vita49ContextBuilder::build(ContextBuildRequest{.stream = stream,
+																   .stream_id = 0x01020304u,
+																   .simulation_name = "sim",
+																   .adc_fullscale = 1.0,
+																   .timestamp = Timestamp{1u, 0u}});
+	context.cif0 &= ~Cif0AsciiMetadata;
+
+	REQUIRE_THROWS_WITH(Vita49Serializer::serializeContext(context),
+						ContainsSubstring("Unsupported VITA 49.2 context CIF0"));
 }
 
 TEST_CASE("VITA packetizer uses first sample timestamp, packet cap, and big-endian payload", "[serial][vita49]")
