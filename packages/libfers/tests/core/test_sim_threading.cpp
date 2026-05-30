@@ -766,7 +766,7 @@ TEST_CASE("SimulationEngine emits output heartbeats on streaming simulation time
 	auto world = createPhysicsWorld();
 	pool::ThreadPool pool(1);
 	RecordingOutputSink sink;
-	core::SimulationEngine engine(world.get(), pool, nullptr, ".", nullptr, &sink);
+	core::SimulationEngine engine(world.get(), pool, nullptr, ".", nullptr, &sink, nullptr, true);
 
 	auto* tx = world->getTransmitters().front().get();
 	auto* rx = world->getReceivers().front().get();
@@ -777,6 +777,9 @@ TEST_CASE("SimulationEngine emits output heartbeats on streaming simulation time
 
 	engine.processStreamingPhysics(3.25);
 
+	REQUIRE(sink.opened_streams.size() == 1u);
+	REQUIRE_THAT(sink.open_times.front(), WithinAbs(0.0, 1e-12));
+	REQUIRE(sink.blocks.empty());
 	REQUIRE(sink.heartbeat_times.size() == 3u);
 	REQUIRE_THAT(sink.heartbeat_times[0], WithinAbs(1.0, 1e-12));
 	REQUIRE_THAT(sink.heartbeat_times[1], WithinAbs(2.0, 1e-12));

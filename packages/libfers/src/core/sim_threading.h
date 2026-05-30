@@ -118,7 +118,8 @@ namespace core
 		 */
 		SimulationEngine(World* world, pool::ThreadPool& pool, std::shared_ptr<ProgressReporter> reporter,
 						 std::string output_dir, std::shared_ptr<OutputMetadataCollector> metadata_collector = nullptr,
-						 ReceiverOutputSink* output_sink = nullptr, std::function<bool()> cancel_callback = nullptr);
+						 ReceiverOutputSink* output_sink = nullptr, std::function<bool()> cancel_callback = nullptr,
+						 bool eager_context_stream_open = false);
 
 		/**
 		 * @brief Starts and runs the main simulation loop until completion.
@@ -226,6 +227,13 @@ namespace core
 		void emitStreamingOutputBlock(std::size_t receiver_index, RealType first_sample_time, RealType sample_rate,
 									  std::span<const ComplexType> samples, std::uint64_t sample_start);
 
+		/// Returns the sink-visible sample rate for one live streaming receiver.
+		[[nodiscard]] RealType streamingOutputSampleRate(std::size_t receiver_index) const;
+
+		/// Registers and opens one live streaming receiver before delayed sample flushes.
+		void ensureStreamingOutputStreamOpen(std::size_t receiver_index, RealType first_sample_time,
+											 RealType sample_rate);
+
 		/// Returns an initialized stateful downsampler for one streaming receiver segment.
 		[[nodiscard]] fers_signal::DownsamplingSink&
 		streamingDownsampler(std::size_t receiver_index, std::uint64_t input_start_index, RealType segment_start_time);
@@ -301,6 +309,7 @@ namespace core
 		std::shared_ptr<OutputMetadataCollector> _metadata_collector; ///< Collector for generated output metadata.
 		ReceiverOutputSink* _output_sink = nullptr; ///< Selected receiver output sink.
 		std::function<bool()> _cancel_callback; ///< Optional cooperative cancellation callback.
+		bool _eager_context_stream_open = false; ///< True when context heartbeat requires pre-data stream open.
 		bool _cancelled = false; ///< Latched cancellation state.
 
 		std::chrono::steady_clock::time_point _last_report_time; ///< Timestamp of the last progress report.

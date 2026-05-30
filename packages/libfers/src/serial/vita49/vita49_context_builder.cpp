@@ -6,8 +6,18 @@
 
 #include "serial/vita49/vita49_context_builder.h"
 
+#include <string_view>
+
 namespace serial::vita49
 {
+	namespace
+	{
+		[[nodiscard]] bool modeAllowsMetadata(const std::string& receiver_mode, const std::string_view metadata_mode)
+		{
+			return receiver_mode.empty() || receiver_mode == metadata_mode;
+		}
+	}
+
 	ContextPacket Vita49ContextBuilder::build(const ContextBuildRequest& request)
 	{
 		std::uint32_t flags = 0;
@@ -31,15 +41,15 @@ namespace serial::vita49
 		{
 			flags |= ContextFlagStreamClose;
 		}
-		if (request.stream.fmcw.present)
+		if (request.stream.fmcw.present && modeAllowsMetadata(request.stream.mode, "fmcw"))
 		{
 			flags |= ContextFlagFmcwMetadataPresent;
 		}
-		if (request.stream.cw.present)
+		if (request.stream.cw.present && modeAllowsMetadata(request.stream.mode, "cw"))
 		{
 			flags |= ContextFlagCwMetadataPresent;
 		}
-		if (request.stream.pulsed.present)
+		if (request.stream.pulsed.present && modeAllowsMetadata(request.stream.mode, "pulsed"))
 		{
 			flags |= ContextFlagPulsedMetadataPresent;
 		}

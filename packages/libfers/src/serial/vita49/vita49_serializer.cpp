@@ -118,19 +118,36 @@ namespace serial::vita49
 
 		[[nodiscard]] nlohmann::json makeWaveformMetadataJson(const ContextPacket& packet)
 		{
-			if (packet.fmcw.present || packet.receiver_mode == "fmcw")
+			if (packet.receiver_mode == "fmcw")
 			{
 				return {{"kind", "fmcw"}, {"metadata_ref", "fmcw"}};
 			}
-			if (packet.pulsed.present || packet.receiver_mode == "pulsed")
+			if (packet.receiver_mode == "pulsed")
 			{
 				return {{"kind", "pulsed"}, {"metadata_ref", "pulsed"}};
 			}
-			if (packet.cw.present || packet.receiver_mode == "cw")
+			if (packet.receiver_mode == "cw")
+			{
+				return {{"kind", "cw"}, {"metadata_ref", "cw"}};
+			}
+			if (packet.fmcw.present)
+			{
+				return {{"kind", "fmcw"}, {"metadata_ref", "fmcw"}};
+			}
+			if (packet.pulsed.present)
+			{
+				return {{"kind", "pulsed"}, {"metadata_ref", "pulsed"}};
+			}
+			if (packet.cw.present)
 			{
 				return {{"kind", "cw"}, {"metadata_ref", "cw"}};
 			}
 			return {{"kind", packet.receiver_mode.empty() ? "unknown" : packet.receiver_mode}};
+		}
+
+		[[nodiscard]] bool hasKnownReceiverMode(const ContextPacket& packet) noexcept
+		{
+			return packet.receiver_mode == "fmcw" || packet.receiver_mode == "pulsed" || packet.receiver_mode == "cw";
 		}
 
 		[[nodiscard]] nlohmann::json makeContextMetadataJson(const ContextPacket& packet)
@@ -166,15 +183,16 @@ namespace serial::vita49
 									   {{"azimuth", packet.initial_platform_state.azimuth},
 										{"elevation", packet.initial_platform_state.elevation}}}}},
 									{"waveform", makeWaveformMetadataJson(packet)}};
-			if (packet.pulsed.present || packet.receiver_mode == "pulsed")
+			const bool known_mode = hasKnownReceiverMode(packet);
+			if (packet.receiver_mode == "pulsed" || (!known_mode && packet.pulsed.present))
 			{
 				metadata["pulsed"] = makePulsedMetadataJson(packet);
 			}
-			if (packet.cw.present || packet.receiver_mode == "cw")
+			if (packet.receiver_mode == "cw" || (!known_mode && packet.cw.present))
 			{
 				metadata["cw"] = makeCwMetadataJson(packet);
 			}
-			if (packet.fmcw.present || packet.receiver_mode == "fmcw")
+			if (packet.receiver_mode == "fmcw" || (!known_mode && packet.fmcw.present))
 			{
 				metadata["fmcw"] = makeFmcwMetadataJson(packet);
 			}

@@ -174,7 +174,7 @@ TEST_CASE("VITA context packet serializes CIF and fields in profile order", "[se
 
 	const core::ReceiverStreamDescriptor stream{.receiver_id = 0x1122334455667788ull,
 												.receiver_name = "rx1",
-												.mode = "cw",
+												.mode = "fmcw",
 												.sample_rate = 2.5e6,
 												.reference_frequency = 9.6e9,
 												.if_offset = -1.25e6,
@@ -258,7 +258,7 @@ TEST_CASE("VITA context packet serializes CIF and fields in profile order", "[se
 	REQUIRE(metadata.at("simulation_name") == "sim");
 	REQUIRE(metadata.at("receiver").at("id").get<std::uint64_t>() == 0x1122334455667788ull);
 	REQUIRE(metadata.at("receiver").at("name") == "rx1");
-	REQUIRE(metadata.at("receiver").at("mode") == "cw");
+	REQUIRE(metadata.at("receiver").at("mode") == "fmcw");
 	REQUIRE(metadata.at("receiver").at("adc_bits") == 14u);
 	const auto context_flags = metadata.at("receiver").at("context_flags").get<std::uint32_t>();
 	REQUIRE((context_flags &
@@ -296,6 +296,37 @@ TEST_CASE("VITA context packet serializes CIF and fields in profile order", "[se
 	REQUIRE(metadata.at("fmcw").at("dechirp_reference_transmitter_name") == "tx-lo");
 	REQUIRE(metadata.at("waveform").at("kind") == "fmcw");
 	REQUIRE(metadata.at("waveform").at("metadata_ref") == "fmcw");
+}
+
+TEST_CASE("VITA context metadata follows receiver mode when stale mode blocks are present", "[serial][vita49]")
+{
+	using namespace serial::vita49;
+
+	const core::ReceiverStreamDescriptor stream{.receiver_id = 6,
+												.receiver_name = "cw-rx",
+												.mode = "cw",
+												.sample_rate = 4.0,
+												.reference_frequency = 5.0e9,
+												.coordinate = {},
+												.initial_platform_state = {},
+												.cw = {.present = true, .carrier_frequency = 5.0e9},
+												.fmcw = {.present = true, .waveform_shape = "linear"}};
+	const auto context = Vita49ContextBuilder::build(ContextBuildRequest{.stream = stream,
+																		 .stream_id = 0x01020304u,
+																		 .simulation_name = "sim",
+																		 .adc_fullscale = 1.0,
+																		 .timestamp = Timestamp{10u, 0u},
+																		 .packet_count = 0});
+	const auto bytes = Vita49Serializer::serializeContext(context);
+	const auto metadata = nlohmann::json::parse(readAsciiMetadata(bytes, 92u));
+	const auto context_flags = metadata.at("receiver").at("context_flags").get<std::uint32_t>();
+
+	REQUIRE((context_flags & ContextFlagCwMetadataPresent) == ContextFlagCwMetadataPresent);
+	REQUIRE((context_flags & ContextFlagFmcwMetadataPresent) == 0u);
+	REQUIRE(metadata.at("waveform").at("kind") == "cw");
+	REQUIRE(metadata.at("waveform").at("metadata_ref") == "cw");
+	REQUIRE(metadata.contains("cw"));
+	REQUIRE_FALSE(metadata.contains("fmcw"));
 }
 
 TEST_CASE("VITA context metadata describes pulsed and CW waveform modes", "[serial][vita49]")

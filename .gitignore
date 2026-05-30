@@ -15,8 +15,7 @@ fixes.yaml
 .code-review-graph/
 .code-review-graphignore
 .mcp.json
-entities.json
-mempalace.yaml
+vita_testing
 
 # JetBrains IDEs
 .idea/

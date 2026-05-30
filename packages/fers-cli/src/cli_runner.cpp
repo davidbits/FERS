@@ -129,6 +129,24 @@ namespace core
 				fers_context_destroy(context);
 				return 1;
 			}
+			if (config.vita49_max_udp_payload.has_value() &&
+				fers_set_vita49_max_udp_payload(context, *config.vita49_max_udp_payload) != 0)
+			{
+				char* err = fers_get_last_error_message();
+				log(FERS_LOG_FATAL, "Failed to configure VITA49 max UDP payload: {}", err ? err : "Unknown error");
+				fers_free_string(err);
+				fers_context_destroy(context);
+				return 1;
+			}
+			if (config.vita49_queue_depth.has_value() &&
+				fers_set_vita49_queue_depth(context, *config.vita49_queue_depth) != 0)
+			{
+				char* err = fers_get_last_error_message();
+				log(FERS_LOG_FATAL, "Failed to configure VITA49 queue depth: {}", err ? err : "Unknown error");
+				fers_free_string(err);
+				fers_context_destroy(context);
+				return 1;
+			}
 		}
 
 		if (fers_set_output_directory(context, final_out_dir.string().c_str()) != 0)

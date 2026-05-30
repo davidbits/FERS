@@ -318,6 +318,30 @@ TEST_CASE("buildReceiverSampleBlock captures receiver identity, timing, and samp
 	REQUIRE(block.samples.size() == samples.size());
 }
 
+TEST_CASE("buildReceiverStreamDescriptor keeps CW metadata isolated from active FMCW sources",
+		  "[processing][finalizer][vita49]")
+{
+	ParamGuard guard;
+	params::setTime(0.0, 1.0);
+	params::setRate(1'000.0);
+	params::setOversampleRatio(1);
+
+	radar::Platform rx_platform("CwRxPlatform");
+	radar::Receiver receiver(&rx_platform, "CwRx", 61, radar::OperationMode::CW_MODE);
+	auto timing_owner = makeQuietTiming("cw_metadata_clk", 27, 5.0e9);
+	receiver.setTiming(timing_owner.timing);
+
+	FmcwTxFixture source_fixture("MixedFmcwTx", 1101, 1102, 200.0, 0.001, 0.002, 0.0, std::size_t{4});
+	const std::vector sources = {core::makeActiveSource(&source_fixture.transmitter, 0.0, params::endTime())};
+
+	const auto descriptor = processing::buildReceiverStreamDescriptor(&receiver, params::rate(), sources);
+
+	REQUIRE(descriptor.mode == "cw");
+	REQUIRE(descriptor.cw.present);
+	REQUIRE_FALSE(descriptor.fmcw.present);
+	REQUIRE_THAT(descriptor.cw.carrier_frequency, WithinAbs(5.0e9, 1e-6));
+}
+
 TEST_CASE("buildStreamingOutputMetadata records FMCW source metadata for detached receivers",
 		  "[processing][finalizer][fmcw][metadata]")
 {

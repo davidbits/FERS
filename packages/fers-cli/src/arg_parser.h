@@ -42,6 +42,8 @@ namespace core
 		uint16_t vita49_port = 0; ///< VITA 49.2 UDP destination port.
 		std::optional<double> vita49_fullscale; ///< Fixed ADC full-scale for VITA int16 IQ output.
 		std::optional<uint64_t> vita49_epoch_unix_nanoseconds; ///< Optional deterministic VITA epoch.
+		std::optional<uint16_t> vita49_max_udp_payload; ///< Optional VITA UDP payload cap in bytes.
+		std::optional<uint32_t> vita49_queue_depth; ///< Optional VITA sender queue depth in packets.
 	};
 
 	/**

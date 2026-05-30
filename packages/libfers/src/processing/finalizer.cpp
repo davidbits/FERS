@@ -598,6 +598,11 @@ namespace processing
 						 const std::span<const core::ActiveStreamingSource> streaming_sources)
 		{
 			core::ReceiverStreamDescriptor::FmcwContext context;
+			if (receiver == nullptr || receiver->getMode() != radar::OperationMode::FMCW_MODE)
+			{
+				return context;
+			}
+
 			context.dechirp_mode = std::string(radar::dechirpModeToken(receiver->getDechirpMode()));
 			const auto& reference = receiver->getDechirpReference();
 			context.dechirp_reference_source = std::string(radar::dechirpReferenceSourceToken(reference.source));

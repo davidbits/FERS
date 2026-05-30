@@ -168,6 +168,36 @@ namespace
 		return {};
 	}
 
+	std::expected<void, std::string> handleVita49MaxUdpPayload(const std::string& value, core::Config& config) noexcept
+	{
+		const auto parsed = parseUnsigned64(value, "VITA49 max UDP payload");
+		if (!parsed)
+		{
+			return std::unexpected(parsed.error());
+		}
+		if (*parsed < 64u || *parsed > 65'507u)
+		{
+			return std::unexpected("VITA49 max UDP payload must be between 64 and 65507 bytes");
+		}
+		config.vita49_max_udp_payload = static_cast<std::uint16_t>(*parsed);
+		return {};
+	}
+
+	std::expected<void, std::string> handleVita49QueueDepth(const std::string& value, core::Config& config) noexcept
+	{
+		const auto parsed = parseUnsigned64(value, "VITA49 queue depth");
+		if (!parsed)
+		{
+			return std::unexpected(parsed.error());
+		}
+		if (*parsed == 0u || *parsed > std::numeric_limits<std::uint32_t>::max())
+		{
+			return std::unexpected("VITA49 queue depth must be in the range 1..4294967295");
+		}
+		config.vita49_queue_depth = static_cast<std::uint32_t>(*parsed);
+		return {};
+	}
+
 	std::expected<void, std::string> validateVita49Options(const core::Config& config) noexcept
 	{
 		if (!config.vita49_enabled)
@@ -179,6 +209,14 @@ namespace
 			if (config.vita49_epoch_unix_nanoseconds.has_value())
 			{
 				return std::unexpected("--vita49-epoch requires --vita49");
+			}
+			if (config.vita49_max_udp_payload.has_value())
+			{
+				return std::unexpected("--vita49-max-udp-payload requires --vita49");
+			}
+			if (config.vita49_queue_depth.has_value())
+			{
+				return std::unexpected("--vita49-queue-depth requires --vita49");
 			}
 			return {};
 		}
@@ -354,6 +392,10 @@ Options:
   --vita49 host:port      Stream receiver output as the FERS VITA 49.2 UDP profile.
   --vita49-fullscale <x>  Set required positive fixed ADC full-scale for VITA int16 IQ output.
   --vita49-epoch <ns>     Set optional deterministic VITA epoch as Unix nanoseconds.
+  --vita49-max-udp-payload <bytes>
+                          Set optional VITA UDP payload cap, 64..65507 bytes.
+  --vita49-queue-depth <packets>
+                          Set optional VITA sender queue depth, greater than zero.
   --log-level=<level>     Set the logging level (TRACE, DEBUG, INFO, WARNING, ERROR, FATAL)
   --log-file=<file>       Log output to the specified .log or .txt file as well as the console.
   -n=<threads>            Number of threads to use
@@ -441,6 +483,32 @@ Make sure the script file follows the correct format to avoid errors.
 					return std::unexpected(value.error());
 				}
 				if (const auto result = handleVita49Epoch(*value, config); !result)
+				{
+					return std::unexpected(result.error());
+				}
+				continue;
+			}
+			if (arg == "--vita49-max-udp-payload")
+			{
+				const auto value = require_value("--vita49-max-udp-payload");
+				if (!value)
+				{
+					return std::unexpected(value.error());
+				}
+				if (const auto result = handleVita49MaxUdpPayload(*value, config); !result)
+				{
+					return std::unexpected(result.error());
+				}
+				continue;
+			}
+			if (arg == "--vita49-queue-depth")
+			{
+				const auto value = require_value("--vita49-queue-depth");
+				if (!value)
+				{
+					return std::unexpected(value.error());
+				}
+				if (const auto result = handleVita49QueueDepth(*value, config); !result)
 				{
 					return std::unexpected(result.error());
 				}

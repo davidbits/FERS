@@ -582,11 +582,12 @@ namespace core
 	SimulationEngine::SimulationEngine(World* world, pool::ThreadPool& pool, std::shared_ptr<ProgressReporter> reporter,
 									   std::string output_dir,
 									   std::shared_ptr<OutputMetadataCollector> metadata_collector,
-									   ReceiverOutputSink* output_sink, std::function<bool()> cancel_callback) :
+									   ReceiverOutputSink* output_sink, std::function<bool()> cancel_callback,
+									   const bool eager_context_stream_open) :
 		_world(world), _pool(pool), _reporter(std::move(reporter)), _metadata_collector(std::move(metadata_collector)),
 		_output_sink(output_sink), _cancel_callback(std::move(cancel_callback)),
-		_last_report_time(std::chrono::steady_clock::now()), _next_context_heartbeat_time(params::startTime() + 1.0),
-		_output_dir(std::move(output_dir))
+		_eager_context_stream_open(eager_context_stream_open), _last_report_time(std::chrono::steady_clock::now()),
+		_next_context_heartbeat_time(params::startTime() + 1.0), _output_dir(std::move(output_dir))
 	{
 		_streaming_tracker_caches.resize(_world->getReceivers().size());
 		_if_pulse_tracker_caches.resize(_world->getReceivers().size());
@@ -1006,6 +1007,10 @@ namespace core
 	void SimulationEngine::appendStreamingOutputSample(const std::size_t receiver_index, const std::size_t sample_index,
 													   const RealType t_step, const ComplexType sample)
 	{
+		if (_eager_context_stream_open)
+		{
+			ensureStreamingOutputStreamOpen(receiver_index, t_step, streamingOutputSampleRate(receiver_index));
+		}
 		auto& block = _streaming_output_block_buffers[receiver_index];
 		if (block.empty())
 		{
@@ -1119,6 +1124,59 @@ namespace core
 		return *_streaming_downsamplers[receiver_index];
 	}
 
+	RealType SimulationEngine::streamingOutputSampleRate(const std::size_t receiver_index) const
+	{
+		if (receiver_index >= _world->getReceivers().size())
+		{
+			return 0.0;
+		}
+
+		const auto& receiver = _world->getReceivers()[receiver_index];
+		if (receiver->hasFmcwIfResamplingSink())
+		{
+			const auto& if_plan = receiver->getFmcwIfResamplerPlan();
+			return if_plan.has_value() ? if_plan->actual_output_sample_rate_hz : 0.0;
+		}
+		if (receiver->isDechirpEnabled())
+		{
+			return params::rate() * static_cast<RealType>(params::oversampleRatio());
+		}
+		return params::rate();
+	}
+
+	void SimulationEngine::ensureStreamingOutputStreamOpen(const std::size_t receiver_index,
+														   const RealType first_sample_time, const RealType sample_rate)
+	{
+		if (_output_sink == nullptr || receiver_index >= _world->getReceivers().size() || sample_rate <= 0.0)
+		{
+			return;
+		}
+		if (_streaming_output_stream_ids[receiver_index] != 0 && _streaming_output_stream_open[receiver_index] &&
+			_streaming_output_file_metadata[receiver_index])
+		{
+			return;
+		}
+
+		auto& receiver = _world->getReceivers()[receiver_index];
+		auto streaming_sources = collectStreamingSourcesForWindow(params::startTime(), params::endTime());
+		if (_streaming_output_stream_ids[receiver_index] == 0)
+		{
+			_streaming_output_stream_ids[receiver_index] = _output_sink->registerStream(
+				processing::buildReceiverStreamDescriptor(receiver.get(), sample_rate, streaming_sources));
+		}
+		if (!_streaming_output_file_metadata[receiver_index])
+		{
+			_streaming_output_file_metadata[receiver_index] =
+				std::make_shared<OutputFileMetadata>(processing::buildStreamingOutputMetadata(
+					receiver.get(), "", expectedStreamingOutputSamples(sample_rate), streaming_sources, sample_rate));
+		}
+		if (!_streaming_output_stream_open[receiver_index])
+		{
+			_output_sink->openStream(_streaming_output_stream_ids[receiver_index], first_sample_time);
+			_streaming_output_stream_open[receiver_index] = true;
+		}
+	}
+
 	void SimulationEngine::emitStreamingOutputBlock(const std::size_t receiver_index, const RealType first_sample_time,
 													const RealType sample_rate,
 													const std::span<const ComplexType> samples,
@@ -1136,23 +1194,7 @@ namespace core
 												  sample_rate);
 
 		auto streaming_sources = collectStreamingSourcesForWindow(params::startTime(), params::endTime());
-		if (_streaming_output_stream_ids[receiver_index] == 0)
-		{
-			_streaming_output_stream_ids[receiver_index] = _output_sink->registerStream(
-				processing::buildReceiverStreamDescriptor(receiver.get(), sample_rate, streaming_sources));
-		}
-		if (!_streaming_output_file_metadata[receiver_index])
-		{
-			_streaming_output_file_metadata[receiver_index] =
-				std::make_shared<OutputFileMetadata>(processing::buildStreamingOutputMetadata(
-					receiver.get(), "", expectedStreamingOutputSamples(sample_rate), streaming_sources, sample_rate));
-		}
-		const auto stream_id = _streaming_output_stream_ids[receiver_index];
-		if (!_streaming_output_stream_open[receiver_index])
-		{
-			_output_sink->openStream(stream_id, first_sample_time);
-			_streaming_output_stream_open[receiver_index] = true;
-		}
+		ensureStreamingOutputStreamOpen(receiver_index, first_sample_time, sample_rate);
 
 		const auto block = processing::buildReceiverSampleBlock(receiver.get(), first_sample_time, sample_rate,
 																processed, sample_start, streaming_sources,
@@ -1652,6 +1694,11 @@ namespace core
 		{
 			const auto receiver_index = static_cast<std::size_t>(receiver_it - _world->getReceivers().begin());
 			_streaming_downsamplers[receiver_index].reset();
+			if (_eager_context_stream_open)
+			{
+				ensureStreamingOutputStreamOpen(receiver_index, _world->getSimulationState().t_current,
+												streamingOutputSampleRate(receiver_index));
+			}
 		}
 		if (rx->hasFmcwIfResamplingSink())
 		{
@@ -1841,7 +1888,7 @@ namespace core
 		}
 
 		SimulationEngine engine(world, pool, reporter, output_dir, metadata_collector, output_sink.get(),
-								std::move(cancel_callback));
+								std::move(cancel_callback), isVita49Enabled(output_config));
 		engine.run();
 		if (cancelled != nullptr)
 		{
