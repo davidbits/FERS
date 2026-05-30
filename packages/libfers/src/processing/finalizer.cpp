@@ -509,6 +509,90 @@ namespace processing
 			return found == streaming_sources.end() ? nullptr : &*found;
 		}
 
+		[[nodiscard]] const radar::Transmitter* attachedTransmitter(const radar::Receiver* receiver)
+		{
+			return receiver == nullptr ? nullptr : dynamic_cast<const radar::Transmitter*>(receiver->getAttached());
+		}
+
+		void populateWaveformIdentity(core::ReceiverStreamDescriptor::PulsedContext& context,
+									  const fers_signal::RadarSignal* signal)
+		{
+			if (signal == nullptr)
+			{
+				return;
+			}
+			context.waveform_id = signal->getId();
+			context.waveform_name = signal->getName();
+			context.carrier_frequency = signal->getCarrier();
+			context.power = signal->getPower();
+			context.pulse_width = signal->getLength();
+			context.native_sample_rate = signal->getRate();
+			context.native_sample_count = signal->getSampleCount();
+		}
+
+		void populateWaveformIdentity(core::ReceiverStreamDescriptor::CwContext& context,
+									  const fers_signal::RadarSignal* signal)
+		{
+			if (signal == nullptr)
+			{
+				return;
+			}
+			context.waveform_id = signal->getId();
+			context.waveform_name = signal->getName();
+			context.carrier_frequency = signal->getCarrier();
+			context.power = signal->getPower();
+		}
+
+		[[nodiscard]] core::ReceiverStreamDescriptor::PulsedContext buildPulsedContext(const radar::Receiver* receiver)
+		{
+			core::ReceiverStreamDescriptor::PulsedContext context;
+			if (receiver == nullptr || receiver->getMode() != radar::OperationMode::PULSED_MODE)
+			{
+				return context;
+			}
+
+			context.present = true;
+			context.window_length = receiver->getWindowLength();
+			context.window_prf = receiver->getWindowPrf();
+			context.window_skip = receiver->getWindowSkip();
+			context.window_count = receiver->getWindowCount();
+			if (const auto* transmitter = attachedTransmitter(receiver); transmitter != nullptr)
+			{
+				populateWaveformIdentity(context, transmitter->getSignal());
+			}
+			if (context.carrier_frequency == 0.0)
+			{
+				if (const auto timing = receiver->getTiming(); timing)
+				{
+					context.carrier_frequency = timing->getFrequency();
+				}
+			}
+			return context;
+		}
+
+		[[nodiscard]] core::ReceiverStreamDescriptor::CwContext buildCwContext(const radar::Receiver* receiver)
+		{
+			core::ReceiverStreamDescriptor::CwContext context;
+			if (receiver == nullptr || receiver->getMode() != radar::OperationMode::CW_MODE)
+			{
+				return context;
+			}
+
+			context.present = true;
+			if (const auto* transmitter = attachedTransmitter(receiver); transmitter != nullptr)
+			{
+				populateWaveformIdentity(context, transmitter->getSignal());
+			}
+			if (context.carrier_frequency == 0.0)
+			{
+				if (const auto timing = receiver->getTiming(); timing)
+				{
+					context.carrier_frequency = timing->getFrequency();
+				}
+			}
+			return context;
+		}
+
 		[[nodiscard]] core::ReceiverStreamDescriptor::FmcwContext
 		buildFmcwContext(const radar::Receiver* receiver,
 						 const std::span<const core::ActiveStreamingSource> streaming_sources)
@@ -570,6 +654,8 @@ namespace processing
 												  .adc_bits = params::adcBits(),
 												  .coordinate = buildCoordinateContext(),
 												  .initial_platform_state = buildInitialPlatformState(receiver),
+												  .pulsed = buildPulsedContext(receiver),
+												  .cw = buildCwContext(receiver),
 												  .fmcw = buildFmcwContext(receiver, streaming_sources)};
 		if (const auto timing = receiver->getTiming(); timing)
 		{

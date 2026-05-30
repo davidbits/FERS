@@ -26,7 +26,7 @@ namespace serial::vita49
 
 	bool StreamRegistry::Key::operator==(const Key& other) const noexcept
 	{
-		return receiver_id == other.receiver_id && receiver_name == other.receiver_name;
+		return receiver_id == other.receiver_id && receiver_name == other.receiver_name && mode == other.mode;
 	}
 
 	std::size_t StreamRegistry::KeyHash::operator()(const Key& key) const noexcept
@@ -36,7 +36,7 @@ namespace serial::vita49
 
 	std::uint32_t StreamRegistry::registerStream(const core::ReceiverStreamDescriptor& stream)
 	{
-		Key key{.receiver_id = stream.receiver_id, .receiver_name = stream.receiver_name};
+		Key key{.receiver_id = stream.receiver_id, .receiver_name = stream.receiver_name, .mode = stream.mode};
 		if (const auto found = _by_key.find(key); found != _by_key.end())
 		{
 			return found->second;
@@ -76,7 +76,7 @@ namespace serial::vita49
 
 	std::uint32_t StreamRegistry::initialStreamId(const Key& key) noexcept
 	{
-		const std::string material = std::to_string(key.receiver_id) + ":" + key.receiver_name;
+		const std::string material = std::to_string(key.receiver_id) + ":" + key.receiver_name + ":" + key.mode;
 		std::uint32_t stream_id = fnv1a32(material) & 0x7FFFFFFFu;
 		if (stream_id == 0)
 		{

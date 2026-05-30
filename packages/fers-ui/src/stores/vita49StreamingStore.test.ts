@@ -75,7 +75,7 @@ describe('VITA49 streaming config', () => {
 });
 
 describe('VITA49 expected stream derivation', () => {
-    test('covers receiver and monostatic streaming components', () => {
+    test('covers pulsed, CW, and FMCW receiver streams', () => {
         const scenario: Pick<
             ScenarioData,
             'globalParameters' | 'platforms' | 'waveforms'
@@ -114,6 +114,21 @@ describe('VITA49 expected stream derivation', () => {
                             id: '10',
                             type: 'receiver',
                             name: 'Rx',
+                            radarType: 'pulsed',
+                            window_skip: 1e-6,
+                            window_length: 10e-6,
+                            prf: 1000,
+                            antennaId: null,
+                            timingId: null,
+                            noiseTemperature: null,
+                            noDirectPaths: false,
+                            noPropagationLoss: false,
+                            schedule: [],
+                        },
+                        {
+                            id: '11',
+                            type: 'receiver',
+                            name: 'CwRx',
                             radarType: 'cw',
                             window_skip: null,
                             window_length: null,
@@ -126,11 +141,11 @@ describe('VITA49 expected stream derivation', () => {
                             schedule: [],
                         },
                         {
-                            id: '11',
+                            id: '12',
                             type: 'monostatic',
                             name: 'Mono',
-                            txId: '12',
-                            rxId: '13',
+                            txId: '13',
+                            rxId: '14',
                             radarType: 'fmcw',
                             window_skip: null,
                             window_length: null,
@@ -153,12 +168,21 @@ describe('VITA49 expected stream derivation', () => {
             {
                 receiverId: 10,
                 receiverName: 'Rx',
+                mode: 'pulsed',
                 sampleRate: 2e6,
                 referenceFrequency: null,
             },
             {
-                receiverId: 13,
+                receiverId: 11,
+                receiverName: 'CwRx',
+                mode: 'cw',
+                sampleRate: 2e6,
+                referenceFrequency: null,
+            },
+            {
+                receiverId: 14,
                 receiverName: 'Mono',
+                mode: 'fmcw',
                 sampleRate: 250000,
                 referenceFrequency: 9.6e9,
             },
@@ -200,6 +224,7 @@ describe('VITA49 telemetry rows', () => {
                     receiver_id: 7,
                     receiver_name: 'Rx',
                     stream_id: 1234,
+                    mode: 'pulsed',
                     sample_rate: 100000,
                     reference_frequency: 10000000,
                     packets_emitted: 2930,
@@ -226,6 +251,7 @@ describe('VITA49 telemetry rows', () => {
         expect(rows).toMatchObject([
             {
                 receiverId: 7,
+                mode: 'pulsed',
                 samplesEmitted: 1000000,
                 firstSampleTime: 0,
                 endSampleTime: 10,
@@ -237,6 +263,41 @@ describe('VITA49 telemetry rows', () => {
                     integer_seconds: 1700000010,
                     fractional_picoseconds: 123456789000,
                 },
+            },
+        ]);
+    });
+
+    test('does not default backend-only streams to CW', () => {
+        const rows = mergeVita49StreamRows([], {
+            mode: 'vita49_udp',
+            epoch_unix_nanoseconds: null,
+            streams: [
+                {
+                    receiver_id: 8,
+                    receiver_name: 'BackendRx',
+                    stream_id: 5678,
+                    sample_rate: 100000,
+                    reference_frequency: 10000000,
+                    packets_emitted: 1,
+                    samples_emitted: 10,
+                    packets_dropped: 0,
+                    samples_dropped: 0,
+                    over_range_count: 0,
+                    late_packet_count: 0,
+                    context_packets: 2,
+                    first_sample_time: null,
+                    end_sample_time: null,
+                    first_timestamp: null,
+                    end_timestamp: null,
+                },
+            ],
+        });
+
+        expect(rows).toMatchObject([
+            {
+                receiverId: 8,
+                mode: 'unknown',
+                backendObserved: true,
             },
         ]);
     });

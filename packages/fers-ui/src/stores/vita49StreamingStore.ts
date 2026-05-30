@@ -50,6 +50,7 @@ export type Vita49StreamCounter = {
     receiver_id: number;
     receiver_name: string;
     stream_id: number;
+    mode?: string | null;
     sample_rate: number;
     reference_frequency: number;
     packets_emitted: number;
@@ -99,7 +100,7 @@ export type Vita49StreamRow = {
     receiverId: number;
     receiverName: string;
     platformName: string;
-    mode: 'cw' | 'fmcw';
+    mode: Vita49StreamMode;
     streamId: number | null;
     sampleRate: number | null;
     referenceFrequency: number | null;
@@ -116,6 +117,8 @@ export type Vita49StreamRow = {
     endTimestamp: Vita49Timestamp | null;
     backendObserved: boolean;
 };
+
+export type Vita49StreamMode = 'pulsed' | 'cw' | 'fmcw' | 'unknown';
 
 export const DEFAULT_VITA49_CONFIG: Vita49RuntimeConfig = {
     host: '127.0.0.1',
@@ -205,8 +208,10 @@ export const toVita49BackendConfig = (
     };
 };
 
-const isStreamingMode = (radarType: string): radarType is 'cw' | 'fmcw' =>
-    radarType === 'cw' || radarType === 'fmcw';
+const normalizeStreamMode = (
+    mode: string | null | undefined
+): Vita49StreamMode =>
+    mode === 'pulsed' || mode === 'cw' || mode === 'fmcw' ? mode : 'unknown';
 
 export const deriveExpectedVita49Streams = (
     scenario: Pick<ScenarioData, 'globalParameters' | 'platforms' | 'waveforms'>
@@ -224,10 +229,6 @@ export const deriveExpectedVita49Streams = (
             ) {
                 continue;
             }
-            if (!isStreamingMode(component.radarType)) {
-                continue;
-            }
-
             const waveform =
                 component.type === 'monostatic' && component.waveformId
                     ? waveformById.get(component.waveformId)
@@ -238,11 +239,11 @@ export const deriveExpectedVita49Streams = (
                     : Number(component.id);
 
             rows.push({
-                key: `${receiverId}`,
+                key: `${receiverId}:${component.radarType}`,
                 receiverId,
                 receiverName: component.name,
                 platformName: platform.name,
-                mode: component.radarType,
+                mode: normalizeStreamMode(component.radarType),
                 streamId: null,
                 sampleRate:
                     component.fmcwModeConfig?.if_sample_rate ??
@@ -268,11 +269,11 @@ export const deriveExpectedVita49Streams = (
 };
 
 const rowFromCounter = (counter: Vita49StreamCounter): Vita49StreamRow => ({
-    key: `${counter.receiver_id}`,
+    key: `${counter.receiver_id}:${normalizeStreamMode(counter.mode)}:${counter.stream_id}`,
     receiverId: counter.receiver_id,
     receiverName: counter.receiver_name,
     platformName: '',
-    mode: 'cw',
+    mode: normalizeStreamMode(counter.mode),
     streamId: counter.stream_id,
     sampleRate: counter.sample_rate,
     referenceFrequency: counter.reference_frequency,
@@ -299,16 +300,45 @@ export const mergeVita49StreamRows = (
         return expectedRows;
     }
 
-    const rowsByReceiver = new Map(
-        expectedRows.map((row) => [row.receiverId, { ...row }])
+    const rowsByKey = new Map(expectedRows.map((row) => [row.key, { ...row }]));
+    const expectedByReceiver = new Map<number, Vita49StreamRow[]>();
+    for (const row of expectedRows) {
+        expectedByReceiver.set(row.receiverId, [
+            ...(expectedByReceiver.get(row.receiverId) ?? []),
+            row,
+        ]);
+    }
+
+    const findExpectedRow = (counter: Vita49StreamCounter) => {
+        const observedMode = normalizeStreamMode(counter.mode);
+        if (observedMode !== 'unknown') {
+            const exact = rowsByKey.get(
+                `${counter.receiver_id}:${observedMode}`
+            );
+            if (exact) return exact;
+        }
+        const receiverRows = expectedByReceiver.get(counter.receiver_id) ?? [];
+        return receiverRows.length === 1
+            ? rowsByKey.get(receiverRows[0].key)
+            : undefined;
+    };
+
+    const rowsByResolvedKey = new Map(
+        expectedRows.map((row) => [row.key, { ...row }])
     );
 
     for (const counter of stats.streams) {
-        const existing = rowsByReceiver.get(counter.receiver_id);
+        const existing = findExpectedRow(counter);
         const observed = rowFromCounter(counter);
-        rowsByReceiver.set(counter.receiver_id, {
+        const modeFromBackend = normalizeStreamMode(counter.mode);
+        const key = existing?.key ?? observed.key;
+        rowsByResolvedKey.set(key, {
             ...(existing ?? observed),
             receiverName: counter.receiver_name || existing?.receiverName || '',
+            mode:
+                modeFromBackend !== 'unknown'
+                    ? modeFromBackend
+                    : (existing?.mode ?? observed.mode),
             streamId: counter.stream_id,
             sampleRate: counter.sample_rate,
             referenceFrequency: counter.reference_frequency,
@@ -328,8 +358,17 @@ export const mergeVita49StreamRows = (
         });
     }
 
-    return Array.from(rowsByReceiver.values()).sort(
-        (a, b) => a.receiverId - b.receiverId
+    const modeOrder: Record<Vita49StreamMode, number> = {
+        pulsed: 0,
+        cw: 1,
+        fmcw: 2,
+        unknown: 3,
+    };
+    return Array.from(rowsByResolvedKey.values()).sort(
+        (a, b) =>
+            a.receiverId - b.receiverId ||
+            modeOrder[a.mode] - modeOrder[b.mode] ||
+            (a.streamId ?? 0) - (b.streamId ?? 0)
     );
 };
 

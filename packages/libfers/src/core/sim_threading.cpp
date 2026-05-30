@@ -73,6 +73,7 @@ namespace core
 			return Vita49StreamMetadata{.receiver_id = stats.receiver_id,
 										.receiver_name = stats.receiver_name,
 										.stream_id = stats.stream_id,
+										.mode = stats.mode,
 										.sample_rate = stats.sample_rate,
 										.reference_frequency = stats.reference_frequency,
 										.packets_emitted = stats.packets_emitted,

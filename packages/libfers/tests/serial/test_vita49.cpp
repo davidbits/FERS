@@ -13,6 +13,7 @@
 #include <memory>
 #include <nlohmann/json.hpp>
 #include <stdexcept>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -293,6 +294,76 @@ TEST_CASE("VITA context packet serializes CIF and fields in profile order", "[se
 	REQUIRE(metadata.at("fmcw").at("dechirp_reference_source") == "transmitter");
 	REQUIRE(metadata.at("fmcw").at("dechirp_reference_transmitter_id") == 0x1234u);
 	REQUIRE(metadata.at("fmcw").at("dechirp_reference_transmitter_name") == "tx-lo");
+	REQUIRE(metadata.at("waveform").at("kind") == "fmcw");
+	REQUIRE(metadata.at("waveform").at("metadata_ref") == "fmcw");
+}
+
+TEST_CASE("VITA context metadata describes pulsed and CW waveform modes", "[serial][vita49]")
+{
+	using namespace serial::vita49;
+
+	const core::ReceiverStreamDescriptor pulsed_stream{.receiver_id = 5,
+													   .receiver_name = "pulse-rx",
+													   .mode = "pulsed",
+													   .sample_rate = 1.0e6,
+													   .reference_frequency = 10.0e9,
+													   .adc_bits = 12,
+													   .coordinate = {},
+													   .initial_platform_state = {},
+													   .pulsed = {.present = true,
+																  .window_length = 50.0e-6,
+																  .window_prf = 1000.0,
+																  .window_skip = 5.0e-6,
+																  .window_count = 4,
+																  .waveform_id = 99,
+																  .waveform_name = "pulse",
+																  .carrier_frequency = 10.0e9,
+																  .power = 1200.0,
+																  .pulse_width = 2.0e-6,
+																  .native_sample_rate = 20.0e6,
+																  .native_sample_count = 40},
+													   .cw = {},
+													   .fmcw = {}};
+	const auto pulsed_context = Vita49ContextBuilder::build(ContextBuildRequest{.stream = pulsed_stream,
+																				.stream_id = 0x11111111u,
+																				.simulation_name = "mixed",
+																				.adc_fullscale = 1.0,
+																				.timestamp = Timestamp{10u, 0u}});
+	const auto pulsed_bytes = Vita49Serializer::serializeContext(pulsed_context);
+	const auto pulsed_metadata = nlohmann::json::parse(readAsciiMetadata(pulsed_bytes, 92u));
+	REQUIRE((pulsed_metadata.at("receiver").at("context_flags").get<std::uint32_t>() &
+			 ContextFlagPulsedMetadataPresent) == ContextFlagPulsedMetadataPresent);
+	REQUIRE(pulsed_metadata.at("waveform").at("kind") == "pulsed");
+	REQUIRE(pulsed_metadata.at("waveform").at("metadata_ref") == "pulsed");
+	REQUIRE(pulsed_metadata.at("pulsed").at("window_prf_hz") == 1000.0);
+	REQUIRE(pulsed_metadata.at("pulsed").at("pri_s") == 0.001);
+	REQUIRE(pulsed_metadata.at("pulsed").at("pulse_width_s") == 2.0e-6);
+
+	const core::ReceiverStreamDescriptor cw_stream{
+		.receiver_id = 6,
+		.receiver_name = "cw-rx",
+		.mode = "cw",
+		.sample_rate = 1.0e6,
+		.reference_frequency = 5.0e9,
+		.adc_bits = 12,
+		.coordinate = {},
+		.initial_platform_state = {},
+		.pulsed = {},
+		.cw = {.present = true, .waveform_id = 100, .waveform_name = "cw", .carrier_frequency = 5.0e9, .power = 25.0},
+		.fmcw = {}};
+	const auto cw_context = Vita49ContextBuilder::build(ContextBuildRequest{.stream = cw_stream,
+																			.stream_id = 0x22222222u,
+																			.simulation_name = "mixed",
+																			.adc_fullscale = 1.0,
+																			.timestamp = Timestamp{10u, 0u}});
+	const auto cw_bytes = Vita49Serializer::serializeContext(cw_context);
+	const auto cw_metadata = nlohmann::json::parse(readAsciiMetadata(cw_bytes, 92u));
+	REQUIRE((cw_metadata.at("receiver").at("context_flags").get<std::uint32_t>() & ContextFlagCwMetadataPresent) ==
+			ContextFlagCwMetadataPresent);
+	REQUIRE(cw_metadata.at("waveform").at("kind") == "cw");
+	REQUIRE(cw_metadata.at("waveform").at("metadata_ref") == "cw");
+	REQUIRE(cw_metadata.at("cw").at("carrier_hz") == 5.0e9);
+	REQUIRE(cw_metadata.at("cw").at("power_w") == 25.0);
 }
 
 TEST_CASE("VITA context serializer rejects unsupported CIF0", "[serial][vita49]")
@@ -377,14 +448,22 @@ TEST_CASE("VITA stream registry allocates stable non-truncated stream IDs", "[se
 										   .coordinate = {},
 										   .initial_platform_state = {},
 										   .fmcw = {}};
+	const core::ReceiverStreamDescriptor a_pulsed{.receiver_id = a.receiver_id,
+												  .receiver_name = "rx-a",
+												  .mode = "pulsed",
+												  .coordinate = {},
+												  .initial_platform_state = {},
+												  .fmcw = {}};
 
 	const auto stream_a = registry.registerStream(a);
 	const auto stream_a_again = registry.registerStream(a);
 	const auto stream_b = registry.registerStream(b);
+	const auto stream_a_pulsed = registry.registerStream(a_pulsed);
 
 	REQUIRE(stream_a != 0u);
 	REQUIRE(stream_a == stream_a_again);
 	REQUIRE(stream_a != stream_b);
+	REQUIRE(stream_a != stream_a_pulsed);
 	REQUIRE(stream_a != static_cast<std::uint32_t>(a.receiver_id));
 }
 
@@ -625,10 +704,87 @@ TEST_CASE("VITA output sink emits context, signal data, and stats through inject
 	REQUIRE(recording_raw->closed);
 	REQUIRE(recording_raw->sent.size() >= 3u);
 	REQUIRE(stats.streams.size() == 1u);
+	CHECK(stats.streams.front().mode == "cw");
 	CHECK(stats.streams.front().samples_emitted == 2u);
 	CHECK(stats.streams.front().packets_emitted == 1u);
 	CHECK(stats.streams.front().context_packets >= 2u);
 	CHECK(stats.streams.front().over_range_count == 1u);
+}
+
+TEST_CASE("VITA output sink keeps mixed receiver modes as distinct streams", "[serial][vita49]")
+{
+	using namespace serial::vita49;
+
+	auto recording = std::make_unique<RecordingSender>();
+	Vita49OutputSink sink(std::move(recording));
+	const core::OutputConfig config{.mode = core::OutputMode::Vita49Udp,
+									.vita49 = {.host = "127.0.0.1",
+											   .port = 1,
+											   .adc_fullscale = 1.0,
+											   .queue_depth = 16,
+											   .epoch_unix_nanoseconds = 1'700'000'000'000'000'000ull,
+											   .max_udp_payload = 1400}};
+	sink.initializeRun(config, "mixed");
+
+	const core::ReceiverStreamDescriptor pulsed{.receiver_id = 42,
+												.receiver_name = "rx",
+												.mode = "pulsed",
+												.sample_rate = 2.0,
+												.reference_frequency = 9.0e8,
+												.coordinate = {},
+												.initial_platform_state = {},
+												.pulsed = {.present = true, .window_length = 1.0, .window_prf = 2.0},
+												.cw = {},
+												.fmcw = {}};
+	const core::ReceiverStreamDescriptor cw{.receiver_id = 42,
+											.receiver_name = "rx",
+											.mode = "cw",
+											.sample_rate = 2.0,
+											.reference_frequency = 9.0e8,
+											.coordinate = {},
+											.initial_platform_state = {},
+											.pulsed = {},
+											.cw = {.present = true, .carrier_frequency = 9.0e8},
+											.fmcw = {}};
+	const core::ReceiverStreamDescriptor fmcw{.receiver_id = 43,
+											  .receiver_name = "rx-fmcw",
+											  .mode = "fmcw",
+											  .sample_rate = 2.0,
+											  .reference_frequency = 9.0e8,
+											  .coordinate = {},
+											  .initial_platform_state = {},
+											  .pulsed = {},
+											  .cw = {},
+											  .fmcw = {.present = true,
+													   .waveform_shape = "linear",
+													   .chirp_bandwidth = 1.0e6,
+													   .chirp_duration = 1.0e-3,
+													   .chirp_period = 2.0e-3,
+													   .chirp_rate = 1.0e9}};
+	std::vector<ComplexType> samples{ComplexType(0.25, -0.25)};
+	sink.submitBlock(
+		core::ReceiverSampleBlock{.stream = pulsed, .first_sample_time = 0.0, .sample_rate = 2.0, .samples = samples});
+	sink.submitBlock(
+		core::ReceiverSampleBlock{.stream = cw, .first_sample_time = 0.0, .sample_rate = 2.0, .samples = samples});
+	sink.submitBlock(
+		core::ReceiverSampleBlock{.stream = fmcw, .first_sample_time = 0.0, .sample_rate = 2.0, .samples = samples});
+
+	const auto stats = sink.finalize();
+
+	REQUIRE(stats.streams.size() == 3u);
+	std::vector<std::string> modes;
+	std::vector<std::uint32_t> stream_ids;
+	for (const auto& stream : stats.streams)
+	{
+		modes.push_back(stream.mode);
+		stream_ids.push_back(stream.stream_id);
+		CHECK(stream.samples_emitted == 1u);
+		CHECK(stream.packets_emitted == 1u);
+	}
+	std::ranges::sort(modes);
+	std::ranges::sort(stream_ids);
+	REQUIRE(modes == std::vector<std::string>{"cw", "fmcw", "pulsed"});
+	REQUIRE(std::ranges::unique(stream_ids).begin() == stream_ids.end());
 }
 
 TEST_CASE("VITA output sink reports sample loss only for send failures", "[serial][vita49]")

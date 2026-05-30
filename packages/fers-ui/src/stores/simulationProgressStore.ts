@@ -85,6 +85,7 @@ export type SimulationOutputVita49StreamMetadata = {
     receiver_id: number;
     receiver_name: string;
     stream_id: number;
+    mode?: string;
     sample_rate: number;
     reference_frequency: number;
     packets_emitted: number;

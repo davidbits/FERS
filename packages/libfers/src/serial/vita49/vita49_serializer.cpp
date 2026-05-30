@@ -62,58 +62,123 @@ namespace serial::vita49
 			return static_cast<std::uint16_t>(words);
 		}
 
+		[[nodiscard]] nlohmann::json makeCwMetadataJson(const ContextPacket& packet)
+		{
+			const RealType carrier_frequency =
+				packet.cw.carrier_frequency != 0.0 ? packet.cw.carrier_frequency : packet.reference_frequency;
+			return {{"present", packet.cw.present},
+					{"waveform_id", packet.cw.waveform_id},
+					{"waveform_name", packet.cw.waveform_name},
+					{"carrier_hz", carrier_frequency},
+					{"power_w", packet.cw.power}};
+		}
+
+		[[nodiscard]] nlohmann::json makePulsedMetadataJson(const ContextPacket& packet)
+		{
+			const RealType carrier_frequency =
+				packet.pulsed.carrier_frequency != 0.0 ? packet.pulsed.carrier_frequency : packet.reference_frequency;
+			nlohmann::json result = {{"present", packet.pulsed.present},
+									 {"waveform_id", packet.pulsed.waveform_id},
+									 {"waveform_name", packet.pulsed.waveform_name},
+									 {"carrier_hz", carrier_frequency},
+									 {"power_w", packet.pulsed.power},
+									 {"pulse_width_s", packet.pulsed.pulse_width},
+									 {"native_sample_rate_hz", packet.pulsed.native_sample_rate},
+									 {"native_sample_count", packet.pulsed.native_sample_count},
+									 {"window_length_s", packet.pulsed.window_length},
+									 {"window_prf_hz", packet.pulsed.window_prf},
+									 {"window_skip_s", packet.pulsed.window_skip},
+									 {"window_count", packet.pulsed.window_count}};
+			result["pri_s"] = packet.pulsed.window_prf > 0.0 ? nlohmann::json(1.0 / packet.pulsed.window_prf)
+															 : nlohmann::json(nullptr);
+			return result;
+		}
+
+		[[nodiscard]] nlohmann::json makeFmcwMetadataJson(const ContextPacket& packet)
+		{
+			return {{"present", packet.fmcw.present},
+					{"waveform_shape", packet.fmcw.waveform_shape},
+					{"chirp_bandwidth_hz", packet.fmcw.chirp_bandwidth},
+					{"chirp_duration_s", packet.fmcw.chirp_duration},
+					{"chirp_period_s", packet.fmcw.chirp_period},
+					{"chirp_rate_hz_per_s", packet.fmcw.chirp_rate},
+					{"chirp_rate_signed_hz_per_s", packet.fmcw.chirp_rate_signed},
+					{"sweep_direction", packet.fmcw.sweep_direction},
+					{"start_frequency_offset_hz", packet.fmcw.start_frequency_offset},
+					{"triangle_period_s", packet.fmcw.triangle_period},
+					{"chirp_count", packet.fmcw.chirp_count},
+					{"triangle_count", packet.fmcw.triangle_count},
+					{"dechirp_mode", packet.fmcw.dechirp_mode},
+					{"dechirp_reference_source", packet.fmcw.dechirp_reference_source},
+					{"dechirp_reference_transmitter_id", packet.fmcw.dechirp_reference_transmitter_id},
+					{"dechirp_reference_transmitter_name", packet.fmcw.dechirp_reference_transmitter_name},
+					{"dechirp_reference_waveform_id", packet.fmcw.dechirp_reference_waveform_id},
+					{"dechirp_reference_waveform_name", packet.fmcw.dechirp_reference_waveform_name}};
+		}
+
+		[[nodiscard]] nlohmann::json makeWaveformMetadataJson(const ContextPacket& packet)
+		{
+			if (packet.fmcw.present || packet.receiver_mode == "fmcw")
+			{
+				return {{"kind", "fmcw"}, {"metadata_ref", "fmcw"}};
+			}
+			if (packet.pulsed.present || packet.receiver_mode == "pulsed")
+			{
+				return {{"kind", "pulsed"}, {"metadata_ref", "pulsed"}};
+			}
+			if (packet.cw.present || packet.receiver_mode == "cw")
+			{
+				return {{"kind", "cw"}, {"metadata_ref", "cw"}};
+			}
+			return {{"kind", packet.receiver_mode.empty() ? "unknown" : packet.receiver_mode}};
+		}
+
 		[[nodiscard]] nlohmann::json makeContextMetadataJson(const ContextPacket& packet)
 		{
-			return nlohmann::json{
-				{"schema", "fers-vita49-context-v1"},
-				{"simulation_name", packet.simulation_name},
-				{"receiver",
-				 {{"id", packet.receiver_id},
-				  {"name", packet.receiver_name},
-				  {"mode", packet.receiver_mode},
-				  {"adc_bits", packet.adc_bits},
-				  {"context_flags", packet.context_flags}}},
-				{"coordinate_frame",
-				 {{"frame", packet.coordinate.frame},
-				  {"origin",
-				   {{"latitude", packet.coordinate.origin_latitude},
-					{"longitude", packet.coordinate.origin_longitude},
-					{"altitude", packet.coordinate.origin_altitude}}},
-				  {"utm_zone", packet.coordinate.utm_zone},
-				  {"utm_north_hemisphere", packet.coordinate.utm_north_hemisphere}}},
-				{"initial_platform_state",
-				 {{"platform_id", packet.initial_platform_state.platform_id},
-				  {"platform_name", packet.initial_platform_state.platform_name},
-				  {"position_m",
-				   {{"x", packet.initial_platform_state.position_x},
-					{"y", packet.initial_platform_state.position_y},
-					{"z", packet.initial_platform_state.position_z}}},
-				  {"velocity_mps",
-				   {{"x", packet.initial_platform_state.velocity_x},
-					{"y", packet.initial_platform_state.velocity_y},
-					{"z", packet.initial_platform_state.velocity_z}}},
-				  {"rotation_rad",
-				   {{"azimuth", packet.initial_platform_state.azimuth},
-					{"elevation", packet.initial_platform_state.elevation}}}}},
-				{"fmcw",
-				 {{"present", packet.fmcw.present},
-				  {"waveform_shape", packet.fmcw.waveform_shape},
-				  {"chirp_bandwidth_hz", packet.fmcw.chirp_bandwidth},
-				  {"chirp_duration_s", packet.fmcw.chirp_duration},
-				  {"chirp_period_s", packet.fmcw.chirp_period},
-				  {"chirp_rate_hz_per_s", packet.fmcw.chirp_rate},
-				  {"chirp_rate_signed_hz_per_s", packet.fmcw.chirp_rate_signed},
-				  {"sweep_direction", packet.fmcw.sweep_direction},
-				  {"start_frequency_offset_hz", packet.fmcw.start_frequency_offset},
-				  {"triangle_period_s", packet.fmcw.triangle_period},
-				  {"chirp_count", packet.fmcw.chirp_count},
-				  {"triangle_count", packet.fmcw.triangle_count},
-				  {"dechirp_mode", packet.fmcw.dechirp_mode},
-				  {"dechirp_reference_source", packet.fmcw.dechirp_reference_source},
-				  {"dechirp_reference_transmitter_id", packet.fmcw.dechirp_reference_transmitter_id},
-				  {"dechirp_reference_transmitter_name", packet.fmcw.dechirp_reference_transmitter_name},
-				  {"dechirp_reference_waveform_id", packet.fmcw.dechirp_reference_waveform_id},
-				  {"dechirp_reference_waveform_name", packet.fmcw.dechirp_reference_waveform_name}}}};
+			nlohmann::json metadata{{"schema", "fers-vita49-context-v1"},
+									{"simulation_name", packet.simulation_name},
+									{"receiver",
+									 {{"id", packet.receiver_id},
+									  {"name", packet.receiver_name},
+									  {"mode", packet.receiver_mode},
+									  {"adc_bits", packet.adc_bits},
+									  {"context_flags", packet.context_flags}}},
+									{"coordinate_frame",
+									 {{"frame", packet.coordinate.frame},
+									  {"origin",
+									   {{"latitude", packet.coordinate.origin_latitude},
+										{"longitude", packet.coordinate.origin_longitude},
+										{"altitude", packet.coordinate.origin_altitude}}},
+									  {"utm_zone", packet.coordinate.utm_zone},
+									  {"utm_north_hemisphere", packet.coordinate.utm_north_hemisphere}}},
+									{"initial_platform_state",
+									 {{"platform_id", packet.initial_platform_state.platform_id},
+									  {"platform_name", packet.initial_platform_state.platform_name},
+									  {"position_m",
+									   {{"x", packet.initial_platform_state.position_x},
+										{"y", packet.initial_platform_state.position_y},
+										{"z", packet.initial_platform_state.position_z}}},
+									  {"velocity_mps",
+									   {{"x", packet.initial_platform_state.velocity_x},
+										{"y", packet.initial_platform_state.velocity_y},
+										{"z", packet.initial_platform_state.velocity_z}}},
+									  {"rotation_rad",
+									   {{"azimuth", packet.initial_platform_state.azimuth},
+										{"elevation", packet.initial_platform_state.elevation}}}}},
+									{"waveform", makeWaveformMetadataJson(packet)}};
+			if (packet.pulsed.present || packet.receiver_mode == "pulsed")
+			{
+				metadata["pulsed"] = makePulsedMetadataJson(packet);
+			}
+			if (packet.cw.present || packet.receiver_mode == "cw")
+			{
+				metadata["cw"] = makeCwMetadataJson(packet);
+			}
+			if (packet.fmcw.present || packet.receiver_mode == "fmcw")
+			{
+				metadata["fmcw"] = makeFmcwMetadataJson(packet);
+			}
+			return metadata;
 		}
 	}
 

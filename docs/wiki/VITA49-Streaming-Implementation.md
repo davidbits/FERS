@@ -7,7 +7,7 @@ This page is the implementation contract for the FERS VITA 49.2 UDP output backe
 - Packet family: ANSI/VITA 49.2-2017 (R2024).
 - Transport: raw VRT packets over UDP/IP; no VITA 49.1 wrapper.
 - Endpoint model: one configured destination `host:port`.
-- Stream model: one VRT Stream ID per FERS receiver.
+- Stream model: one VRT Stream ID per FERS receiver-mode stream.
 - Payload: complex Cartesian IQ, I then Q, signed 16-bit two's-complement, network byte order.
 - Timestamp model: TSI UTC and TSF real-time picoseconds; timestamp is the first sample in the packet.
 - Packet sizing: maximum UDP payload is 1400 bytes by default.
@@ -48,7 +48,9 @@ The CLI full-scale switch is required whenever `--vita49` is present. The API va
 
 ## Metadata Contract
 
-`fers_get_last_output_metadata_json` includes `vita49` only in VITA mode. The section contains endpoint, epoch, class ID, fixed full-scale, maximum UDP payload, queue depth, and a `streams` array. Each stream entry contains receiver ID/name, VRT Stream ID, sample rate, reference frequency, packets/samples emitted, socket-failed packets/samples, over-range count, late-packet count, context-packet count, and first/last Unix-picosecond timestamps.
+`fers_get_last_output_metadata_json` includes `vita49` only in VITA mode. The section contains endpoint, epoch, class ID, fixed full-scale, maximum UDP payload, queue depth, and a `streams` array. Each stream entry contains receiver ID/name, receiver mode, VRT Stream ID, sample rate, reference frequency, packets/samples emitted, socket-failed packets/samples, over-range count, late-packet count, context-packet count, and first/last VRT UTC timestamps.
+
+Context packet ASCII metadata includes `receiver.mode` and a structured `waveform` object for `pulsed`, `cw`, and `fmcw` streams. Mode-specific compatibility objects (`pulsed`, `cw`, `fmcw`) are also present.
 
 Current internal placeholder Class ID: `0xFA52530001000101`. This is not an assigned OUI and must stay documented in the ICD until replaced.
 

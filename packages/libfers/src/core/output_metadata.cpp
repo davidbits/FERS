@@ -281,6 +281,7 @@ namespace core
 			return {{"receiver_id", stream.receiver_id},
 					{"receiver_name", stream.receiver_name},
 					{"stream_id", stream.stream_id},
+					{"mode", stream.mode},
 					{"sample_rate", stream.sample_rate},
 					{"reference_frequency", stream.reference_frequency},
 					{"packets_emitted", stream.packets_emitted},

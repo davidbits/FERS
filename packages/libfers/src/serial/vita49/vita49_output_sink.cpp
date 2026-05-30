@@ -114,6 +114,7 @@ namespace serial::vita49
 			state.stats.receiver_id = stream.receiver_id;
 			state.stats.receiver_name = stream.receiver_name;
 			state.stats.stream_id = stream_id;
+			state.stats.mode = stream.mode.empty() ? "unknown" : stream.mode;
 			state.stats.sample_rate = stream.sample_rate;
 			state.stats.reference_frequency = stream.reference_frequency;
 			_streams.emplace(stream_id, std::move(state));

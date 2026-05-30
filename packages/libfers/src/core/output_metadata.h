@@ -142,6 +142,7 @@ namespace core
 		SimId receiver_id = 0; ///< Receiver SimId that owns the VRT stream.
 		std::string receiver_name; ///< Receiver display name.
 		std::uint32_t stream_id = 0; ///< Allocated 32-bit VRT Stream ID.
+		std::string mode = "unknown"; ///< Receiver mode token: pulsed, cw, fmcw, or unknown.
 		RealType sample_rate = 0.0; ///< Stream sample rate in hertz.
 		RealType reference_frequency = 0.0; ///< RF reference frequency in hertz.
 		std::uint64_t packets_emitted = 0; ///< Signal data packets emitted.

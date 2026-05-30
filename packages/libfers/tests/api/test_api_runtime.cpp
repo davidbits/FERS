@@ -444,6 +444,7 @@ TEST_CASE("VITA49 metadata section records runtime output config", "[api][runtim
 	stream.receiver_id = 10;
 	stream.receiver_name = "Rx";
 	stream.stream_id = 0x12345678u;
+	stream.mode = "pulsed";
 	stream.sample_rate = 100000.0;
 	stream.reference_frequency = 10000000.0;
 	stream.packets_emitted = 2930;
@@ -470,6 +471,7 @@ TEST_CASE("VITA49 metadata section records runtime output config", "[api][runtim
 	REQUIRE(vita49.at("streams").is_array());
 	REQUIRE(vita49.at("streams").size() == 1u);
 	const auto& json_stream = vita49.at("streams").front();
+	CHECK(json_stream.at("mode").get<std::string>() == "pulsed");
 	CHECK(json_stream.at("samples_emitted").get<std::uint64_t>() == 1000000ULL);
 	CHECK(json_stream.at("first_sample_time").get<double>() == 0.0);
 	CHECK(json_stream.at("end_sample_time").get<double>() == 10.0);

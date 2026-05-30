@@ -499,7 +499,7 @@ export const Vita49StreamingView = React.memo(function Vita49StreamingView() {
 
         const expected = deriveExpectedVita49Streams(scenarioState);
         if (expected.length === 0) {
-            showWarning('No CW/FMCW receiver streams are configured.');
+            showWarning('No receiver streams are configured.');
         }
 
         setMetadataExportPath(null);
@@ -845,7 +845,9 @@ export const Vita49StreamingView = React.memo(function Vita49StreamingView() {
                                                 variant="caption"
                                                 color="text.secondary"
                                             >
-                                                {row.platformName || row.mode}
+                                                {row.platformName
+                                                    ? `${row.platformName} / ${row.mode}`
+                                                    : row.mode}
                                             </Typography>
                                         </Stack>
                                     </TableCell>

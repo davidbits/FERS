@@ -1,0 +1,155 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE simulation SYSTEM "fers-xml.dtd">
+<simulation name="Vita49MixedModeScenario">
+    <parameters>
+        <starttime>0.0</starttime>
+        <endtime>0.02</endtime>
+        <rate>1.0e5</rate>
+        <simSamplingRate>1.0e6</simSamplingRate>
+        <randomseed>20260530</randomseed>
+        <adc_bits>12</adc_bits>
+        <origin latitude="-33.957652" longitude="18.4611991" altitude="111.01"/>
+        <coordinatesystem frame="ENU"/>
+    </parameters>
+
+    <antenna name="MixedIsotropicAntenna" pattern="isotropic">
+        <efficiency>1.0</efficiency>
+    </antenna>
+
+    <waveform name="MixedPulse">
+        <power>1000.0</power>
+        <carrier_frequency>10.0e9</carrier_frequency>
+        <pulsed_from_file filename="pulse.h5"/>
+    </waveform>
+
+    <waveform name="MixedCwTone">
+        <power>10.0</power>
+        <carrier_frequency>5.0e9</carrier_frequency>
+        <cw/>
+    </waveform>
+
+    <waveform name="MixedFmcwChirp">
+        <power>100.0</power>
+        <carrier_frequency>9.0e9</carrier_frequency>
+        <fmcw_linear_chirp direction="up">
+            <chirp_bandwidth>5.0e5</chirp_bandwidth>
+            <chirp_duration>1.0e-3</chirp_duration>
+            <chirp_period>1.0e-3</chirp_period>
+            <start_frequency_offset>-2.5e5</start_frequency_offset>
+            <chirp_count>20</chirp_count>
+        </fmcw_linear_chirp>
+    </waveform>
+
+    <timing name="PulseClock">
+        <frequency>10.0e9</frequency>
+    </timing>
+
+    <timing name="CwClock">
+        <frequency>5.0e9</frequency>
+    </timing>
+
+    <timing name="FmcwClock">
+        <frequency>9.0e9</frequency>
+    </timing>
+
+    <platform name="PulsedRadarPlatform">
+        <motionpath interpolation="static">
+            <positionwaypoint>
+                <x>0.0</x>
+                <y>0.0</y>
+                <altitude>0.0</altitude>
+                <time>0.0</time>
+            </positionwaypoint>
+        </motionpath>
+        <fixedrotation>
+            <startazimuth>0.0</startazimuth>
+            <startelevation>0.0</startelevation>
+            <azimuthrate>0.0</azimuthrate>
+            <elevationrate>0.0</elevationrate>
+        </fixedrotation>
+        <monostatic name="MixedPulsedRadar" antenna="MixedIsotropicAntenna" waveform="MixedPulse"
+                    timing="PulseClock" nodirect="true">
+            <pulsed_mode>
+                <prf>1000.0</prf>
+                <window_skip>1.0e-6</window_skip>
+                <window_length>20.0e-6</window_length>
+            </pulsed_mode>
+            <noise_temp>0.0</noise_temp>
+        </monostatic>
+    </platform>
+
+    <platform name="CwRadarPlatform">
+        <motionpath interpolation="static">
+            <positionwaypoint>
+                <x>250.0</x>
+                <y>0.0</y>
+                <altitude>0.0</altitude>
+                <time>0.0</time>
+            </positionwaypoint>
+        </motionpath>
+        <fixedrotation>
+            <startazimuth>180.0</startazimuth>
+            <startelevation>0.0</startelevation>
+            <azimuthrate>0.0</azimuthrate>
+            <elevationrate>0.0</elevationrate>
+        </fixedrotation>
+        <monostatic name="MixedCwRadar" antenna="MixedIsotropicAntenna" waveform="MixedCwTone"
+                    timing="CwClock" nodirect="true">
+            <cw_mode/>
+            <noise_temp>0.0</noise_temp>
+        </monostatic>
+    </platform>
+
+    <platform name="FmcwRadarPlatform">
+        <motionpath interpolation="static">
+            <positionwaypoint>
+                <x>0.0</x>
+                <y>250.0</y>
+                <altitude>0.0</altitude>
+                <time>0.0</time>
+            </positionwaypoint>
+        </motionpath>
+        <fixedrotation>
+            <startazimuth>270.0</startazimuth>
+            <startelevation>0.0</startelevation>
+            <azimuthrate>0.0</azimuthrate>
+            <elevationrate>0.0</elevationrate>
+        </fixedrotation>
+        <monostatic name="MixedFmcwRadar" antenna="MixedIsotropicAntenna" waveform="MixedFmcwChirp"
+                    timing="FmcwClock" nodirect="true">
+            <fmcw_mode dechirp_mode="physical">
+                <dechirp_reference source="attached"/>
+                <if_sample_rate>1.0e5</if_sample_rate>
+            </fmcw_mode>
+            <noise_temp>0.0</noise_temp>
+        </monostatic>
+    </platform>
+
+    <platform name="MixedTargetPlatform">
+        <motionpath interpolation="linear">
+            <positionwaypoint>
+                <x>120.0</x>
+                <y>120.0</y>
+                <altitude>50.0</altitude>
+                <time>0.0</time>
+            </positionwaypoint>
+            <positionwaypoint>
+                <x>122.0</x>
+                <y>118.0</y>
+                <altitude>50.0</altitude>
+                <time>0.02</time>
+            </positionwaypoint>
+        </motionpath>
+        <fixedrotation>
+            <startazimuth>0.0</startazimuth>
+            <startelevation>0.0</startelevation>
+            <azimuthrate>0.0</azimuthrate>
+            <elevationrate>0.0</elevationrate>
+        </fixedrotation>
+        <target name="MixedPointTarget">
+            <rcs type="isotropic">
+                <value>1.0</value>
+            </rcs>
+        </target>
+    </platform>
+</simulation>

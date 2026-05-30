@@ -91,6 +91,8 @@ namespace serial::vita49
 		ContextFlagStreamOpen = 1u << 3u,
 		ContextFlagStreamClose = 1u << 4u,
 		ContextFlagFmcwMetadataPresent = 1u << 5u,
+		ContextFlagCwMetadataPresent = 1u << 6u,
+		ContextFlagPulsedMetadataPresent = 1u << 7u,
 	};
 
 	struct Timestamp
@@ -131,6 +133,8 @@ namespace serial::vita49
 		std::string receiver_mode;
 		core::ReceiverStreamDescriptor::CoordinateContext coordinate;
 		core::ReceiverStreamDescriptor::PlatformState initial_platform_state;
+		core::ReceiverStreamDescriptor::PulsedContext pulsed;
+		core::ReceiverStreamDescriptor::CwContext cw;
 		core::ReceiverStreamDescriptor::FmcwContext fmcw;
 	};
 

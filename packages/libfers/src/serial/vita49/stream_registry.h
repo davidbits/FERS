@@ -26,6 +26,7 @@ namespace serial::vita49
 		{
 			SimId receiver_id = 0;
 			std::string receiver_name;
+			std::string mode;
 
 			[[nodiscard]] bool operator==(const Key& other) const noexcept;
 		};

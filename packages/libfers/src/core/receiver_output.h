@@ -71,6 +71,31 @@ namespace core
 			std::string dechirp_reference_waveform_name;
 		};
 
+		struct PulsedContext
+		{
+			bool present = false;
+			RealType window_length = 0.0;
+			RealType window_prf = 0.0;
+			RealType window_skip = 0.0;
+			std::uint64_t window_count = 0;
+			SimId waveform_id = 0;
+			std::string waveform_name;
+			RealType carrier_frequency = 0.0;
+			RealType power = 0.0;
+			RealType pulse_width = 0.0;
+			RealType native_sample_rate = 0.0;
+			std::uint64_t native_sample_count = 0;
+		};
+
+		struct CwContext
+		{
+			bool present = false;
+			SimId waveform_id = 0;
+			std::string waveform_name;
+			RealType carrier_frequency = 0.0;
+			RealType power = 0.0;
+		};
+
 		SimId receiver_id = 0;
 		std::string receiver_name;
 		std::string mode;
@@ -83,6 +108,8 @@ namespace core
 		unsigned adc_bits = 0;
 		CoordinateContext coordinate;
 		PlatformState initial_platform_state;
+		PulsedContext pulsed;
+		CwContext cw;
 		FmcwContext fmcw;
 	};
 
@@ -104,6 +131,7 @@ namespace core
 		SimId receiver_id = 0;
 		std::string receiver_name;
 		std::uint32_t stream_id = 0;
+		std::string mode = "unknown";
 		RealType sample_rate = 0.0;
 		RealType reference_frequency = 0.0;
 		std::uint64_t packets_emitted = 0;
