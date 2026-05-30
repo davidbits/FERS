@@ -26,8 +26,8 @@ namespace serial::vita49
 		{
 #if defined(__i386__) || defined(__x86_64__)
 			_mm_pause();
-#elif defined(__aarch64__) || defined(__arm__)
-			__builtin_arm_yield();
+#elif defined(__aarch64__) && (defined(__GNUC__) || defined(__clang__))
+			__asm__ __volatile__("yield" ::: "memory");
 #else
 			std::atomic_signal_fence(std::memory_order_seq_cst);
 #endif

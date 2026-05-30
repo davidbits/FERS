@@ -199,6 +199,8 @@ fn main() {
         println!("cargo:rustc-link-lib=c++");
     } else if target.contains("linux") {
         println!("cargo:rustc-link-lib=stdc++");
+    } else if target.contains("windows") {
+        println!("cargo:rustc-link-lib=ws2_32");
     }
 
     // --- 4. Generate Rust bindings for the C++ API ---

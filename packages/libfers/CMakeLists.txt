@@ -221,6 +221,10 @@ set(FERS_NATIVE_LINK_DEPENDENCIES
 	${HDF5_HL_LIBRARIES}
 )
 
+if (WIN32)
+	list(APPEND FERS_NATIVE_LINK_DEPENDENCIES ws2_32)
+endif ()
+
 # Roots for the Rust static-link manifest. This is deliberately distinct from
 # FERS_NATIVE_LINK_DEPENDENCIES: the manifest must list libraries in the order a
 # static linker expects (dependents before their dependencies), and it must
