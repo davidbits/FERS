@@ -253,15 +253,17 @@ TEST_CASE("Hdf5OutputSink writes streaming blocks through the receiver output co
 	sink.closeStream(stream_id);
 	sink.finalize();
 
-	HighFive::File file(output_path.string(), HighFive::File::ReadOnly);
-	const auto i_data = readDataset(file, "I_data");
-	const auto q_data = readDataset(file, "Q_data");
+	{
+		HighFive::File file(output_path.string(), HighFive::File::ReadOnly);
+		const auto i_data = readDataset(file, "I_data");
+		const auto q_data = readDataset(file, "Q_data");
 
-	REQUIRE(i_data.size() == 2u);
-	REQUIRE(q_data.size() == 2u);
-	REQUIRE_THAT(i_data[0], WithinAbs(1.0, 1e-12));
-	REQUIRE_THAT(i_data[1], WithinAbs(0.5, 1e-12));
-	REQUIRE_THAT(q_data[1], WithinAbs(-0.5, 1e-12));
+		REQUIRE(i_data.size() == 2u);
+		REQUIRE(q_data.size() == 2u);
+		REQUIRE_THAT(i_data[0], WithinAbs(1.0, 1e-12));
+		REQUIRE_THAT(i_data[1], WithinAbs(0.5, 1e-12));
+		REQUIRE_THAT(q_data[1], WithinAbs(-0.5, 1e-12));
+	}
 
 	std::filesystem::remove_all(out_dir);
 }

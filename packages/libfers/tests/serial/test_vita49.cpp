@@ -7,10 +7,12 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_string.hpp>
 #include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <future>
 #include <iterator>
 #include <memory>
+#include <mutex>
 #include <nlohmann/json.hpp>
 #include <stdexcept>
 #include <string>
@@ -89,6 +91,51 @@ namespace
 		bool opened = false;
 		bool closed = false;
 		std::vector<std::vector<std::uint8_t>> sent;
+	};
+
+	class BlockingFirstSendRecordingSender final : public serial::vita49::DatagramSender
+	{
+	public:
+		void open(const std::string&, std::uint16_t) override { opened = true; }
+
+		void send(const std::span<const std::uint8_t> bytes) override
+		{
+			std::unique_lock lock(mutex);
+			sent.emplace_back(bytes.begin(), bytes.end());
+			if (!first_send_entered)
+			{
+				first_send_entered = true;
+				cv.notify_all();
+				cv.wait(lock, [this] { return release_first_send; });
+			}
+		}
+
+		void close() noexcept override { closed = true; }
+
+		bool waitUntilFirstSendEntered()
+		{
+			std::unique_lock lock(mutex);
+			return cv.wait_for(lock, std::chrono::seconds(1), [this] { return first_send_entered; });
+		}
+
+		void releaseFirstSend()
+		{
+			{
+				std::lock_guard lock(mutex);
+				release_first_send = true;
+			}
+			cv.notify_all();
+		}
+
+		bool opened = false;
+		bool closed = false;
+		std::vector<std::vector<std::uint8_t>> sent;
+
+	private:
+		std::mutex mutex;
+		std::condition_variable cv;
+		bool first_send_entered = false;
+		bool release_first_send = false;
 	};
 
 	class TimedRecordingSender final : public serial::vita49::DatagramSender
@@ -503,7 +550,7 @@ TEST_CASE("VITA paced sender blocks at queue depth instead of dropping", "[seria
 	using namespace serial::vita49;
 	using namespace std::chrono_literals;
 
-	auto recording = std::make_unique<RecordingSender>();
+	auto recording = std::make_unique<BlockingFirstSendRecordingSender>();
 	auto* recording_raw = recording.get();
 	PacedSender sender(std::move(recording), 1);
 	sender.open("127.0.0.1", 1);
@@ -512,17 +559,20 @@ TEST_CASE("VITA paced sender blocks at queue depth instead of dropping", "[seria
 	const SerializedPacket first{.bytes = {0, 0, 0, 1},
 								 .stream_id = 9,
 								 .sample_count = 10,
-								 .first_sample_time = 0.08,
+								 .first_sample_time = 0.0,
 								 .data_packet = true,
 								 .timestamp = Timestamp{}};
 	const SerializedPacket second{.bytes = {0, 0, 0, 2},
 								  .stream_id = 9,
 								  .sample_count = 12,
-								  .first_sample_time = 0.08,
+								  .first_sample_time = 0.0,
 								  .data_packet = true,
 								  .timestamp = Timestamp{}};
 
 	const auto first_result = sender.enqueue(first);
+	REQUIRE(first_result.enqueued);
+	REQUIRE_FALSE(first_result.dropped);
+	REQUIRE(recording_raw->waitUntilFirstSendEntered());
 	std::atomic_bool second_enqueue_finished = false;
 	auto second_result_future = std::async(std::launch::async,
 										   [&]
@@ -532,11 +582,11 @@ TEST_CASE("VITA paced sender blocks at queue depth instead of dropping", "[seria
 											   return result;
 										   });
 	std::this_thread::sleep_for(20ms);
+	const auto second_finished_before_release = second_enqueue_finished.load();
+	recording_raw->releaseFirstSend();
 
 	REQUIRE(recording_raw->opened);
-	REQUIRE(first_result.enqueued);
-	REQUIRE_FALSE(first_result.dropped);
-	REQUIRE_FALSE(second_enqueue_finished.load());
+	REQUIRE_FALSE(second_finished_before_release);
 	const auto second_result = second_result_future.get();
 	REQUIRE(second_result.enqueued);
 	REQUIRE_FALSE(second_result.dropped);
