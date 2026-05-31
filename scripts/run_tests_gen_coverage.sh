@@ -7,6 +7,9 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 readonly SCRIPT_DIR
 readonly REPO_ROOT="${SCRIPT_DIR}/.."
 readonly COVERAGE_DIR="${REPO_ROOT}/build/coverage"
+# lcov suppresses a warning category only when the category appears twice.
+readonly LCOV_IGNORE_ERRORS="source,gcov,negative,inconsistent,inconsistent"
+readonly GENHTML_IGNORE_ERRORS="source,inconsistent,inconsistent"
 
 TESTS_ONLY=false
 
@@ -64,6 +67,10 @@ fi
 
 cd "$COVERAGE_DIR"
 
-lcov --capture --directory . --output-file coverage.info --ignore-errors source,gcov,negative
-lcov --remove coverage.info '/usr/*' '*/tests/*' '*/vcpkg_installed/*' --output-file coverage_filtered.info
-genhtml coverage_filtered.info --output-directory coverage_report --ignore-errors source
+lcov --capture --directory . --output-file coverage.info \
+	--rc geninfo_unexecuted_blocks=1 \
+	--ignore-errors "$LCOV_IGNORE_ERRORS"
+lcov --remove coverage.info '/usr/*' '*/tests/*' '*/vcpkg_installed/*' --output-file coverage_filtered.info \
+	--ignore-errors "$LCOV_IGNORE_ERRORS"
+genhtml coverage_filtered.info --output-directory coverage_report \
+	--ignore-errors "$GENHTML_IGNORE_ERRORS"

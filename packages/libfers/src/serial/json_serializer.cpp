@@ -1627,20 +1627,6 @@ namespace
 		}
 		world.resolveReceiverDechirpReferences();
 
-		const RealType start_time = params::startTime();
-		const RealType end_time = params::endTime();
-		const RealType dt_sim = 1.0 / (params::rate() * params::oversampleRatio());
-		const auto num_samples = static_cast<size_t>(std::ceil((end_time - start_time) / dt_sim));
-
-		for (const auto& receiver : world.getReceivers())
-		{
-			if (receiver->getMode() == radar::OperationMode::CW_MODE ||
-				receiver->getMode() == radar::OperationMode::FMCW_MODE)
-			{
-				receiver->prepareStreamingData(receiver->hasFmcwIfSampleRate() ? 0 : num_samples);
-			}
-		}
-
 		world.scheduleInitialEvents();
 	}
 }

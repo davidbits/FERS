@@ -12,10 +12,14 @@
 #include "arg_parser.h"
 
 #include <algorithm>
+#include <cctype>
+#include <cmath>
+#include <cstdint>
 #include <exception>
 #include <filesystem>
 #include <format>
 #include <iostream>
+#include <limits>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -53,6 +57,174 @@ namespace
 			return it->second;
 		}
 		return std::nullopt;
+	}
+
+	bool isUnsignedDecimal(const std::string& value) noexcept
+	{
+		return !value.empty() &&
+			std::ranges::all_of(value, [](const unsigned char ch) { return std::isdigit(ch) != 0; });
+	}
+
+	std::expected<std::uint64_t, std::string> parseUnsigned64(const std::string& value,
+															  const std::string& field_name) noexcept
+	{
+		if (!isUnsignedDecimal(value))
+		{
+			return std::unexpected(field_name + " must be an unsigned decimal integer");
+		}
+		try
+		{
+			std::size_t consumed = 0;
+			const auto parsed = std::stoull(value, &consumed, 10);
+			if (consumed != value.size())
+			{
+				return std::unexpected(field_name + " must be an unsigned decimal integer");
+			}
+			return static_cast<std::uint64_t>(parsed);
+		}
+		catch (const std::exception&)
+		{
+			return std::unexpected(field_name + " is out of range");
+		}
+	}
+
+	std::expected<double, std::string> parsePositiveReal(const std::string& value,
+														 const std::string& field_name) noexcept
+	{
+		try
+		{
+			std::size_t consumed = 0;
+			const double parsed = std::stod(value, &consumed);
+			if (consumed != value.size() || !std::isfinite(parsed) || parsed <= 0.0)
+			{
+				return std::unexpected(field_name + " must be a positive real number");
+			}
+			return parsed;
+		}
+		catch (const std::exception&)
+		{
+			return std::unexpected(field_name + " must be a positive real number");
+		}
+	}
+
+	std::expected<void, std::string> handleVita49Endpoint(const std::string& value, core::Config& config) noexcept
+	{
+		const std::size_t separator = value.rfind(':');
+		if (separator == std::string::npos || separator == 0 || separator + 1 == value.size())
+		{
+			return std::unexpected("Invalid VITA49 endpoint: expected host:port");
+		}
+
+		const std::string host = value.substr(0, separator);
+		const std::string port_text = value.substr(separator + 1);
+		if (host.find(':') != std::string::npos)
+		{
+			return std::unexpected("Invalid VITA49 endpoint: expected host:port");
+		}
+
+		const auto parsed_port = parseUnsigned64(port_text, "VITA49 port");
+		if (!parsed_port)
+		{
+			return std::unexpected(parsed_port.error());
+		}
+		if (*parsed_port == 0 || *parsed_port > std::numeric_limits<std::uint16_t>::max())
+		{
+			return std::unexpected("VITA49 port must be in the range 1..65535");
+		}
+
+		config.vita49_enabled = true;
+		config.vita49_host = host;
+		config.vita49_port = static_cast<std::uint16_t>(*parsed_port);
+		return {};
+	}
+
+	std::expected<void, std::string> handleVita49Fullscale(const std::string& value, core::Config& config) noexcept
+	{
+		const auto parsed = parsePositiveReal(value, "VITA49 fullscale");
+		if (!parsed)
+		{
+			return std::unexpected(parsed.error());
+		}
+		config.vita49_fullscale = *parsed;
+		return {};
+	}
+
+	std::expected<void, std::string> handleVita49Epoch(const std::string& value, core::Config& config) noexcept
+	{
+		constexpr std::uint64_t nanoseconds_per_second = 1'000'000'000ULL;
+		constexpr std::uint64_t max_vrt_utc_epoch_ns =
+			static_cast<std::uint64_t>(std::numeric_limits<std::uint32_t>::max()) * nanoseconds_per_second +
+			(nanoseconds_per_second - 1ULL);
+		const auto parsed = parseUnsigned64(value, "VITA49 epoch");
+		if (!parsed)
+		{
+			return std::unexpected(parsed.error());
+		}
+		if (*parsed > max_vrt_utc_epoch_ns)
+		{
+			return std::unexpected("VITA49 epoch must fit the VRT 32-bit UTC seconds timestamp field");
+		}
+		config.vita49_epoch_unix_nanoseconds = *parsed;
+		return {};
+	}
+
+	std::expected<void, std::string> handleVita49MaxUdpPayload(const std::string& value, core::Config& config) noexcept
+	{
+		const auto parsed = parseUnsigned64(value, "VITA49 max UDP payload");
+		if (!parsed)
+		{
+			return std::unexpected(parsed.error());
+		}
+		if (*parsed < 64u || *parsed > 65'507u)
+		{
+			return std::unexpected("VITA49 max UDP payload must be between 64 and 65507 bytes");
+		}
+		config.vita49_max_udp_payload = static_cast<std::uint16_t>(*parsed);
+		return {};
+	}
+
+	std::expected<void, std::string> handleVita49QueueDepth(const std::string& value, core::Config& config) noexcept
+	{
+		const auto parsed = parseUnsigned64(value, "VITA49 queue depth");
+		if (!parsed)
+		{
+			return std::unexpected(parsed.error());
+		}
+		if (*parsed == 0u || *parsed > std::numeric_limits<std::uint32_t>::max())
+		{
+			return std::unexpected("VITA49 queue depth must be in the range 1..4294967295");
+		}
+		config.vita49_queue_depth = static_cast<std::uint32_t>(*parsed);
+		return {};
+	}
+
+	std::expected<void, std::string> validateVita49Options(const core::Config& config) noexcept
+	{
+		if (!config.vita49_enabled)
+		{
+			if (config.vita49_fullscale.has_value())
+			{
+				return std::unexpected("--vita49-fullscale requires --vita49");
+			}
+			if (config.vita49_epoch_unix_nanoseconds.has_value())
+			{
+				return std::unexpected("--vita49-epoch requires --vita49");
+			}
+			if (config.vita49_max_udp_payload.has_value())
+			{
+				return std::unexpected("--vita49-max-udp-payload requires --vita49");
+			}
+			if (config.vita49_queue_depth.has_value())
+			{
+				return std::unexpected("--vita49-queue-depth requires --vita49");
+			}
+			return {};
+		}
+		if (!config.vita49_fullscale.has_value())
+		{
+			return std::unexpected("--vita49-fullscale is required when --vita49 is used");
+		}
+		return {};
 	}
 
 	/**
@@ -217,6 +389,13 @@ Options:
                           name with a .kml extension in the output directory.
   --out-dir=<dir>         Set the output directory for simulation results and default KML output.
                           Defaults to the directory containing the script file.
+  --vita49 host:port      Stream receiver output as the FERS VITA 49.2 UDP profile.
+  --vita49-fullscale <x>  Set required positive fixed ADC full-scale for VITA int16 IQ output.
+  --vita49-epoch <ns>     Set optional deterministic VITA epoch as Unix nanoseconds.
+  --vita49-max-udp-payload <bytes>
+                          Set optional VITA UDP payload cap, 64..65507 bytes.
+  --vita49-queue-depth <packets>
+                          Set optional VITA sender queue depth, greater than zero.
   --log-level=<level>     Set the logging level (TRACE, DEBUG, INFO, WARNING, ERROR, FATAL)
   --log-file=<file>       Log output to the specified .log or .txt file as well as the console.
   -n=<threads>            Number of threads to use
@@ -259,7 +438,84 @@ Make sure the script file follows the correct format to avoid errors.
 
 		for (int i = 1; i < argc; ++i)
 		{
-			if (const auto result = handleArgument(argv[i], config, script_file_set, argv[0]); !result)
+			const std::string arg = argv[i];
+			const auto require_value = [&](const std::string& option) -> std::expected<std::string, std::string>
+			{
+				if (i + 1 >= argc)
+				{
+					return std::unexpected(option + " requires a value");
+				}
+				++i;
+				return std::string{argv[i]};
+			};
+
+			if (arg == "--vita49")
+			{
+				const auto value = require_value("--vita49");
+				if (!value)
+				{
+					return std::unexpected(value.error());
+				}
+				if (const auto result = handleVita49Endpoint(*value, config); !result)
+				{
+					return std::unexpected(result.error());
+				}
+				continue;
+			}
+			if (arg == "--vita49-fullscale")
+			{
+				const auto value = require_value("--vita49-fullscale");
+				if (!value)
+				{
+					return std::unexpected(value.error());
+				}
+				if (const auto result = handleVita49Fullscale(*value, config); !result)
+				{
+					return std::unexpected(result.error());
+				}
+				continue;
+			}
+			if (arg == "--vita49-epoch")
+			{
+				const auto value = require_value("--vita49-epoch");
+				if (!value)
+				{
+					return std::unexpected(value.error());
+				}
+				if (const auto result = handleVita49Epoch(*value, config); !result)
+				{
+					return std::unexpected(result.error());
+				}
+				continue;
+			}
+			if (arg == "--vita49-max-udp-payload")
+			{
+				const auto value = require_value("--vita49-max-udp-payload");
+				if (!value)
+				{
+					return std::unexpected(value.error());
+				}
+				if (const auto result = handleVita49MaxUdpPayload(*value, config); !result)
+				{
+					return std::unexpected(result.error());
+				}
+				continue;
+			}
+			if (arg == "--vita49-queue-depth")
+			{
+				const auto value = require_value("--vita49-queue-depth");
+				if (!value)
+				{
+					return std::unexpected(value.error());
+				}
+				if (const auto result = handleVita49QueueDepth(*value, config); !result)
+				{
+					return std::unexpected(result.error());
+				}
+				continue;
+			}
+
+			if (const auto result = handleArgument(arg, config, script_file_set, argv[0]); !result)
 			{
 				return std::unexpected(result.error());
 			}
@@ -268,6 +524,10 @@ Make sure the script file follows the correct format to avoid errors.
 		if (!script_file_set)
 		{
 			return std::unexpected("No script file provided.");
+		}
+		if (const auto result = validateVita49Options(config); !result)
+		{
+			return std::unexpected(result.error());
 		}
 		return config;
 	}

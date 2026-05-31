@@ -1,10 +1,13 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 #include <cmath>
+#include <cstdint>
+#include <limits>
 #include <memory>
 #include <numeric>
 #include <random>
 #include <span>
+#include <stdexcept>
 #include <vector>
 
 #include "core/config.h"
@@ -241,4 +244,36 @@ TEST_CASE("quantizeAndScaleWindow leaves zeros unchanged", "[processing][signal]
 	REQUIRE_THAT(window[0].imag(), WithinAbs(0.0, 0.0));
 	REQUIRE_THAT(window[1].real(), WithinAbs(0.0, 0.0));
 	REQUIRE_THAT(window[1].imag(), WithinAbs(0.0, 0.0));
+}
+
+TEST_CASE("scaleToInt16FixedFullscale uses configured full-scale without future normalization",
+		  "[processing][signal][vita49]")
+{
+	const std::vector<ComplexType> samples = {
+		ComplexType{0.5, -0.5},
+		ComplexType{1.0, -1.0},
+		ComplexType{2.0, -2.0},
+		ComplexType{0.25, 0.0},
+	};
+
+	const auto result = processing::scaleToInt16FixedFullscale(samples, 1.0);
+
+	REQUIRE(result.samples.size() == samples.size());
+	REQUIRE(result.clipped_sample_count == 1u);
+	REQUIRE(result.samples[0].i == 16384);
+	REQUIRE(result.samples[0].q == -16384);
+	REQUIRE(result.samples[1].i == std::numeric_limits<std::int16_t>::max());
+	REQUIRE(result.samples[1].q == std::numeric_limits<std::int16_t>::min());
+	REQUIRE(result.samples[2].i == std::numeric_limits<std::int16_t>::max());
+	REQUIRE(result.samples[2].q == std::numeric_limits<std::int16_t>::min());
+	REQUIRE(result.samples[3].i == 8192);
+	REQUIRE(result.samples[3].q == 0);
+}
+
+TEST_CASE("scaleToInt16FixedFullscale rejects invalid full-scale", "[processing][signal][vita49]")
+{
+	const std::vector<ComplexType> samples = {ComplexType{1.0, 0.0}};
+
+	REQUIRE_THROWS_AS(processing::scaleToInt16FixedFullscale(samples, 0.0), std::invalid_argument);
+	REQUIRE_THROWS_AS(processing::scaleToInt16FixedFullscale(samples, -1.0), std::invalid_argument);
 }

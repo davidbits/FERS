@@ -165,6 +165,16 @@ namespace processing::pipeline
 	RealType applyDownsamplingAndQuantization(std::vector<ComplexType>& buffer);
 
 	/**
+	 * @brief Downsamples an IQ buffer to the configured output rate without quantization.
+	 *
+	 * This is used by streaming output sinks that must apply their own fixed-scale
+	 * quantization after all producer-side physics, interference, and noise are complete.
+	 *
+	 * @param buffer The I/Q buffer to downsample in place when oversampling is configured.
+	 */
+	void applyDownsampling(std::vector<ComplexType>& buffer);
+
+	/**
 	 * @brief Exports a finalized streaming IQ buffer to an HDF5 file.
 	 *
 	 * Creates an HDF5 file, splits the complex buffer into real (I) and imaginary (Q)

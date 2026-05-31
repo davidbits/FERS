@@ -24,6 +24,9 @@ Windows:
 | `--kml` | Export KML and do not run the simulation. |
 | `--kml=<file>` | Export KML to a specific file and do not run the simulation. |
 | `--no-validate` | Skip XML schema validation before loading. |
+| `--vita49 host:port` | Stream receiver output as the FERS VITA 49.2 UDP profile. |
+| `--vita49-fullscale <positive-real>` | Required with `--vita49`; fixed ADC full-scale for int16 IQ scaling. |
+| `--vita49-epoch <unix-nanoseconds>` | Optional deterministic VITA stream epoch for replay. |
 | `--log-level=<level>` | Set logging detail. Use `TRACE`, `DEBUG`, `INFO`, `WARNING`, `ERROR`, or `FATAL`. |
 | `--log-file=<file>` | Write logs to a `.log` or `.txt` file as well as the terminal. |
 | `-n=<threads>` | Choose how many worker threads to use. |
@@ -51,6 +54,18 @@ Export KML for a scenario:
 
 ```bash
 ./build/release/packages/fers-cli/fers-cli examples/fmcw_monostatic_dechirp/example.fersxml --out-dir=./results --kml
+```
+
+Stream receiver output as VITA 49.2 UDP:
+
+```bash
+./build/release/packages/fers-cli/fers-cli scenario.fersxml --out-dir=./results --vita49 127.0.0.1:4991 --vita49-fullscale 1.0
+```
+
+Use a deterministic replay epoch:
+
+```bash
+./build/release/packages/fers-cli/fers-cli scenario.fersxml --vita49 127.0.0.1:4991 --vita49-fullscale 1.0 --vita49-epoch 1700000000123456789
 ```
 
 ## Choosing Thread Count
@@ -90,7 +105,10 @@ It returns `1` for argument errors, scenario loading errors, output-directory er
 `--out-dir` controls:
 
 - HDF5 result files from simulation runs.
+- Run metadata, logs, and default KML paths for VITA 49.2 runs.
 - The default location for KML when `--kml` is used without a file path.
+
+`.fersxml` files remain scenario descriptions. They do not select VITA/network output; use the runtime switches above.
 
 Examples:
 

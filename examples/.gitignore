@@ -2,3 +2,7 @@
 *.png
 *.kml
 *_metadata.json
+*_capture.jsonl
+*_run.json
+*_analysis_summary.json
+*_analysis.txt

@@ -265,6 +265,67 @@ namespace core
 			return result;
 		}
 
+		/// Converts one VITA stream metadata entry to JSON.
+		nlohmann::json vita49StreamToJson(const Vita49StreamMetadata& stream)
+		{
+			auto timestampToJson = [](const std::optional<Vita49Timestamp>& timestamp) -> nlohmann::json
+			{
+				if (!timestamp.has_value())
+				{
+					return nullptr;
+				}
+				return {{"integer_seconds", timestamp->integer_seconds},
+						{"fractional_picoseconds", timestamp->fractional_picoseconds}};
+			};
+
+			return {{"receiver_id", stream.receiver_id},
+					{"receiver_name", stream.receiver_name},
+					{"stream_id", stream.stream_id},
+					{"mode", stream.mode},
+					{"sample_rate", stream.sample_rate},
+					{"reference_frequency", stream.reference_frequency},
+					{"packets_emitted", stream.packets_emitted},
+					{"samples_emitted", stream.samples_emitted},
+					{"packets_dropped", stream.packets_dropped},
+					{"samples_dropped", stream.samples_dropped},
+					{"over_range_count", stream.over_range_count},
+					{"late_packet_count", stream.late_packet_count},
+					{"context_packet_count", stream.context_packet_count},
+					{"first_sample_time",
+					 stream.first_sample_time.has_value() ? nlohmann::json(*stream.first_sample_time)
+														  : nlohmann::json(nullptr)},
+					{"end_sample_time",
+					 stream.end_sample_time.has_value() ? nlohmann::json(*stream.end_sample_time)
+														: nlohmann::json(nullptr)},
+					{"first_timestamp", timestampToJson(stream.first_timestamp)},
+					{"end_timestamp", timestampToJson(stream.end_timestamp)}};
+		}
+
+		/// Converts VITA output metadata to JSON.
+		nlohmann::json vita49ToJson(const Vita49OutputMetadata& vita49)
+		{
+			nlohmann::json streams = nlohmann::json::array();
+			for (const auto& stream : vita49.streams)
+			{
+				streams.push_back(vita49StreamToJson(stream));
+			}
+
+			nlohmann::json result = {{"endpoint", vita49.endpoint_host + ":" + std::to_string(vita49.endpoint_port)},
+									 {"endpoint_host", vita49.endpoint_host},
+									 {"endpoint_port", vita49.endpoint_port},
+									 {"epoch_unix_nanoseconds", nullptr},
+									 {"class_id", vita49.class_id},
+									 {"adc_fullscale", vita49.adc_fullscale},
+									 {"max_udp_payload", vita49.max_udp_payload},
+									 {"queue_depth", vita49.queue_depth},
+									 {"streams", streams}};
+			if (vita49.epoch_unix_nanoseconds.has_value())
+			{
+				result["epoch_unix_nanoseconds"] = std::to_string(*vita49.epoch_unix_nanoseconds);
+			}
+			return result;
+		}
+
 		/// Converts a full output metadata snapshot to JSON.
 		nlohmann::json metadataToJson(const OutputMetadata& metadata)
 		{
@@ -308,6 +369,10 @@ namespace core
 				result["sampling_rate"] = nullptr;
 				result["sampling_rates"] = file_sampling_rates;
 			}
+			if (metadata.vita49.has_value())
+			{
+				result["vita49"] = vita49ToJson(*metadata.vita49);
+			}
 			return result;
 		}
 	}
@@ -340,4 +405,14 @@ namespace core
 	}
 
 	std::string outputMetadataToJsonString(const OutputMetadata& metadata) { return metadataToJson(metadata).dump(2); }
+
+	Vita49OutputMetadata vita49MetadataFromConfig(const Vita49OutputConfig& config)
+	{
+		return Vita49OutputMetadata{.endpoint_host = config.host,
+									.endpoint_port = config.port,
+									.epoch_unix_nanoseconds = config.epoch_unix_nanoseconds,
+									.adc_fullscale = config.adc_fullscale,
+									.max_udp_payload = config.max_udp_payload,
+									.queue_depth = config.queue_depth};
+	}
 }

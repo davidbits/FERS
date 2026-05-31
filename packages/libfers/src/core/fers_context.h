@@ -9,6 +9,7 @@
 #include <random>
 #include <utility>
 
+#include "output_config.h"
 #include "output_metadata.h"
 #include "world.h"
 
@@ -76,6 +77,16 @@ public:
 	[[nodiscard]] const std::string& getOutputDir() const noexcept { return _output_dir; }
 
 	/**
+	 * @brief Sets the runtime output configuration.
+	 */
+	void setOutputConfig(core::OutputConfig config) { _output_config = std::move(config); }
+
+	/**
+	 * @brief Gets the runtime output configuration.
+	 */
+	[[nodiscard]] const core::OutputConfig& getOutputConfig() const noexcept { return _output_config; }
+
+	/**
 	 * @brief Stores metadata from the most recent simulation run.
 	 * @param metadata The metadata snapshot to store.
 	 */
@@ -106,6 +117,9 @@ private:
 
 	/// Output directory for the simulation files
 	std::string _output_dir = ".";
+
+	/// Runtime output selection and transport-specific settings.
+	core::OutputConfig _output_config;
 
 	/// Metadata from the most recent simulation output.
 	core::OutputMetadata _last_output_metadata;

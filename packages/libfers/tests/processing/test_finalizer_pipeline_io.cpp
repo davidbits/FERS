@@ -4,6 +4,7 @@
 #include <chrono>
 #include <filesystem>
 #include <highfive/highfive.hpp>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -92,6 +93,42 @@ TEST_CASE("applyDownsamplingAndQuantization preserves low-frequency oversampled 
 	const RealType normalized_correlation = std::abs(correlation) / std::sqrt(output_energy * reference_energy);
 
 	REQUIRE(normalized_correlation > 0.98);
+}
+
+TEST_CASE("DownsamplingSink matches whole-buffer downsample across chunk boundaries", "[processing][finalizer][io]")
+{
+	ParamGuard guard;
+	params::params.filter_length = 8;
+	params::setOversampleRatio(2);
+
+	std::vector<ComplexType> input(257);
+	for (std::size_t i = 0; i < input.size(); ++i)
+	{
+		const RealType phase = 2.0 * PI * 0.035 * static_cast<RealType>(i);
+		input[i] = ComplexType{std::cos(phase), std::sin(phase)};
+	}
+
+	const auto whole = fers_signal::downsample(input);
+	fers_signal::DownsamplingSink sink;
+	sink.consume(std::span<const ComplexType>(input.data(), 31));
+	auto first = sink.takeOutput();
+	sink.consume(std::span<const ComplexType>(input.data() + 31, 113));
+	auto second = sink.takeOutput();
+	sink.consume(std::span<const ComplexType>(input.data() + 144, input.size() - 144));
+	sink.finish();
+	auto third = sink.takeOutput();
+
+	std::vector<ComplexType> chunked;
+	chunked.insert(chunked.end(), first.begin(), first.end());
+	chunked.insert(chunked.end(), second.begin(), second.end());
+	chunked.insert(chunked.end(), third.begin(), third.end());
+
+	REQUIRE(chunked.size() == whole.size());
+	for (std::size_t i = 0; i < whole.size(); ++i)
+	{
+		REQUIRE_THAT(chunked[i].real(), WithinAbs(whole[i].real(), 1e-12));
+		REQUIRE_THAT(chunked[i].imag(), WithinAbs(whole[i].imag(), 1e-12));
+	}
 }
 
 TEST_CASE("applyDownsamplingAndQuantization fails fast when oversample ratio exceeds fixed-filter limit",

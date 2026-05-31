@@ -34,7 +34,7 @@ namespace serial::fmcw_validation
 
 			const double estimated_gib = static_cast<double>(estimated_bytes) / (1024.0 * 1024.0 * 1024.0);
 			LOG(logging::Level::WARNING,
-				"{} will allocate about {:.2f} GiB of FMCW streaming IQ data for simulation_duration={} s at "
+				"{} will buffer about {:.2f} GiB of FMCW streaming output for simulation_duration={} s at "
 				"effective_rate={} Hz. Large simulation_time * bandwidth/rate products need chunking.",
 				owner, estimated_gib, duration, effective_rate);
 		}

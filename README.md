@@ -34,7 +34,7 @@ semi-independent packages.
 
 ## Feature Stability
 
-Last reviewed: 2026-04-30.
+Last reviewed: 2026-05-31.
 
 These labels describe the current state of the `master` branch and should be read alongside
 the [development status disclaimer](#disclaimer--development-status). "Verified" means the feature has been checked
@@ -49,6 +49,7 @@ should rely on it for important results.
 | CW radar | Beta | Unverified |
 | FMCW radar | Alpha | Unverified |
 | Multimodal | Alpha | Unverified |
+| VITA 49.2 UDP output | Alpha | Unverified |
 | KML generation | Stable | Verified |
 
 ## Repository Structure

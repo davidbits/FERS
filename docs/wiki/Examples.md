@@ -56,6 +56,24 @@ Use this example when you want to learn:
 - How to use a file-backed pulsed waveform.
 - How receiver output differs between pulsed chunk output and streaming output.
 
+## VITA49 Mixed Modes
+
+Directory:
+
+```text
+examples/vita49_mixed_modes
+```
+
+This scenario contains pulsed, CW, and FMCW monostatic radars in one run. Use it with the VITA49 CLI switches to verify that each receiver-mode stream gets its own VRT Stream ID and mode metadata.
+
+Run it:
+
+```bash
+cd examples/vita49_mixed_modes
+python3 genpulse.py
+../../build/release/packages/fers-cli/fers-cli example.fersxml --out-dir=. --vita49 127.0.0.1:4991 --vita49-fullscale 1.0 --log-level=INFO -n=2
+```
+
 ## FMCW Monostatic Dechirp
 
 Directory:

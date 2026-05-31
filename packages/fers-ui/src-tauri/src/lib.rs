@@ -31,7 +31,15 @@
 
 mod fers_api;
 
-use std::{fs, path::PathBuf, sync::Mutex};
+use std::{
+    collections::VecDeque,
+    fs,
+    path::PathBuf,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        mpsc, Mutex,
+    },
+};
 use tauri::{AppHandle, Emitter, Manager, State};
 
 /// Data structure for a single motion waypoint received from the UI.
@@ -111,6 +119,108 @@ pub struct InterpolatedRotationPoint {
 /// may invoke commands from multiple threads concurrently. This alias simplifies
 /// the function signatures of Tauri commands.
 type FersState = Mutex<fers_api::FersContext>;
+
+const DEFAULT_VITA49_TELEMETRY_PACKET_LIMIT: usize = 500;
+const MAX_VITA49_TELEMETRY_PACKET_LIMIT: usize = 1_000_000;
+
+type Vita49TelemetryState = Mutex<Vita49TelemetryBuffer>;
+
+#[derive(Default)]
+struct Vita49TelemetryBuffer {
+    latest_stats: Option<serde_json::Value>,
+    stats_dirty: bool,
+    packets: VecDeque<serde_json::Value>,
+    omitted_packet_trace_events: u64,
+    packet_limit: usize,
+    trace_enabled: bool,
+}
+
+#[derive(serde::Serialize)]
+struct Vita49TelemetryPoll {
+    stats: Option<serde_json::Value>,
+    packets: Vec<serde_json::Value>,
+    omitted_packet_trace_events: u64,
+    has_more: bool,
+}
+
+impl Vita49TelemetryBuffer {
+    fn reset(&mut self, trace_enabled: bool, packet_limit: usize) {
+        self.latest_stats = None;
+        self.stats_dirty = false;
+        self.packets.clear();
+        self.omitted_packet_trace_events = 0;
+        let requested_limit =
+            if packet_limit == 0 { DEFAULT_VITA49_TELEMETRY_PACKET_LIMIT } else { packet_limit };
+        self.packet_limit = requested_limit.clamp(1, MAX_VITA49_TELEMETRY_PACKET_LIMIT);
+        self.trace_enabled = trace_enabled;
+    }
+
+    fn ingest(&mut self, message: fers_api::Vita49TelemetryMessage) {
+        if let Some(stats_json) = message.stats_json {
+            if let Ok(stats) = serde_json::from_str(&stats_json) {
+                self.latest_stats = Some(stats);
+                self.stats_dirty = true;
+            }
+        }
+
+        if !self.trace_enabled {
+            return;
+        }
+
+        if let Some(packet_batch_json) = message.packet_batch_json {
+            let Ok(batch) = serde_json::from_str::<Vec<serde_json::Value>>(&packet_batch_json)
+            else {
+                return;
+            };
+            for packet in batch {
+                if self.packets.len() >= self.packet_limit {
+                    self.packets.pop_front();
+                    self.omitted_packet_trace_events += 1;
+                }
+                self.packets.push_back(packet);
+            }
+        }
+    }
+
+    fn poll(&mut self, max_packets: usize) -> Vita49TelemetryPoll {
+        let packet_count = max_packets.max(1).min(self.packets.len());
+        let packets = self.packets.drain(..packet_count).collect();
+        let omitted_packet_trace_events = self.omitted_packet_trace_events;
+        self.omitted_packet_trace_events = 0;
+        let stats = if self.stats_dirty {
+            self.stats_dirty = false;
+            self.latest_stats.clone()
+        } else {
+            None
+        };
+        Vita49TelemetryPoll {
+            stats,
+            packets,
+            omitted_packet_trace_events,
+            has_more: !self.packets.is_empty(),
+        }
+    }
+}
+
+#[derive(Default)]
+struct SimulationControlState {
+    cancel_requested: AtomicBool,
+    running: AtomicBool,
+}
+
+impl SimulationControlState {
+    fn try_start(&self) -> Result<(), String> {
+        self.running
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .map_err(|_| "A simulation is already running.".to_string())?;
+        self.cancel_requested.store(false, Ordering::SeqCst);
+        Ok(())
+    }
+
+    fn finish(&self) {
+        self.running.store(false, Ordering::SeqCst);
+    }
+}
 
 // --- Tauri Commands ---
 
@@ -269,7 +379,11 @@ fn update_scenario_from_json(
 /// * `simulation-error` - Emitted with a `String` error message on failure.
 /// * `simulation-progress` - Emitted periodically with `{ message: String, current: i32, total: i32 }`.
 #[tauri::command]
-fn run_simulation(app_handle: AppHandle) -> Result<(), String> {
+fn run_simulation(
+    app_handle: AppHandle,
+    control_state: State<'_, SimulationControlState>,
+) -> Result<(), String> {
+    control_state.try_start()?;
     // Clone the AppHandle so we can move it into the background thread.
     let app_handle_clone = app_handle.clone();
 
@@ -277,14 +391,14 @@ fn run_simulation(app_handle: AppHandle) -> Result<(), String> {
     std::thread::spawn(move || {
         // Retrieve the managed state within the new thread.
         let fers_state: State<'_, FersState> = app_handle_clone.state();
-        let result = fers_state
-            .lock()
-            .map_err(|e| e.to_string())
-            .and_then(|context| context.run_simulation(&app_handle_clone));
+        let control_state: State<'_, SimulationControlState> = app_handle_clone.state();
+        let result = fers_state.lock().map_err(|e| e.to_string()).and_then(|context| {
+            context.run_simulation(&app_handle_clone, &control_state.cancel_requested)
+        });
 
         // Emit an event to the frontend based on the simulation result.
         match result {
-            Ok(metadata_json) => {
+            Ok(fers_api::SimulationRunOutcome::Completed(metadata_json)) => {
                 app_handle_clone
                     .emit("simulation-output-metadata", metadata_json)
                     .expect("Failed to emit simulation-output-metadata event");
@@ -292,15 +406,112 @@ fn run_simulation(app_handle: AppHandle) -> Result<(), String> {
                     .emit("simulation-complete", ())
                     .expect("Failed to emit simulation-complete event");
             }
+            Ok(fers_api::SimulationRunOutcome::Cancelled(metadata_json)) => {
+                app_handle_clone
+                    .emit("simulation-output-metadata", metadata_json.clone())
+                    .expect("Failed to emit simulation-output-metadata event");
+                app_handle_clone
+                    .emit("simulation-cancelled", metadata_json)
+                    .expect("Failed to emit simulation-cancelled event");
+            }
             Err(e) => {
                 app_handle_clone
                     .emit("simulation-error", e)
                     .expect("Failed to emit simulation-error event");
             }
         }
+        control_state.finish();
     });
 
     // Return immediately, allowing the UI to remain responsive.
+    Ok(())
+}
+
+#[tauri::command]
+fn start_vita49_stream(
+    app_handle: AppHandle,
+    config: fers_api::Vita49StreamConfig,
+    control_state: State<'_, SimulationControlState>,
+) -> Result<(), String> {
+    control_state.try_start()?;
+    let app_handle_clone = app_handle.clone();
+
+    std::thread::spawn(move || {
+        let fers_state: State<'_, FersState> = app_handle_clone.state();
+        let control_state: State<'_, SimulationControlState> = app_handle_clone.state();
+        let telemetry_state: State<'_, Vita49TelemetryState> = app_handle_clone.state();
+        if let Ok(mut telemetry) = telemetry_state.lock() {
+            telemetry.reset(config.trace_enabled, config.packet_trace_ring_size);
+        }
+
+        let (telemetry_sender, telemetry_receiver) =
+            mpsc::channel::<fers_api::Vita49TelemetryMessage>();
+        let telemetry_worker_app_handle = app_handle_clone.clone();
+        let telemetry_worker = std::thread::spawn(move || {
+            let telemetry_state: State<'_, Vita49TelemetryState> =
+                telemetry_worker_app_handle.state();
+            for message in telemetry_receiver {
+                let Ok(mut telemetry) = telemetry_state.lock() else {
+                    break;
+                };
+                telemetry.ingest(message);
+            }
+        });
+
+        let result = fers_state.lock().map_err(|e| e.to_string()).and_then(|context| {
+            context.run_vita49_stream(
+                &app_handle_clone,
+                &control_state.cancel_requested,
+                &config,
+                Some(&telemetry_sender),
+            )
+        });
+        drop(telemetry_sender);
+        let _ = telemetry_worker.join();
+
+        match result {
+            Ok(fers_api::SimulationRunOutcome::Completed(metadata_json)) => {
+                app_handle_clone
+                    .emit("vita49-output-metadata", metadata_json.clone())
+                    .expect("Failed to emit vita49-output-metadata event");
+                app_handle_clone
+                    .emit("vita49-stream-complete", metadata_json)
+                    .expect("Failed to emit vita49-stream-complete event");
+            }
+            Ok(fers_api::SimulationRunOutcome::Cancelled(metadata_json)) => {
+                app_handle_clone
+                    .emit("vita49-output-metadata", metadata_json.clone())
+                    .expect("Failed to emit vita49-output-metadata event");
+                app_handle_clone
+                    .emit("simulation-cancelled", metadata_json.clone())
+                    .expect("Failed to emit simulation-cancelled event");
+                app_handle_clone
+                    .emit("vita49-stream-cancelled", metadata_json)
+                    .expect("Failed to emit vita49-stream-cancelled event");
+            }
+            Err(e) => {
+                app_handle_clone
+                    .emit("vita49-stream-error", e)
+                    .expect("Failed to emit vita49-stream-error event");
+            }
+        }
+        control_state.finish();
+    });
+
+    Ok(())
+}
+
+#[tauri::command]
+fn poll_vita49_telemetry(
+    max_packets: usize,
+    telemetry_state: State<'_, Vita49TelemetryState>,
+) -> Result<Vita49TelemetryPoll, String> {
+    Ok(telemetry_state.lock().map_err(|e| e.to_string())?.poll(max_packets))
+}
+
+#[tauri::command]
+fn stop_simulation(control_state: State<'_, SimulationControlState>) -> Result<(), String> {
+    control_state.cancel_requested.store(true, Ordering::SeqCst);
     Ok(())
 }
 
@@ -546,6 +757,8 @@ pub fn run() {
         })
         // Store the FersContext as managed state, accessible from all commands
         .manage(Mutex::new(context))
+        .manage(SimulationControlState::default())
+        .manage(Vita49TelemetryState::default())
         // Register all Tauri commands that can be invoked from the frontend
         .invoke_handler(tauri::generate_handler![
             load_scenario_from_xml_file,
@@ -553,6 +766,9 @@ pub fn run() {
             get_scenario_as_xml,
             update_scenario_from_json,
             run_simulation,
+            start_vita49_stream,
+            poll_vita49_telemetry,
+            stop_simulation,
             export_output_metadata_json,
             generate_kml,
             get_interpolated_motion_path,
@@ -630,5 +846,18 @@ mod tests {
         // Since it's a completely uninitialized new context with no XML/JSON loaded yet,
         // it correctly delegates to the backend and evaluates safely without segfaults.
         assert!(result.is_ok() || result.is_err());
+    }
+
+    #[test]
+    fn test_simulation_control_cancel_flag_does_not_require_context_lock() {
+        let control = SimulationControlState::default();
+        control.try_start().unwrap();
+
+        assert!(!control.cancel_requested.load(Ordering::SeqCst));
+        control.cancel_requested.store(true, Ordering::SeqCst);
+        assert!(control.cancel_requested.load(Ordering::SeqCst));
+
+        control.finish();
+        assert!(!control.running.load(Ordering::SeqCst));
     }
 }

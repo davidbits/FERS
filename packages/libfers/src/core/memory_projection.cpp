@@ -41,7 +41,7 @@ namespace core
 		constexpr std::uint64_t max_uint64 = std::numeric_limits<std::uint64_t>::max(); ///< Saturating byte-count cap.
 
 		/**
-		 * @brief Checks whether a receiver stores a full-duration streaming IQ buffer.
+		 * @brief Checks whether a receiver emits sample-by-sample streaming output.
 		 * @param receiver The receiver to inspect.
 		 * @return True for CW and FMCW receivers, false otherwise.
 		 */
@@ -121,17 +121,6 @@ namespace core
 			}
 			result.bytes = lhs * rhs;
 			return result;
-		}
-
-		/**
-		 * @brief Subtracts a byte projection from an RSS value without underflowing.
-		 * @param lhs The baseline byte count.
-		 * @param rhs The byte projection to subtract.
-		 * @return The clamped difference with the input overflow flag preserved.
-		 */
-		[[nodiscard]] ByteProjection subtractClamped(const std::uint64_t lhs, const ByteProjection rhs) noexcept
-		{
-			return {.bytes = lhs > rhs.bytes ? lhs - rhs.bytes : 0, .overflowed = rhs.overflowed};
 		}
 
 		/**
@@ -394,10 +383,6 @@ namespace core
 			if (isStreamingReceiver(receiver))
 			{
 				++projection.streaming_receiver_count;
-				const auto capacity = static_cast<std::uint64_t>(receiver.getStreamingData().capacity());
-				projection.allocated_streaming_iq_buffers =
-					addBytes(projection.allocated_streaming_iq_buffers,
-							 multiplyBytes(capacity, static_cast<std::uint64_t>(sizeof(ComplexType))));
 				bool if_count_overflowed = false;
 				const bool if_rate_dechirped = receiver.isDechirpEnabled() && receiver.hasFmcwIfSampleRate();
 				const auto if_sample_count = if_rate_dechirped
@@ -446,8 +431,7 @@ namespace core
 		projection.current_resident_set = currentResidentSetBytes();
 		if (projection.current_resident_set.has_value())
 		{
-			projection.resident_baseline =
-				subtractClamped(*projection.current_resident_set, projection.allocated_streaming_iq_buffers);
+			projection.resident_baseline = ByteProjection{.bytes = *projection.current_resident_set};
 			projection.projected_total_footprint =
 				addBytes(addBytes(addBytes(projection.phase_noise_lookup, projection.streaming_iq_buffers),
 								  projection.rendered_hdf5_payload),
@@ -492,7 +476,6 @@ namespace core
 			  {"pulsed_receivers", projection.pulsed_receiver_count}}},
 			{"phase_noise_lookups", byteProjectionToJson(projection.phase_noise_lookup)},
 			{"streaming_iq_buffers", byteProjectionToJson(projection.streaming_iq_buffers)},
-			{"allocated_streaming_iq_buffers", byteProjectionToJson(projection.allocated_streaming_iq_buffers)},
 			{"rendered_hdf5_dataset_payload", byteProjectionToJson(projection.rendered_hdf5_payload)},
 			{"current_resident_set",
 			 projection.current_resident_set.has_value()
@@ -515,9 +498,9 @@ namespace core
 
 		LOG(logging::Level::DEBUG,
 			"Projected simulation footprint: phase_noise_lookup_memory={} ({} enabled timing sources x {} samples), "
-			"streaming_iq_buffer_memory={} ({} streaming receivers, IF-rate receivers use IF sample counts), "
+			"streaming_output_buffer_memory={} ({} streaming receivers, IF-rate receivers use IF sample counts), "
 			"rendered_hdf5_dataset_payload={} "
-			"({} output samples), resident_baseline={} (current RSS minus allocated streaming IQ buffers), "
+			"({} output samples), resident_baseline={} (current RSS before projected run allocations), "
 			"projected_total_footprint={}.",
 			formatByteSize(projection.phase_noise_lookup.bytes), projection.enabled_phase_noise_timing_count,
 			projection.phase_noise_sample_count, formatByteSize(projection.streaming_iq_buffers.bytes),
@@ -536,11 +519,8 @@ namespace core
 			{
 				continue;
 			}
-			const auto sample_count = receiver.getStreamingData().empty()
-				? projection.streaming_sample_count
-				: static_cast<std::uint64_t>(receiver.getStreamingData().size());
 			const auto projected_payload =
-				multiplyBytes(sample_count, 2ULL * static_cast<std::uint64_t>(sizeof(RealType)));
+				multiplyBytes(projection.streaming_sample_count, 2ULL * static_cast<std::uint64_t>(sizeof(RealType)));
 			if (projected_payload.bytes > one_gib || projected_payload.overflowed)
 			{
 				const auto gib = static_cast<long double>(projected_payload.bytes) / static_cast<long double>(one_gib);
