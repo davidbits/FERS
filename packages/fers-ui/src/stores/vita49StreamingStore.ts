@@ -133,6 +133,7 @@ export const DEFAULT_VITA49_CONFIG: Vita49RuntimeConfig = {
 };
 
 const MAX_VRT_EPOCH_NS = 4_294_967_295_999_999_999n;
+const MAX_VITA49_QUEUE_DEPTH = 4_294_967_295;
 
 const isPositiveFinite = (value: number) => Number.isFinite(value) && value > 0;
 
@@ -154,8 +155,8 @@ export const validateVita49Config = (config: Vita49RuntimeConfig): string[] => {
     if (!isIntegerInRange(config.maxUdpPayload, 64, 65507)) {
         errors.push('Max UDP payload must be an integer from 64 to 65507.');
     }
-    if (!isIntegerInRange(config.queueDepth, 1, Number.MAX_SAFE_INTEGER)) {
-        errors.push('Queue depth must be a positive integer.');
+    if (!isIntegerInRange(config.queueDepth, 1, MAX_VITA49_QUEUE_DEPTH)) {
+        errors.push('Queue depth must be an integer from 1 to 4294967295.');
     }
     if (
         !isIntegerInRange(

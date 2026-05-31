@@ -46,9 +46,24 @@ describe('VITA49 streaming config', () => {
             'Port must be an integer from 1 to 65535.',
             'Full-scale must be a positive finite number.',
             'Max UDP payload must be an integer from 64 to 65507.',
-            'Queue depth must be a positive integer.',
+            'Queue depth must be an integer from 1 to 4294967295.',
             'Packet trace ring size must be a positive integer.',
         ]);
+    });
+
+    test('rejects queue depth above uint32 max', () => {
+        expect(
+            validateVita49Config({
+                ...DEFAULT_VITA49_CONFIG,
+                queueDepth: 4_294_967_296,
+            })
+        ).toContain('Queue depth must be an integer from 1 to 4294967295.');
+        expect(
+            validateVita49Config({
+                ...DEFAULT_VITA49_CONFIG,
+                queueDepth: 4_294_967_295,
+            })
+        ).not.toContain('Queue depth must be an integer from 1 to 4294967295.');
     });
 
     test('validates fixed epoch and preserves ns as a string for Rust', () => {
