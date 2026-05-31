@@ -4,7 +4,7 @@ import h5py
 import numpy as np
 
 
-def generate_pulse_file(filename="pulse.h5", sample_rate=1.0e6, pulse_width=2.0e-6):
+def generate_pulse_file(filename="pulse.h5", sample_rate=5.0e6, pulse_width=1.0e-6):
     num_samples = int(sample_rate * pulse_width)
     i_data = np.ones(num_samples, dtype=np.float64)
     q_data = np.zeros(num_samples, dtype=np.float64)
