@@ -50,20 +50,19 @@ namespace core
 		RealType simulation_sample_rate_hz = 0.0; ///< Oversampled simulation rate used for sample counts.
 		unsigned oversample_ratio = 1; ///< Oversampling ratio applied to the configured output rate.
 
-		std::uint64_t streaming_sample_count = 0; ///< Samples held by each full-duration streaming receiver.
+		std::uint64_t streaming_sample_count = 0; ///< Internal samples produced for each full-duration stream.
 		std::uint64_t phase_noise_sample_count = 0; ///< Samples held by each enabled phase-noise lookup.
 		std::uint64_t phase_noise_timing_count = 0; ///< Unique streaming timing sources considered.
 		std::uint64_t enabled_phase_noise_timing_count = 0; ///< Unique timing sources with phase noise enabled.
-		std::uint64_t streaming_receiver_count = 0; ///< Receivers that keep full-duration streaming IQ buffers.
+		std::uint64_t streaming_receiver_count = 0; ///< Receivers that emit streaming output.
 		std::uint64_t pulsed_receiver_count = 0; ///< Receivers that render finite pulsed receive windows.
 		std::uint64_t pulsed_window_count = 0; ///< Projected count of pulsed receive windows.
 		std::uint64_t rendered_hdf5_sample_count = 0; ///< Projected IQ samples written to HDF5 datasets.
 
 		ByteProjection phase_noise_lookup; ///< Projected memory for all enabled timing-source lookup tables.
-		ByteProjection streaming_iq_buffers; ///< Projected full-duration streaming receiver IQ memory.
-		ByteProjection allocated_streaming_iq_buffers; ///< Streaming IQ capacity already allocated at startup.
+		ByteProjection streaming_iq_buffers; ///< Projected full-duration streaming output sink memory.
 		ByteProjection rendered_hdf5_payload; ///< Projected raw I/Q dataset payload bytes written to HDF5.
-		std::optional<ByteProjection> resident_baseline; ///< Startup RSS excluding allocated streaming IQ buffers.
+		std::optional<ByteProjection> resident_baseline; ///< Startup RSS observed before projected run allocations.
 		std::optional<ByteProjection> projected_total_footprint; ///< Projected total resident footprint at peak.
 		std::optional<std::uint64_t> current_resident_set; ///< Process RSS at projection time, when available.
 	};

@@ -208,6 +208,113 @@ namespace fers_signal
 		return out;
 	}
 
+	DownsamplingSink::DownsamplingSink()
+	{
+		_ratio = params::oversampleRatio();
+		validateOversamplingConfig(_ratio);
+		if (_ratio <= 1)
+		{
+			return;
+		}
+
+		const unsigned filter_length = params::renderFilterLength();
+		const auto design = blackmanFir(1 / static_cast<RealType>(_ratio), _ratio, filter_length);
+		_coeffs = design.coeffs;
+		_line.assign(_coeffs.size(), ComplexType{0.0, 0.0});
+		_delay = _coeffs.size() / 2u;
+	}
+
+	void DownsamplingSink::consume(const std::span<const ComplexType> block)
+	{
+		if (_finished)
+		{
+			throw std::logic_error("Cannot consume downsampler input after finish");
+		}
+		if (block.empty())
+		{
+			return;
+		}
+
+		if (_ratio <= 1)
+		{
+			_pending.insert(_pending.end(), block.begin(), block.end());
+			_input_sample_count += block.size();
+			_processed_sample_count += block.size();
+			_next_output_index += block.size();
+			return;
+		}
+
+		for (const auto& sample : block)
+		{
+			const auto filtered = processOne(sample);
+			++_input_sample_count;
+			maybeEmit(filtered);
+			++_processed_sample_count;
+		}
+	}
+
+	void DownsamplingSink::finish()
+	{
+		if (_finished)
+		{
+			return;
+		}
+		_finished = true;
+		if (_ratio <= 1)
+		{
+			return;
+		}
+
+		_target_output_count = _input_sample_count / _ratio;
+		while (_next_output_index < _target_output_count)
+		{
+			const auto filtered = processOne(ComplexType{0.0, 0.0});
+			maybeEmit(filtered);
+			++_processed_sample_count;
+		}
+	}
+
+	std::vector<ComplexType> DownsamplingSink::takeOutput()
+	{
+		std::vector<ComplexType> out;
+		out.swap(_pending);
+		return out;
+	}
+
+	void DownsamplingSink::reset()
+	{
+		std::ranges::fill(_line, ComplexType{0.0, 0.0});
+		_pending.clear();
+		_input_sample_count = 0;
+		_processed_sample_count = 0;
+		_next_output_index = 0;
+		_target_output_count = 0;
+		_finished = false;
+	}
+
+	ComplexType DownsamplingSink::processOne(const ComplexType sample)
+	{
+		_line[0] = sample;
+		const auto filtered = std::transform_reduce(
+			_line.begin(), _line.end(), _coeffs.begin(), ComplexType{0.0, 0.0}, std::plus<ComplexType>{},
+			[](const ComplexType& value, const RealType coeff) { return value * coeff; });
+		if (_line.size() > 1u)
+		{
+			std::move_backward(_line.begin(), _line.end() - 1, _line.end());
+		}
+		return filtered;
+	}
+
+	void DownsamplingSink::maybeEmit(const ComplexType filtered)
+	{
+		const auto required_input_index = _next_output_index * _ratio + static_cast<std::uint64_t>(_delay);
+		if (_processed_sample_count == required_input_index)
+		{
+			_pending.push_back(filtered / static_cast<RealType>(_ratio));
+			++_next_output_index;
+		}
+	}
+
 	IirFilter::IirFilter(const RealType* denCoeffs, const RealType* numCoeffs, const unsigned order) noexcept :
 		_a(denCoeffs, denCoeffs + order), _b(numCoeffs, numCoeffs + order), _w(order, 0.0), _order(order)
 	{

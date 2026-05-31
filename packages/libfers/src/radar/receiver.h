@@ -14,6 +14,7 @@
 
 #include <condition_variable>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -45,6 +46,8 @@ namespace radar
 	class Receiver final : public Radar
 	{
 	public:
+		using FmcwIfOutputCallback = std::function<void(std::span<const ComplexType>, std::uint64_t)>;
+
 		/**
 		 * @enum RecvFlag
 		 * @brief Enumeration for receiver configuration flags.
@@ -286,6 +289,9 @@ namespace radar
 		/// Feeds one completed high-rate dechirped block into the online IF sink.
 		void consumeFmcwIfBlock(std::span<const ComplexType> block, RealType block_start_time);
 
+		/// Routes emitted IF samples to a live consumer instead of the HDF5 accumulation buffer.
+		void setFmcwIfOutputCallback(FmcwIfOutputCallback callback);
+
 		/// Marks the current scheduled IF segment inactive.
 		void endFmcwIfResamplingSegment();
 
@@ -352,31 +358,6 @@ namespace radar
 		void setNoiseTemperature(RealType temp);
 
 		/**
-		 * @brief Prepares the internal storage for streaming IQ data.
-		 * @param numSamples The total number of samples to allocate memory for.
-		 */
-		void prepareStreamingData(size_t numSamples);
-
-		/**
-		 * @brief Sets a single IQ sample at a specific index for streaming simulation.
-		 * @param index The index at which to store the sample.
-		 * @param sample The complex IQ sample.
-		 */
-		void setStreamingSample(size_t index, ComplexType sample);
-
-		/**
-		 * @brief Retrieves the collected streaming IQ data.
-		 * @return A constant reference to the vector of complex IQ samples.
-		 */
-		[[nodiscard]] const std::vector<ComplexType>& getStreamingData() const { return _streaming_iq_data; }
-
-		/**
-		 * @brief Retrieves the collected streaming IQ data for modification.
-		 * @return A mutable reference to the vector of complex IQ samples.
-		 */
-		[[nodiscard]] std::vector<ComplexType>& getMutableStreamingData() { return _streaming_iq_data; }
-
-		/**
 		 * @brief Retrieves the log of pulsed interferences for streaming modes.
 		 * @return A const reference to the vector of interference responses.
 		 */
@@ -384,6 +365,9 @@ namespace radar
 		{
 			return _pulsed_interference_log;
 		}
+
+		/// Removes logged pulsed interference responses that ended before a receive time.
+		void prunePulsedInterferenceEndingBefore(RealType cutoff_time) noexcept;
 
 		/**
 		 * @brief Sets the active schedule for the receiver.
@@ -438,14 +422,13 @@ namespace radar
 		std::vector<std::unique_ptr<serial::Response>>
 			_pulsed_interference_log; ///< Log of pulsed signals that interfere with CW reception.
 		std::mutex _interference_log_mutex; ///< Mutex guarding the pulsed interference log.
-		std::vector<ComplexType> _streaming_iq_data; ///< Buffer for raw, simulation-long I/Q data.
-		std::mutex _cw_mutex; ///< Mutex for handling CW data.
 		DechirpMode _dechirp_mode{DechirpMode::None}; ///< FMCW dechirp mode.
 		DechirpReference _dechirp_reference{}; ///< Configured/resolved LO reference.
 		std::vector<core::ActiveStreamingSource> _dechirp_sources; ///< Resolved LO sources.
 		FmcwIfChainRequest _fmcw_if_chain{}; ///< Optional receiver-local IF-chain request.
 		std::optional<fers_signal::FmcwIfResamplerPlan> _fmcw_if_plan; ///< Active IF resampling plan.
 		std::unique_ptr<fers_signal::FmcwIfResamplingSink> _fmcw_if_sink; ///< Online IF resampling state.
+		FmcwIfOutputCallback _fmcw_if_output_callback; ///< Optional live IF-output consumer.
 		std::uint64_t _fmcw_if_samples_to_discard = 0; ///< Remaining startup IF samples to suppress.
 		std::size_t _fmcw_if_input_cursor = 0; ///< Absolute high-rate input samples consumed by the IF sink.
 		std::size_t _fmcw_if_output_cursor = 0; ///< Absolute output-sample cursor for IF insertion.

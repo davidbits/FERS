@@ -76,6 +76,43 @@ export type SimulationOutputFmcwSourceMetadata =
         segments: SimulationOutputFmcwSourceSegmentMetadata[];
     };
 
+export type SimulationOutputVita49Timestamp = {
+    integer_seconds: number;
+    fractional_picoseconds: number;
+};
+
+export type SimulationOutputVita49StreamMetadata = {
+    receiver_id: number;
+    receiver_name: string;
+    stream_id: number;
+    mode?: string;
+    sample_rate: number;
+    reference_frequency: number;
+    packets_emitted: number;
+    samples_emitted: number;
+    packets_dropped: number;
+    samples_dropped: number;
+    over_range_count: number;
+    late_packet_count: number;
+    context_packet_count: number;
+    first_sample_time: number | null;
+    end_sample_time: number | null;
+    first_timestamp: SimulationOutputVita49Timestamp | null;
+    end_timestamp: SimulationOutputVita49Timestamp | null;
+};
+
+export type SimulationOutputVita49Metadata = {
+    endpoint: string;
+    endpoint_host: string;
+    endpoint_port: number;
+    epoch_unix_nanoseconds: string | null;
+    class_id: string;
+    adc_fullscale: number;
+    max_udp_payload: number;
+    queue_depth: number;
+    streams: SimulationOutputVita49StreamMetadata[];
+};
+
 export type SimulationOutputFileMetadata = {
     receiver_id: number;
     receiver_name: string;
@@ -116,6 +153,7 @@ export type SimulationOutputMetadata = {
     sampling_rates?: number[];
     oversample_ratio: number;
     files: SimulationOutputFileMetadata[];
+    vita49?: SimulationOutputVita49Metadata;
 };
 
 export type RawSimulationOutputFileMetadata = Omit<

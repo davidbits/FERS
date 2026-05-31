@@ -19,6 +19,7 @@ import { useScenarioStore } from '@/stores/scenarioStore';
 import { AssetLibraryView } from '@/views/AssetLibraryView';
 import { ScenarioView } from '@/views/ScenarioView';
 import { SimulationView } from '@/views/SimulationView';
+import { Vita49StreamingView } from '@/views/Vita49StreamingView';
 
 export function MainLayout() {
     const [activeView, setActiveView] = useState('scenario');
@@ -171,6 +172,15 @@ export function MainLayout() {
                     }}
                 >
                     <SimulationView />
+                </Box>
+                <Box
+                    sx={{
+                        display: activeView === 'vita49' ? 'block' : 'none',
+                        height: '100%',
+                        width: '100%',
+                    }}
+                >
+                    <Vita49StreamingView />
                 </Box>
             </Box>
             <SettingsDialog

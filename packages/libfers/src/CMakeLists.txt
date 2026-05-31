@@ -13,6 +13,7 @@ set(LIBFERS_PRIVATE_HEADERS
 	${CMAKE_CURRENT_LIST_DIR}/core/memory_projection.h
 	${CMAKE_CURRENT_LIST_DIR}/radar/object.h
 	${CMAKE_CURRENT_LIST_DIR}/core/output_metadata.h
+	${CMAKE_CURRENT_LIST_DIR}/core/output_config.h
 	${CMAKE_CURRENT_LIST_DIR}/core/parameters.h
 	${CMAKE_CURRENT_LIST_DIR}/math/path.h
 	${CMAKE_CURRENT_LIST_DIR}/radar/platform.h
@@ -27,6 +28,7 @@ set(LIBFERS_PRIVATE_HEADERS
 	${CMAKE_CURRENT_LIST_DIR}/processing/finalizer.h
 	${CMAKE_CURRENT_LIST_DIR}/processing/finalizer_pipeline.h
 	${CMAKE_CURRENT_LIST_DIR}/core/rendering_job.h
+	${CMAKE_CURRENT_LIST_DIR}/core/receiver_output.h
 	${CMAKE_CURRENT_LIST_DIR}/core/simulation_state.h
 	${CMAKE_CURRENT_LIST_DIR}/core/sim_events.h
 	${CMAKE_CURRENT_LIST_DIR}/core/fers_context.h
@@ -42,6 +44,7 @@ set(LIBFERS_PRIVATE_HEADERS
 	${CMAKE_CURRENT_LIST_DIR}/noise/noise_generators.h
 	${CMAKE_CURRENT_LIST_DIR}/serial/json_serializer.h
 	${CMAKE_CURRENT_LIST_DIR}/serial/fmcw_validation.h
+	${CMAKE_CURRENT_LIST_DIR}/serial/hdf5_output_sink.h
 	${CMAKE_CURRENT_LIST_DIR}/serial/xml_serializer.h
 	${CMAKE_CURRENT_LIST_DIR}/serial/hdf5_handler.h
 	${CMAKE_CURRENT_LIST_DIR}/serial/kml_generator.h
@@ -58,6 +61,14 @@ set(LIBFERS_PRIVATE_HEADERS
 	${CMAKE_CURRENT_LIST_DIR}/timing/timing.h
 	${CMAKE_CURRENT_LIST_DIR}/serial/rotation_angle_utils.h
 	${CMAKE_CURRENT_LIST_DIR}/serial/rotation_warning_utils.h
+	${CMAKE_CURRENT_LIST_DIR}/serial/vita49/paced_sender.h
+	${CMAKE_CURRENT_LIST_DIR}/serial/vita49/stream_registry.h
+	${CMAKE_CURRENT_LIST_DIR}/serial/vita49/udp_sender.h
+	${CMAKE_CURRENT_LIST_DIR}/serial/vita49/vita49_context_builder.h
+	${CMAKE_CURRENT_LIST_DIR}/serial/vita49/vita49_output_sink.h
+	${CMAKE_CURRENT_LIST_DIR}/serial/vita49/vita49_packetizer.h
+	${CMAKE_CURRENT_LIST_DIR}/serial/vita49/vita49_serializer.h
+	${CMAKE_CURRENT_LIST_DIR}/serial/vita49/vita49_types.h
 )
 
 # --- Source Files ---
@@ -89,6 +100,7 @@ set(LIBFERS_SOURCES
 	${CMAKE_CURRENT_LIST_DIR}/radar/transmitter.cpp
 	${CMAKE_CURRENT_LIST_DIR}/serial/json_serializer.cpp
 	${CMAKE_CURRENT_LIST_DIR}/serial/fmcw_validation.cpp
+	${CMAKE_CURRENT_LIST_DIR}/serial/hdf5_output_sink.cpp
 	${CMAKE_CURRENT_LIST_DIR}/serial/xml_serializer.cpp
 	${CMAKE_CURRENT_LIST_DIR}/serial/hdf5_handler.cpp
 	${CMAKE_CURRENT_LIST_DIR}/serial/kml_generator.cpp
@@ -96,6 +108,14 @@ set(LIBFERS_SOURCES
 	${CMAKE_CURRENT_LIST_DIR}/serial/waveform_factory.cpp
 	${CMAKE_CURRENT_LIST_DIR}/serial/response.cpp
 	${CMAKE_CURRENT_LIST_DIR}/serial/rotation_warning_utils.cpp
+	${CMAKE_CURRENT_LIST_DIR}/serial/vita49/paced_sender.cpp
+	${CMAKE_CURRENT_LIST_DIR}/serial/vita49/stream_registry.cpp
+	${CMAKE_CURRENT_LIST_DIR}/serial/vita49/udp_sender.cpp
+	${CMAKE_CURRENT_LIST_DIR}/serial/vita49/vita49_context_builder.cpp
+	${CMAKE_CURRENT_LIST_DIR}/serial/vita49/vita49_output_sink.cpp
+	${CMAKE_CURRENT_LIST_DIR}/serial/vita49/vita49_packetizer.cpp
+	${CMAKE_CURRENT_LIST_DIR}/serial/vita49/vita49_serializer.cpp
+	${CMAKE_CURRENT_LIST_DIR}/serial/vita49/vita49_types.cpp
 	${CMAKE_CURRENT_LIST_DIR}/serial/xml_parser.cpp
 	${CMAKE_CURRENT_LIST_DIR}/serial/xml_parser_utils.cpp
 	${CMAKE_CURRENT_LIST_DIR}/serial/xml_serializer_utils.cpp

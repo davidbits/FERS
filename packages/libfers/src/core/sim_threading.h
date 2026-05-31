@@ -16,6 +16,7 @@
 #pragma once
 
 #include <chrono>
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -26,10 +27,13 @@
 #include <vector>
 
 #include "core/config.h"
+#include "core/output_config.h"
 #include "core/output_metadata.h"
 #include "core/parameters.h"
+#include "core/receiver_output.h"
 #include "core/sim_events.h"
 #include "core/simulation_state.h"
+#include "signal/dsp_filters.h"
 #include "simulation/channel_model.h"
 
 namespace pool
@@ -52,6 +56,7 @@ namespace serial
 namespace core
 {
 	class World;
+	class ReceiverOutputSink;
 
 	/**
 	 * @class ProgressReporter
@@ -112,12 +117,17 @@ namespace core
 		 * @param output_dir Output directory for the simulation files.
 		 */
 		SimulationEngine(World* world, pool::ThreadPool& pool, std::shared_ptr<ProgressReporter> reporter,
-						 std::string output_dir, std::shared_ptr<OutputMetadataCollector> metadata_collector = nullptr);
+						 std::string output_dir, std::shared_ptr<OutputMetadataCollector> metadata_collector = nullptr,
+						 ReceiverOutputSink* output_sink = nullptr, std::function<bool()> cancel_callback = nullptr,
+						 bool eager_context_stream_open = false);
 
 		/**
 		 * @brief Starts and runs the main simulation loop until completion.
 		 */
 		void run();
+
+		/// Returns true after cooperative cancellation has been requested.
+		[[nodiscard]] bool cancelled() const noexcept { return _cancelled; }
 
 		/**
 		 * @brief Advances the time-stepped inner loop for active streaming systems.
@@ -203,6 +213,34 @@ namespace core
 		/// Adds one high-rate sample to a receiver's IF-resampling block buffer.
 		void appendFmcwIfSample(std::size_t receiver_index, RealType t_step, ComplexType sample);
 
+		/// Adds one raw streaming sample to the live output block buffer.
+		void appendStreamingOutputSample(std::size_t receiver_index, std::size_t sample_index, RealType t_step,
+										 ComplexType sample);
+
+		/// Flushes all pending live streaming output blocks.
+		void flushStreamingOutputBlocks();
+
+		/// Flushes one receiver's pending live streaming output block.
+		void flushStreamingOutputBlock(std::size_t receiver_index, bool finish_downsampler = false);
+
+		/// Emits an already processed streaming block to the selected output sink.
+		void emitStreamingOutputBlock(std::size_t receiver_index, RealType first_sample_time, RealType sample_rate,
+									  std::span<const ComplexType> samples, std::uint64_t sample_start);
+
+		/// Returns the sink-visible sample rate for one live streaming receiver.
+		[[nodiscard]] RealType streamingOutputSampleRate(std::size_t receiver_index) const;
+
+		/// Registers and opens one live streaming receiver before delayed sample flushes.
+		void ensureStreamingOutputStreamOpen(std::size_t receiver_index, RealType first_sample_time,
+											 RealType sample_rate);
+
+		/// Returns an initialized stateful downsampler for one streaming receiver segment.
+		[[nodiscard]] fers_signal::DownsamplingSink&
+		streamingDownsampler(std::size_t receiver_index, std::uint64_t input_start_index, RealType segment_start_time);
+
+		/// Emits sink heartbeats on the continuous simulation clock up to the given time.
+		void emitContextHeartbeatsThrough(RealType simulation_time);
+
 		/// Returns the latest conservative receive time at which an ended source must still be retained.
 		[[nodiscard]] std::optional<RealType> streamingSourceCleanupDeadline(const ActiveStreamingSource& source,
 																			 RealType from_time) const;
@@ -223,7 +261,11 @@ namespace core
 		void applyPulsedInterferenceToFmcwIfBlock(std::size_t receiver_index, std::span<ComplexType> block,
 												  RealType block_start_time);
 
-		/// Emits summary logs for streaming receiver buffers.
+		/// Adds pulsed interference into a live streaming block before final noise/scaling.
+		void applyPulsedInterferenceToStreamingBlock(std::size_t receiver_index, std::span<ComplexType> block,
+													 RealType block_start_time, RealType sample_rate, bool dechirp_mix);
+
+		/// Emits summary logs for streaming receiver configuration.
 		void logStreamingSummaries() const;
 
 		/**
@@ -248,6 +290,9 @@ namespace core
 		 */
 		void reportSimulationProgress(RealType t_current);
 
+		/// Polls the host cancellation callback and latches the result.
+		[[nodiscard]] bool isCancellationRequested();
+
 		/// Collects streaming sources active anywhere within the requested time window.
 		[[nodiscard]] std::vector<ActiveStreamingSource> collectStreamingSourcesForWindow(RealType start_time,
 																						  RealType end_time) const;
@@ -262,9 +307,14 @@ namespace core
 		std::shared_ptr<ProgressReporter> _reporter; ///< Shared progress reporter instance.
 		std::vector<std::jthread> _finalizer_threads; ///< Collection of dedicated pulsed finalizer threads.
 		std::shared_ptr<OutputMetadataCollector> _metadata_collector; ///< Collector for generated output metadata.
+		ReceiverOutputSink* _output_sink = nullptr; ///< Selected receiver output sink.
+		std::function<bool()> _cancel_callback; ///< Optional cooperative cancellation callback.
+		bool _eager_context_stream_open = false; ///< True when context heartbeat requires pre-data stream open.
+		bool _cancelled = false; ///< Latched cancellation state.
 
 		std::chrono::steady_clock::time_point _last_report_time; ///< Timestamp of the last progress report.
 		int _last_reported_percent = -1; ///< The last reported percentage to prevent redundant updates.
+		RealType _next_context_heartbeat_time = 0.0; ///< Next one-second sink heartbeat on simulation clock.
 
 		std::string _output_dir; ///< Output directory for the simulation files.
 		std::unique_ptr<simulation::CwPhaseNoiseLookup> _cw_phase_noise_lookup; ///< Cached CW phase-noise lookup.
@@ -272,6 +322,19 @@ namespace core
 		std::vector<ReceiverTrackerCache> _if_pulse_tracker_caches; ///< Per-receiver dechirp trackers for pulse blocks.
 		std::vector<std::vector<ComplexType>> _fmcw_if_block_buffers; ///< Pending high-rate IF blocks.
 		std::vector<RealType> _fmcw_if_block_start_times; ///< Start time for each pending IF block.
+		std::vector<std::vector<ComplexType>> _streaming_output_block_buffers; ///< Pending live CW/FMCW output blocks.
+		std::vector<std::vector<ComplexType>> _streaming_output_processed_buffers; ///< Reused post-noise output blocks.
+		std::vector<RealType> _streaming_output_block_start_times; ///< Start time for pending live output blocks.
+		std::vector<std::uint64_t> _streaming_output_block_start_indices; ///< High-rate sample index for each block.
+		std::vector<std::unique_ptr<fers_signal::DownsamplingSink>>
+			_streaming_downsamplers; ///< Stateful downsamplers for non-dechirped streaming output.
+		std::vector<std::uint64_t> _streaming_downsample_base_indices; ///< Output index at segment start.
+		std::vector<RealType> _streaming_downsample_segment_start_times; ///< Segment start time at output sample 0.
+		std::vector<std::uint64_t> _streaming_output_sample_cursors; ///< Output sample cursor per receiver.
+		std::vector<std::uint32_t> _streaming_output_stream_ids; ///< Registered sink stream IDs for live receivers.
+		std::vector<bool> _streaming_output_stream_open; ///< Live receiver stream lifecycle state.
+		std::vector<std::shared_ptr<const OutputFileMetadata>>
+			_streaming_output_file_metadata; ///< Per-receiver metadata attached to sink blocks.
 		RealType _internal_stop_time = 0.0; ///< Physics stop time including IF over-render margin.
 	};
 
@@ -290,5 +353,7 @@ namespace core
 	 */
 	OutputMetadata runEventDrivenSim(World* world, pool::ThreadPool& pool,
 									 const std::function<void(const std::string&, int, int)>& progress_callback,
-									 const std::string& output_dir);
+									 const std::string& output_dir, const OutputConfig& output_config = OutputConfig{},
+									 std::function<bool()> cancel_callback = nullptr, bool* cancelled = nullptr,
+									 ReceiverOutputTelemetryCallback telemetry_callback = nullptr);
 }

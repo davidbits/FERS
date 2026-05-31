@@ -1447,20 +1447,6 @@ namespace serial::xml_parser_utils
 
 		ctx.world->resolveReceiverDechirpReferences();
 
-		const RealType start_time = ctx.parameters.start;
-		const RealType end_time = ctx.parameters.end;
-		const RealType dt_sim = 1.0 / (ctx.parameters.rate * ctx.parameters.oversample_ratio);
-		const auto num_samples = static_cast<size_t>(std::ceil((end_time - start_time) / dt_sim));
-
-		for (const auto& receiver : ctx.world->getReceivers())
-		{
-			if (receiver->getMode() == radar::OperationMode::CW_MODE ||
-				receiver->getMode() == radar::OperationMode::FMCW_MODE)
-			{
-				receiver->prepareStreamingData(receiver->hasFmcwIfSampleRate() ? 0 : num_samples);
-			}
-		}
-
 		ctx.world->scheduleInitialEvents();
 
 		LOG(logging::Level::DEBUG, "Initial Event Queue State:\n{}", ctx.world->dumpEventQueue());

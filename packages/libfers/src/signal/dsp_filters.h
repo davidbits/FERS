@@ -13,6 +13,7 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 #include <memory>
 #include <span>
 #include <vector>
@@ -38,6 +39,43 @@ namespace fers_signal
 	 * @throws std::invalid_argument if the input or output spans are empty or the ratio is zero.
 	 */
 	std::vector<ComplexType> downsample(std::span<const ComplexType> in);
+
+	/**
+	 * @class DownsamplingSink
+	 * @brief Stateful FIR decimator for chunked streaming output.
+	 *
+	 * This sink uses the same Blackman-windowed FIR design as `downsample`, but keeps
+	 * filter history across input blocks and only zero-pads when `finish()` is called.
+	 */
+	class DownsamplingSink
+	{
+	public:
+		DownsamplingSink();
+
+		void consume(std::span<const ComplexType> block);
+		void finish();
+		[[nodiscard]] std::vector<ComplexType> takeOutput();
+		void reset();
+
+		[[nodiscard]] std::uint64_t inputSampleCount() const noexcept { return _input_sample_count; }
+		[[nodiscard]] std::uint64_t outputSampleCount() const noexcept { return _next_output_index; }
+		[[nodiscard]] unsigned ratio() const noexcept { return _ratio; }
+
+	private:
+		ComplexType processOne(ComplexType sample);
+		void maybeEmit(ComplexType filtered);
+
+		unsigned _ratio = 1;
+		std::vector<RealType> _coeffs;
+		std::vector<ComplexType> _line;
+		std::vector<ComplexType> _pending;
+		std::uint64_t _input_sample_count = 0;
+		std::uint64_t _processed_sample_count = 0;
+		std::uint64_t _next_output_index = 0;
+		std::uint64_t _target_output_count = 0;
+		std::size_t _delay = 0;
+		bool _finished = false;
+	};
 
 	/**
 	 * @class DspFilter

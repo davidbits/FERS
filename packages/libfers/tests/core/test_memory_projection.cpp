@@ -89,7 +89,6 @@ namespace
 			std::make_unique<radar::Receiver>(platform_ptr, "StreamingRx", 11, radar::OperationMode::CW_MODE, 600);
 		streaming_rx->setTiming(timing);
 		streaming_rx->setAntenna(antenna_ptr);
-		streaming_rx->prepareStreamingData(20);
 
 		auto pulsed_rx =
 			std::make_unique<radar::Receiver>(platform_ptr, "PulsedRx", 12, radar::OperationMode::PULSED_MODE, 700);
@@ -129,7 +128,6 @@ TEST_CASE("Simulation memory projection totals core categories", "[core][memory_
 
 	REQUIRE(projection.phase_noise_lookup.bytes == 21 * sizeof(RealType));
 	REQUIRE(projection.streaming_iq_buffers.bytes == 20 * sizeof(ComplexType));
-	REQUIRE(projection.allocated_streaming_iq_buffers.bytes == 20 * sizeof(ComplexType));
 	REQUIRE(projection.rendered_hdf5_payload.bytes == 16 * 2 * sizeof(RealType));
 
 	const auto json = nlohmann::json::parse(core::memoryProjectionToJsonString(projection));
@@ -231,7 +229,7 @@ TEST_CASE("Simulation memory projection log names required categories", "[core][
 	const std::string output = capture.str();
 	REQUIRE_THAT(output, ContainsSubstring("Projected simulation footprint"));
 	REQUIRE_THAT(output, ContainsSubstring("phase_noise_lookup_memory"));
-	REQUIRE_THAT(output, ContainsSubstring("streaming_iq_buffer_memory"));
+	REQUIRE_THAT(output, ContainsSubstring("streaming_output_buffer_memory"));
 	REQUIRE_THAT(output, ContainsSubstring("rendered_hdf5_dataset_payload"));
 	REQUIRE_THAT(output, ContainsSubstring("resident_baseline"));
 }

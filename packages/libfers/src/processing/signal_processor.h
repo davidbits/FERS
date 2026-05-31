@@ -16,6 +16,7 @@
 
 #pragma once
 
+#include <cstdint>
 #include <memory>
 #include <random>
 #include <span>
@@ -35,6 +36,20 @@ namespace pool
 
 namespace processing
 {
+	/// One complex Cartesian IQ sample scaled for VITA-style signed 16-bit transport.
+	struct FixedFullscaleIqSample
+	{
+		std::int16_t i = 0;
+		std::int16_t q = 0;
+	};
+
+	/// Result of fixed-fullscale IQ scaling.
+	struct FixedFullscaleScalingResult
+	{
+		std::vector<FixedFullscaleIqSample> samples;
+		std::uint64_t clipped_sample_count = 0;
+	};
+
 	/**
 	 * @brief Renders a time-window of I/Q data from a collection of raw radar responses.
 	 *
@@ -80,4 +95,18 @@ namespace processing
 	 * @return The full-scale value used for quantization/normalization.
 	 */
 	RealType quantizeAndScaleWindow(std::span<ComplexType> window);
+
+	/**
+	 * @brief Scales complex samples against a fixed full-scale to signed int16 IQ.
+	 *
+	 * This helper is intended for real-time receiver-output sinks, where scanning a
+	 * complete future window to derive full-scale would change hardware-like behavior.
+	 *
+	 * @param samples Input complex samples in physical units.
+	 * @param fullscale Positive fixed full-scale magnitude for both I and Q channels.
+	 * @return Scaled int16 IQ samples and a count of complex samples that clipped on either channel.
+	 * @throws std::invalid_argument when fullscale is not positive.
+	 */
+	[[nodiscard]] FixedFullscaleScalingResult scaleToInt16FixedFullscale(std::span<const ComplexType> samples,
+																		 RealType fullscale);
 }

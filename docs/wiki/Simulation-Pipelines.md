@@ -12,7 +12,9 @@ flowchart TD
     D --> E[Create transmit and receive events]
     E --> F[Run event-driven simulation]
     F --> G[Finalize receiver signals]
-    G --> H[Write HDF5 result files]
+    G --> H{Runtime output backend}
+    H --> J[Write HDF5 result files]
+    H --> K[Emit VITA 49.2 UDP streams]
     D --> I[Optional KML export]
 ```
 
@@ -21,6 +23,7 @@ Key user settings:
 - XML structure comes from [[XML Schema Reference]].
 - `<rate>`, `<oversample>`, schedules, platform motion, and radar modes affect event generation and signal rendering.
 - Receiver names determine HDF5 output file names.
+- Runtime CLI/API configuration selects HDF5 or VITA 49.2 UDP output; `.fersxml` does not select network transport.
 
 ## UI Scenario Workflow
 
@@ -206,7 +209,7 @@ Dechirp modes:
 
 ## Output Finalization
 
-Finalization is where FERS turns simulated receiver voltage samples into HDF5 datasets.
+Finalization is where FERS turns simulated receiver voltage samples into the selected runtime output backend. HDF5 remains the default. VITA 49.2 UDP uses the same processed receiver samples but scales them against a fixed full-scale value for int16 IQ packets.
 
 ```mermaid
 flowchart TD
@@ -216,9 +219,10 @@ flowchart TD
     D --> E{adc_bits > 0?}
     E -- yes --> F[Quantize samples]
     E -- no --> G[Normalize floating-point samples]
-    F --> H[Write HDF5 datasets]
+    F --> H{Output mode}
     G --> H
-    H --> I[Write metadata attributes]
+    H --> I[Write HDF5 datasets and attributes]
+    H --> J[Emit VITA Signal Data and Context packets]
 ```
 
 Important output behavior:
@@ -228,3 +232,4 @@ Important output behavior:
 - Pulsed outputs write chunk datasets.
 - CW and FMCW outputs write `I_data` and `Q_data`.
 - Metadata attributes describe the receiver mode and sampling settings.
+- VITA output uses configured fixed full-scale; clipping is reported through VITA stream statistics and packet indicators.
