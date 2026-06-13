@@ -13,7 +13,11 @@ namespace
 	{
 		std::ostringstream buffer;
 		std::streambuf* old{nullptr};
-		CerrCapture() { old = std::cerr.rdbuf(buffer.rdbuf()); }
+		CerrCapture() : old(std::cerr.rdbuf(buffer.rdbuf())) {}
+		CerrCapture(const CerrCapture&) = delete;
+		CerrCapture& operator=(const CerrCapture&) = delete;
+		CerrCapture(CerrCapture&&) = delete;
+		CerrCapture& operator=(CerrCapture&&) = delete;
 		~CerrCapture() { std::cerr.rdbuf(old); }
 		[[nodiscard]] std::string str() const { return buffer.str(); }
 	};
@@ -21,11 +25,20 @@ namespace
 	struct LogLevelGuard
 	{
 		explicit LogLevelGuard(logging::Level level) { logging::logger.setLevel(level); }
+		LogLevelGuard(const LogLevelGuard&) = delete;
+		LogLevelGuard& operator=(const LogLevelGuard&) = delete;
+		LogLevelGuard(LogLevelGuard&&) = delete;
+		LogLevelGuard& operator=(LogLevelGuard&&) = delete;
 		~LogLevelGuard() { logging::logger.setLevel(logging::Level::INFO); }
 	};
 
 	struct LogCallbackGuard
 	{
+		LogCallbackGuard() = default;
+		LogCallbackGuard(const LogCallbackGuard&) = delete;
+		LogCallbackGuard& operator=(const LogCallbackGuard&) = delete;
+		LogCallbackGuard(LogCallbackGuard&&) = delete;
+		LogCallbackGuard& operator=(LogCallbackGuard&&) = delete;
 		~LogCallbackGuard() { logging::logger.setCallback(nullptr, nullptr); }
 	};
 
@@ -61,8 +74,8 @@ TEST_CASE("getLevelString maps levels", "[core][logging]")
 
 TEST_CASE("Logger respects log level filtering", "[core][logging]")
 {
-	LogLevelGuard guard(logging::Level::ERROR);
-	CerrCapture capture;
+	LogLevelGuard const guard(logging::Level::ERROR);
+	CerrCapture const capture;
 
 	logging::logger.log(logging::Level::INFO, "ignored message");
 	REQUIRE(capture.str().empty());
@@ -75,8 +88,8 @@ TEST_CASE("Logger respects log level filtering", "[core][logging]")
 
 TEST_CASE("Logger OFF level suppresses all log output", "[core][logging]")
 {
-	LogLevelGuard guard(logging::Level::OFF);
-	CerrCapture capture;
+	LogLevelGuard const guard(logging::Level::OFF);
+	CerrCapture const capture;
 
 	logging::logger.log(logging::Level::FATAL, "ignored fatal message");
 	logging::logger.log(logging::Level::OFF, "ignored off message");
@@ -87,8 +100,8 @@ TEST_CASE("Logger OFF level suppresses all log output", "[core][logging]")
 
 TEST_CASE("Logger includes source location and formats messages", "[core][logging]")
 {
-	LogLevelGuard guard(logging::Level::TRACE);
-	CerrCapture capture;
+	LogLevelGuard const guard(logging::Level::TRACE);
+	CerrCapture const capture;
 
 	const std::source_location location = std::source_location::current();
 	logging::logger.log(logging::Level::INFO, location, "value {}", 7);
@@ -104,7 +117,7 @@ TEST_CASE("Logger includes source location and formats messages", "[core][loggin
 
 TEST_CASE("Logger can write to a file", "[core][logging]")
 {
-	LogLevelGuard guard(logging::Level::INFO);
+	LogLevelGuard const guard(logging::Level::INFO);
 
 	const auto log_path = std::filesystem::temp_directory_path() / "fers_logging_test.log";
 	const auto result = logging::logger.logToFile(log_path.string());
@@ -112,7 +125,7 @@ TEST_CASE("Logger can write to a file", "[core][logging]")
 
 	logging::logger.log(logging::Level::INFO, "file message");
 
-	std::ifstream file(log_path);
+	std::ifstream const file(log_path);
 	REQUIRE(file.good());
 	std::stringstream contents;
 	contents << file.rdbuf();
@@ -131,9 +144,9 @@ TEST_CASE("Logger reports file open errors", "[core][logging]")
 
 TEST_CASE("Logger forwards accepted lines to callback", "[core][logging]")
 {
-	LogLevelGuard level_guard(logging::Level::WARNING);
-	LogCallbackGuard callback_guard;
-	CerrCapture capture;
+	LogLevelGuard const level_guard(logging::Level::WARNING);
+	LogCallbackGuard const callback_guard;
+	CerrCapture const capture;
 	LogCallbackState state;
 
 	logging::logger.setCallback(recordLogCallback, &state);

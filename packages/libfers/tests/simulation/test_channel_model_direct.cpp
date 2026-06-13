@@ -31,6 +31,10 @@ namespace
 	{
 		params::Parameters saved;
 		ParamGuard() : saved(params::params) {}
+		ParamGuard(const ParamGuard&) = delete;
+		ParamGuard& operator=(const ParamGuard&) = delete;
+		ParamGuard(ParamGuard&&) = delete;
+		ParamGuard& operator=(ParamGuard&&) = delete;
 		~ParamGuard() { params::params = saved; }
 	};
 
@@ -78,7 +82,7 @@ namespace
 
 TEST_CASE("solveReDirect computes correct Friis power for isotropic antennas", "[simulation][channel_model][direct]")
 {
-	ParamGuard guard;
+	ParamGuard const guard;
 	params::params.reset();
 
 	// Setup: Tx at origin, Rx at (1000, 0, 0)
@@ -131,7 +135,7 @@ TEST_CASE("solveReDirect computes correct Friis power for isotropic antennas", "
 
 TEST_CASE("solveReDirect Friis equation with different distances", "[simulation][channel_model][direct]")
 {
-	ParamGuard guard;
+	ParamGuard const guard;
 	params::params.reset();
 
 	// Verify inverse-square law: doubling distance should quarter the power
@@ -191,7 +195,7 @@ TEST_CASE("solveReDirect Friis equation with different distances", "[simulation]
 
 TEST_CASE("solveReDirect with noproploss flag ignores distance in power", "[simulation][channel_model][direct]")
 {
-	ParamGuard guard;
+	ParamGuard const guard;
 	params::params.reset();
 
 	const RealType c = params::c();
@@ -238,7 +242,7 @@ TEST_CASE("solveReDirect with noproploss flag ignores distance in power", "[simu
 
 TEST_CASE("solveReDirect phase is proportional to carrier frequency", "[simulation][channel_model][direct]")
 {
-	ParamGuard guard;
+	ParamGuard const guard;
 	params::params.reset();
 
 	// Phase = -delay * 2 * pi * carrier
@@ -304,7 +308,7 @@ TEST_CASE("solveReDirect phase is proportional to carrier frequency", "[simulati
 TEST_CASE("calculateDirectPathContribution amplitude matches Friis equation with signal power",
 		  "[simulation][channel_model][direct]")
 {
-	ParamGuard guard;
+	ParamGuard const guard;
 	params::params.reset();
 
 	// Setup: Tx at (0,0,0), Rx at (1000,0,0)
@@ -348,7 +352,7 @@ TEST_CASE("calculateDirectPathContribution amplitude matches Friis equation with
 
 TEST_CASE("calculateDirectPathContribution phase matches propagation delay", "[simulation][channel_model][direct]")
 {
-	ParamGuard guard;
+	ParamGuard const guard;
 	params::params.reset();
 
 	const RealType c = params::c();
@@ -393,7 +397,7 @@ TEST_CASE("calculateDirectPathContribution phase matches propagation delay", "[s
 TEST_CASE("FMCW streaming direct path preserves in-flight segment-end tail",
 		  "[simulation][channel_model][direct][fmcw]")
 {
-	ParamGuard guard;
+	ParamGuard const guard;
 	params::params.reset();
 	params::setRate(80.0e6);
 	params::setSimSamplingRate(80.0e6);
@@ -409,7 +413,7 @@ TEST_CASE("FMCW streaming direct path preserves in-flight segment-end tail",
 	const RealType chirp_duration = 250.0e-6;
 	const RealType chirp_period = chirp_duration;
 	const RealType chirp_rate = chirp_bandwidth / chirp_duration;
-	const std::size_t sample_count = static_cast<std::size_t>(std::ceil(tau / dt));
+	const auto sample_count = static_cast<std::size_t>(std::ceil(tau / dt));
 
 	radar::Platform tx_plat("tx_plat");
 	setupPlatform(tx_plat, math::Vec3{0.0, 0.0, 0.0});
@@ -480,7 +484,7 @@ TEST_CASE("FMCW streaming direct path preserves in-flight segment-end tail",
 
 TEST_CASE("CW streaming direct path gates schedules by retarded transmit time", "[simulation][channel_model][direct]")
 {
-	ParamGuard guard;
+	ParamGuard const guard;
 	params::params.reset();
 	params::setC(100.0);
 
@@ -524,7 +528,7 @@ TEST_CASE("CW streaming direct path gates schedules by retarded transmit time", 
 
 TEST_CASE("FMCW streaming direct path keeps chirp cache per source", "[simulation][channel_model][direct][fmcw]")
 {
-	ParamGuard guard;
+	ParamGuard const guard;
 	params::params.reset();
 
 	const RealType dist = 300.0;
@@ -578,7 +582,7 @@ TEST_CASE("FMCW streaming direct path keeps chirp cache per source", "[simulatio
 TEST_CASE("calculateDirectPathContribution with noproploss gives distance-independent amplitude",
 		  "[simulation][channel_model][direct]")
 {
-	ParamGuard guard;
+	ParamGuard const guard;
 	params::params.reset();
 
 	const RealType c = params::c();
@@ -624,7 +628,7 @@ TEST_CASE("calculateDirectPathContribution with noproploss gives distance-indepe
 TEST_CASE("calculateDirectPathContribution applies buffered delayed timing phase with interpolation",
 		  "[simulation][channel_model][direct]")
 {
-	ParamGuard guard;
+	ParamGuard const guard;
 	params::params.reset();
 	params::setTime(0.0, 1.0);
 	params::setRate(10.0);
@@ -673,7 +677,7 @@ TEST_CASE("calculateDirectPathContribution applies buffered delayed timing phase
 
 TEST_CASE("solveReDirect at 3D separation produces correct distance and delay", "[simulation][channel_model][direct]")
 {
-	ParamGuard guard;
+	ParamGuard const guard;
 	params::params.reset();
 
 	// Tx at (100, 200, 300), Rx at (400, 600, 800)
@@ -721,7 +725,7 @@ TEST_CASE("solveReDirect at 3D separation produces correct distance and delay", 
 
 TEST_CASE("solveReDirect power scales with lambda squared", "[simulation][channel_model][direct]")
 {
-	ParamGuard guard;
+	ParamGuard const guard;
 	params::params.reset();
 
 	// Friis: Pr/Pt ∝ lambda^2

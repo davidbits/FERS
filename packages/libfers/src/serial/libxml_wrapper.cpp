@@ -11,9 +11,12 @@
 
 #include "libxml_wrapper.h"
 
+#include <array>
 #include <cctype>
 #include <cstdarg>
+#include <cstdio>
 #include <format>
+#include <limits>
 #include <string>
 
 #include "libxml/encoding.h"
@@ -34,13 +37,36 @@ namespace
 			return;
 		}
 
-		char buf[1024];
+		std::array<char, 1024> buf{};
 		va_list args;
+		// NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-array-to-pointer-decay): va_list is an array typedef on this ABI.
 		va_start(args, msg);
-		vsnprintf(buf, sizeof(buf), msg, args);
+		// NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-array-to-pointer-decay): va_list is required by vsnprintf.
+		std::vsnprintf(buf.data(), buf.size(), msg, args);
+		// NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-array-to-pointer-decay): va_list is an array typedef on this ABI.
 		va_end(args);
 
-		err_str->append(buf);
+		err_str->append(buf.data());
+	}
+
+	[[nodiscard]] int checkedXmlInputSize(const std::size_t size)
+	{
+		if (size > static_cast<std::size_t>(std::numeric_limits<int>::max()))
+		{
+			throw XmlException("XML input exceeds libxml2 length limit.");
+		}
+		return static_cast<int>(size);
+	}
+
+	[[nodiscard]] std::string bytesToString(const std::span<const unsigned char> bytes)
+	{
+		std::string result;
+		result.reserve(bytes.size());
+		for (const unsigned char byte : bytes)
+		{
+			result.push_back(static_cast<char>(byte));
+		}
+		return result;
 	}
 
 	/// Formats a raw XML error message with a title and remediation hint.
@@ -96,10 +122,11 @@ namespace
 
 bool XmlDocument::validateWithDtd(const std::span<const unsigned char> dtdData) const
 {
+	const std::string dtd_string = bytesToString(dtdData);
 	xmlDtdPtr dtd =
 		xmlIOParseDTD(nullptr,
-					  xmlParserInputBufferCreateMem(reinterpret_cast<const char*>(dtdData.data()),
-													static_cast<int>(dtdData.size()), XML_CHAR_ENCODING_UTF8),
+					  xmlParserInputBufferCreateMem(dtd_string.data(), checkedXmlInputSize(dtd_string.size()),
+													XML_CHAR_ENCODING_UTF8),
 					  XML_CHAR_ENCODING_UTF8);
 	if (dtd == nullptr)
 	{
@@ -125,8 +152,9 @@ bool XmlDocument::validateWithDtd(const std::span<const unsigned char> dtdData) 
 
 	if (!is_valid)
 	{
-		std::string fancyError = formatError("XML DTD Validation Failed", dtdErrors,
-											 "Check your scenario XML tags and attributes against 'fers-xml.dtd'.");
+		const std::string fancyError =
+			formatError("XML DTD Validation Failed", dtdErrors,
+						"Check your scenario XML tags and attributes against 'fers-xml.dtd'.");
 		LOG(logging::Level::ERROR, "{}", fancyError);
 		throw XmlException("XML failed DTD validation.");
 	}
@@ -136,9 +164,9 @@ bool XmlDocument::validateWithDtd(const std::span<const unsigned char> dtdData) 
 
 bool XmlDocument::validateWithXsd(const std::span<const unsigned char> xsdData) const
 {
+	const std::string xsd_string = bytesToString(xsdData);
 	const std::unique_ptr<xmlSchemaParserCtxt, decltype(&xmlSchemaFreeParserCtxt)> schema_parser_ctxt(
-		xmlSchemaNewMemParserCtxt(reinterpret_cast<const char*>(xsdData.data()), static_cast<int>(xsdData.size())),
-		xmlSchemaFreeParserCtxt);
+		xmlSchemaNewMemParserCtxt(xsd_string.data(), checkedXmlInputSize(xsd_string.size())), xmlSchemaFreeParserCtxt);
 	if (!schema_parser_ctxt)
 	{
 		throw XmlException("Failed to create schema parser context.");
@@ -153,7 +181,7 @@ bool XmlDocument::validateWithXsd(const std::span<const unsigned char> xsdData) 
 																	  xmlSchemaFree);
 	if (!schema)
 	{
-		std::string fancyError =
+		const std::string fancyError =
 			formatError("XSD Schema Parse Failed", xsdParseErrors, "The internal XSD schema is invalid.");
 		LOG(logging::Level::FATAL, "{}", fancyError);
 		throw XmlException("Failed to parse schema from memory.");
@@ -173,8 +201,9 @@ bool XmlDocument::validateWithXsd(const std::span<const unsigned char> xsdData) 
 
 	if (const bool is_valid = xmlSchemaValidateDoc(schema_valid_ctxt.get(), _doc.get()) == 0; !is_valid)
 	{
-		std::string fancyError = formatError("XML XSD Validation Failed", xsdErrors,
-											 "Check your scenario XML tags and attributes against 'fers-xml.xsd'.");
+		const std::string fancyError =
+			formatError("XML XSD Validation Failed", xsdErrors,
+						"Check your scenario XML tags and attributes against 'fers-xml.xsd'.");
 		LOG(logging::Level::ERROR, "{}", fancyError);
 		throw XmlException("XML failed XSD validation.");
 	}
@@ -203,7 +232,7 @@ void removeIncludeElements(const XmlDocument& doc)
 
 	while (true)
 	{
-		if (XmlElement include_element = root.childElement("include", 0); include_element.isValid())
+		if (const XmlElement include_element = root.childElement("include", 0); include_element.isValid())
 		{
 			xmlUnlinkNode(include_element.getNode());
 			xmlFreeNode(include_element.getNode());
@@ -222,7 +251,7 @@ bool XmlDocument::loadFile(const std::string_view filename)
 	_doc.reset(xmlReadFile(filename.data(), nullptr, XML_PARSE_NOERROR | XML_PARSE_NOWARNING));
 	if (!_doc)
 	{
-		std::string fancyError =
+		const std::string fancyError =
 			formatError("XML Parsing Failed", getXmlLastErrorFormatted(), "Ensure the XML file is well-formed.");
 		LOG(logging::Level::ERROR, "{}", fancyError);
 		return false;
@@ -237,7 +266,7 @@ bool XmlDocument::loadString(const std::string& content)
 							 XML_PARSE_NOERROR | XML_PARSE_NOWARNING));
 	if (!_doc)
 	{
-		std::string fancyError =
+		const std::string fancyError =
 			formatError("XML Parsing Failed", getXmlLastErrorFormatted(), "Ensure the XML string is well-formed.");
 		LOG(logging::Level::ERROR, "{}", fancyError);
 		return false;
@@ -260,7 +289,7 @@ std::string XmlDocument::dumpToString() const
 		LOG(logging::Level::ERROR, "Failed to dump XML document to memory buffer.");
 		return "";
 	}
-	const std::string result(reinterpret_cast<const char*>(buffer), static_cast<size_t>(size));
+	const std::string result = xml_detail::toString(buffer, size);
 	xmlFree(buffer);
 	return result;
 }

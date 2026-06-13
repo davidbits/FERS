@@ -38,6 +38,10 @@ namespace
 	{
 		params::Parameters saved;
 		ParamGuard() : saved(params::params) {}
+		ParamGuard(const ParamGuard&) = delete;
+		ParamGuard& operator=(const ParamGuard&) = delete;
+		ParamGuard(ParamGuard&&) = delete;
+		ParamGuard& operator=(ParamGuard&&) = delete;
 		~ParamGuard() { params::params = saved; }
 	};
 
@@ -171,6 +175,55 @@ namespace
 		int total;
 	};
 
+	void requireJitteredPulsedChunks(const std::filesystem::path& output_path)
+	{
+		HighFive::File const file(output_path.string(), HighFive::File::ReadOnly);
+		const auto i_chunk_0 = readDataset(file, "chunk_000000_I");
+		const auto q_chunk_0 = readDataset(file, "chunk_000000_Q");
+		const auto i_chunk_1 = readDataset(file, "chunk_000001_I");
+		const auto q_chunk_1 = readDataset(file, "chunk_000001_Q");
+
+		RealType time_attr_0 = 0.0;
+		RealType time_attr_1 = 0.0;
+		file.getDataSet("chunk_000000_I").getAttribute("time").read(time_attr_0);
+		file.getDataSet("chunk_000001_I").getAttribute("time").read(time_attr_1);
+
+		REQUIRE(i_chunk_0.size() == 4u);
+		REQUIRE(q_chunk_0.size() == 4u);
+		REQUIRE(i_chunk_1.size() == 4u);
+		REQUIRE(q_chunk_1.size() == 4u);
+
+		for (const auto& sample : i_chunk_0)
+		{
+			REQUIRE_THAT(sample, WithinAbs(0.0, 1e-12));
+		}
+		for (const auto& sample : i_chunk_1)
+		{
+			REQUIRE_THAT(sample, WithinAbs(0.0, 1e-12));
+		}
+		REQUIRE_THAT(q_chunk_0[0], WithinAbs(1.0, 1e-12));
+		REQUIRE_THAT(q_chunk_0[1], WithinAbs(1.0, 1e-12));
+		REQUIRE_THAT(q_chunk_0[2], WithinAbs(0.0, 1e-12));
+		REQUIRE_THAT(q_chunk_0[3], WithinAbs(0.0, 1e-12));
+		REQUIRE_THAT(q_chunk_1[0], WithinAbs(1.0, 1e-12));
+		REQUIRE_THAT(q_chunk_1[1], WithinAbs(1.0, 1e-12));
+		REQUIRE_THAT(q_chunk_1[2], WithinAbs(0.0, 1e-12));
+		REQUIRE_THAT(q_chunk_1[3], WithinAbs(0.0, 1e-12));
+		REQUIRE_THAT(time_attr_0, WithinAbs(0.125, 1e-12));
+		REQUIRE_THAT(time_attr_1, WithinAbs(1.125, 1e-12));
+	}
+
+	[[nodiscard]] bool hasCompletionProgress(const std::vector<ProgressCall>& progress_calls,
+											 const std::string& receiver_name)
+	{
+		return std::ranges::any_of(progress_calls,
+								   [&receiver_name](const ProgressCall& call)
+								   {
+									   return call.message == "Finished Exporting " + receiver_name &&
+										   call.current == 100 && call.total == 100;
+								   });
+	}
+
 	struct CapturedSinkBlock
 	{
 		core::ReceiverStreamDescriptor stream;
@@ -225,7 +278,7 @@ namespace
 TEST_CASE("Hdf5OutputSink writes streaming blocks through the receiver output contract",
 		  "[processing][finalizer][hdf5]")
 {
-	ParamGuard guard;
+	ParamGuard const guard;
 	params::setAdcBits(0);
 
 	const std::string receiver_name = uniqueName("hdf5_sink");
@@ -254,7 +307,7 @@ TEST_CASE("Hdf5OutputSink writes streaming blocks through the receiver output co
 	sink.finalize();
 
 	{
-		HighFive::File file(output_path.string(), HighFive::File::ReadOnly);
+		HighFive::File const file(output_path.string(), HighFive::File::ReadOnly);
 		const auto i_data = readDataset(file, "I_data");
 		const auto q_data = readDataset(file, "Q_data");
 
@@ -271,7 +324,7 @@ TEST_CASE("Hdf5OutputSink writes streaming blocks through the receiver output co
 TEST_CASE("buildReceiverSampleBlock captures receiver identity, timing, and sample basis",
 		  "[processing][finalizer][vita49]")
 {
-	ParamGuard guard;
+	ParamGuard const guard;
 	params::setAdcBits(12);
 	params::setOrigin(-33.5, 18.25, 123.0);
 	params::setCoordinateSystem(params::CoordinateFrame::UTM, 34, false);
@@ -312,7 +365,7 @@ TEST_CASE("buildReceiverSampleBlock captures receiver identity, timing, and samp
 	REQUIRE_THAT(block.stream.fmcw.chirp_period, WithinAbs(3.0e-3, 1e-12));
 	REQUIRE_THAT(block.stream.fmcw.chirp_rate, WithinAbs(20.0e9, 1e-3));
 	REQUIRE(block.stream.fmcw.chirp_count.has_value());
-	REQUIRE(*block.stream.fmcw.chirp_count == 7u);
+	REQUIRE(block.stream.fmcw.chirp_count.value_or(0u) == 7u);
 	REQUIRE_THAT(block.stream.sample_rate, WithinAbs(2.0e6, 1e-12));
 	REQUIRE_THAT(block.stream.reference_frequency, WithinAbs(10.5e9, 1e-6));
 	REQUIRE_THAT(block.first_sample_time, WithinAbs(1.25, 1e-12));
@@ -323,7 +376,7 @@ TEST_CASE("buildReceiverSampleBlock captures receiver identity, timing, and samp
 TEST_CASE("buildReceiverStreamDescriptor keeps CW metadata isolated from active FMCW sources",
 		  "[processing][finalizer][vita49]")
 {
-	ParamGuard guard;
+	ParamGuard const guard;
 	params::setTime(0.0, 1.0);
 	params::setRate(1'000.0);
 	params::setOversampleRatio(1);
@@ -333,7 +386,7 @@ TEST_CASE("buildReceiverStreamDescriptor keeps CW metadata isolated from active 
 	auto timing_owner = makeQuietTiming("cw_metadata_clk", 27, 5.0e9);
 	receiver.setTiming(timing_owner.timing);
 
-	FmcwTxFixture source_fixture("MixedFmcwTx", 1101, 1102, 200.0, 0.001, 0.002, 0.0, std::size_t{4});
+	FmcwTxFixture const source_fixture("MixedFmcwTx", 1101, 1102, 200.0, 0.001, 0.002, 0.0, std::size_t{4});
 	const std::vector sources = {core::makeActiveSource(&source_fixture.transmitter, 0.0, params::endTime())};
 
 	const auto descriptor = processing::buildReceiverStreamDescriptor(&receiver, params::rate(), sources);
@@ -347,7 +400,7 @@ TEST_CASE("buildReceiverStreamDescriptor keeps CW metadata isolated from active 
 TEST_CASE("buildStreamingOutputMetadata records FMCW source metadata for detached receivers",
 		  "[processing][finalizer][fmcw][metadata]")
 {
-	ParamGuard guard;
+	ParamGuard const guard;
 	params::setTime(0.0, 0.01);
 	params::setRate(1'000.0);
 	params::setOversampleRatio(1);
@@ -363,7 +416,7 @@ TEST_CASE("buildStreamingOutputMetadata records FMCW source metadata for detache
 	receiver.setTiming(timing_owner.timing);
 	receiver.setNoiseTemperature(0.0);
 
-	FmcwTxFixture source_fixture("DetachedTx", 901, 902, 200.0, 0.001, 0.002, 5.0, std::size_t{4});
+	FmcwTxFixture const source_fixture("DetachedTx", 901, 902, 200.0, 0.001, 0.002, 5.0, std::size_t{4});
 	const auto source = core::makeActiveSource(&source_fixture.transmitter, 0.0, params::endTime());
 
 	const auto metadata =
@@ -385,17 +438,19 @@ TEST_CASE("buildStreamingOutputMetadata records FMCW source metadata for detache
 	REQUIRE_THAT(source_metadata.waveform.chirp_rate_signed, WithinAbs(200'000.0, 1e-12));
 	REQUIRE(source_metadata.waveform.chirp_count == std::optional<std::uint64_t>{4});
 	REQUIRE(source_metadata.segments.size() == 1u);
-	REQUIRE_THAT(*source_metadata.segments.front().first_chirp_start_time, WithinAbs(0.0, 1e-12));
+	REQUIRE(source_metadata.segments.front().first_chirp_start_time.has_value());
+	REQUIRE_THAT(source_metadata.segments.front().first_chirp_start_time.value_or(1.0), WithinAbs(0.0, 1e-12));
 	REQUIRE(source_metadata.segments.front().emitted_chirp_count == std::optional<std::uint64_t>{4});
 
 	const auto& streaming_segment = metadata.streaming_segments.front();
-	REQUIRE_THAT(*streaming_segment.first_chirp_start_time, WithinAbs(0.0, 1e-12));
+	REQUIRE(streaming_segment.first_chirp_start_time.has_value());
+	REQUIRE_THAT(streaming_segment.first_chirp_start_time.value_or(1.0), WithinAbs(0.0, 1e-12));
 	REQUIRE(streaming_segment.emitted_chirp_count == std::optional<std::uint64_t>{4});
 }
 
 TEST_CASE("buildStreamingOutputMetadata writes IF-rate FMCW metadata", "[processing][finalizer][fmcw][if]")
 {
-	ParamGuard guard;
+	ParamGuard const guard;
 	params::setTime(0.0, 1.0);
 	params::setRate(256.0);
 	params::setOversampleRatio(1);
@@ -417,7 +472,7 @@ TEST_CASE("buildStreamingOutputMetadata writes IF-rate FMCW metadata", "[process
 								  .waveform_name = ""});
 	receiver.setFmcwIfChainRequest(
 		{.sample_rate_hz = 64.0, .filter_bandwidth_hz = 16.0, .filter_transition_width_hz = 8.0});
-	FmcwTxFixture source_fixture("IfTx", 1001, 1002, 1.0, 1.0, 1.0, 0.0, std::size_t{1});
+	FmcwTxFixture const source_fixture("IfTx", 1001, 1002, 1.0, 1.0, 1.0, 0.0, std::size_t{1});
 	const auto source = core::makeActiveSource(&source_fixture.transmitter, params::startTime(), params::endTime());
 	receiver.setResolvedDechirpSources({source});
 
@@ -436,7 +491,8 @@ TEST_CASE("buildStreamingOutputMetadata writes IF-rate FMCW metadata", "[process
 	REQUIRE(metadata.fmcw_if_resample_numerator == 1u);
 	REQUIRE(metadata.fmcw_if_resample_denominator == 4u);
 	REQUIRE(metadata.fmcw_if_sample_rate == std::optional<RealType>{64.0});
-	REQUIRE_THAT(*metadata.fmcw_if_filter_group_delay_seconds, WithinAbs(plan.group_delay_seconds, 1e-12));
+	REQUIRE(metadata.fmcw_if_filter_group_delay_seconds.has_value());
+	REQUIRE_THAT(metadata.fmcw_if_filter_group_delay_seconds.value_or(0.0), WithinAbs(plan.group_delay_seconds, 1e-12));
 	REQUIRE(metadata.fmcw_if_group_delay_compensated);
 	REQUIRE(metadata.streaming_segments.front().sample_count == 64u);
 }
@@ -444,7 +500,7 @@ TEST_CASE("buildStreamingOutputMetadata writes IF-rate FMCW metadata", "[process
 TEST_CASE("buildStreamingOutputMetadata keeps multiple FMCW sources unambiguous",
 		  "[processing][finalizer][fmcw][metadata]")
 {
-	ParamGuard guard;
+	ParamGuard const guard;
 	params::setTime(0.0, 0.01);
 	params::setRate(1'000.0);
 	params::setOversampleRatio(1);
@@ -460,8 +516,8 @@ TEST_CASE("buildStreamingOutputMetadata keeps multiple FMCW sources unambiguous"
 	receiver.setTiming(timing_owner.timing);
 	receiver.setNoiseTemperature(0.0);
 
-	FmcwTxFixture first_source("FirstTx", 911, 912, 200.0, 0.001, 0.002, 0.0, std::size_t{4});
-	FmcwTxFixture second_source("SecondTx", 921, 922, 300.0, 0.0015, 0.003, 10.0, std::size_t{2});
+	FmcwTxFixture const first_source("FirstTx", 911, 912, 200.0, 0.001, 0.002, 0.0, std::size_t{4});
+	FmcwTxFixture const second_source("SecondTx", 921, 922, 300.0, 0.0015, 0.003, 10.0, std::size_t{2});
 
 	const std::vector sources = {core::makeActiveSource(&first_source.transmitter, 0.0, params::endTime()),
 								 core::makeActiveSource(&second_source.transmitter, 0.0, params::endTime())};
@@ -479,7 +535,7 @@ TEST_CASE("buildStreamingOutputMetadata keeps multiple FMCW sources unambiguous"
 
 TEST_CASE("runPulsedFinalizer writes jittered chunks and emits completion progress", "[processing][finalizer]")
 {
-	ParamGuard guard;
+	ParamGuard const guard;
 	params::setRate(8.0);
 	params::setOversampleRatio(1);
 	params::setAdcBits(0);
@@ -501,7 +557,7 @@ TEST_CASE("runPulsedFinalizer writes jittered chunks and emits completion progre
 	receiver.setWindowProperties(0.5, 1.0, 0.125);
 
 	radar::Platform tx_platform("TxPlatform");
-	radar::Transmitter transmitter(&tx_platform, "TxA", radar::OperationMode::PULSED_MODE, 701);
+	radar::Transmitter const transmitter(&tx_platform, "TxA", radar::OperationMode::PULSED_MODE, 701);
 	std::vector<std::unique_ptr<fers_signal::RadarSignal>> wave_store;
 
 	core::RenderingJob first_job{};
@@ -533,46 +589,8 @@ TEST_CASE("runPulsedFinalizer writes jittered chunks and emits completion progre
 	worker.join();
 	hdf5_sink->finalize();
 
-	{
-		HighFive::File file(output_path.string(), HighFive::File::ReadOnly);
-		const auto i_chunk_0 = readDataset(file, "chunk_000000_I");
-		const auto q_chunk_0 = readDataset(file, "chunk_000000_Q");
-		const auto i_chunk_1 = readDataset(file, "chunk_000001_I");
-		const auto q_chunk_1 = readDataset(file, "chunk_000001_Q");
-
-		RealType time_attr_0 = 0.0;
-		RealType time_attr_1 = 0.0;
-		file.getDataSet("chunk_000000_I").getAttribute("time").read(time_attr_0);
-		file.getDataSet("chunk_000001_I").getAttribute("time").read(time_attr_1);
-
-		REQUIRE(i_chunk_0.size() == 4u);
-		REQUIRE(q_chunk_0.size() == 4u);
-		REQUIRE(i_chunk_1.size() == 4u);
-		REQUIRE(q_chunk_1.size() == 4u);
-
-		for (const auto& sample : i_chunk_0)
-		{
-			REQUIRE_THAT(sample, WithinAbs(0.0, 1e-12));
-		}
-		for (const auto& sample : i_chunk_1)
-		{
-			REQUIRE_THAT(sample, WithinAbs(0.0, 1e-12));
-		}
-		REQUIRE_THAT(q_chunk_0[0], WithinAbs(1.0, 1e-12));
-		REQUIRE_THAT(q_chunk_0[1], WithinAbs(1.0, 1e-12));
-		REQUIRE_THAT(q_chunk_0[2], WithinAbs(0.0, 1e-12));
-		REQUIRE_THAT(q_chunk_0[3], WithinAbs(0.0, 1e-12));
-		REQUIRE_THAT(q_chunk_1[0], WithinAbs(1.0, 1e-12));
-		REQUIRE_THAT(q_chunk_1[1], WithinAbs(1.0, 1e-12));
-		REQUIRE_THAT(q_chunk_1[2], WithinAbs(0.0, 1e-12));
-		REQUIRE_THAT(q_chunk_1[3], WithinAbs(0.0, 1e-12));
-		REQUIRE_THAT(time_attr_0, WithinAbs(0.125, 1e-12));
-		REQUIRE_THAT(time_attr_1, WithinAbs(1.125, 1e-12));
-	}
-
-	REQUIRE(std::ranges::any_of(
-		progress_calls, [&receiver_name](const ProgressCall& call)
-		{ return call.message == "Finished Exporting " + receiver_name && call.current == 100 && call.total == 100; }));
+	requireJitteredPulsedChunks(output_path);
+	REQUIRE(hasCompletionProgress(progress_calls, receiver_name));
 
 	std::filesystem::remove_all(out_dir);
 }
@@ -580,7 +598,7 @@ TEST_CASE("runPulsedFinalizer writes jittered chunks and emits completion progre
 TEST_CASE("runPulsedFinalizer routes completed acquisition windows to an output sink without HDF5",
 		  "[processing][finalizer][vita49]")
 {
-	ParamGuard guard;
+	ParamGuard const guard;
 	params::setTime(0.0, 1.0);
 	params::setRate(4.0);
 	params::setOversampleRatio(1);
@@ -603,7 +621,7 @@ TEST_CASE("runPulsedFinalizer routes completed acquisition windows to an output 
 	receiver.setWindowProperties(0.5, 1.0, 0.0);
 
 	radar::Platform tx_platform("TxPlatform");
-	radar::Transmitter transmitter(&tx_platform, "TxA", radar::OperationMode::PULSED_MODE, 701);
+	radar::Transmitter const transmitter(&tx_platform, "TxA", radar::OperationMode::PULSED_MODE, 701);
 	std::vector<std::unique_ptr<fers_signal::RadarSignal>> wave_store;
 
 	core::RenderingJob job{};

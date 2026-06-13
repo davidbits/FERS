@@ -15,11 +15,12 @@
 #include <core/logging.h>
 #include <core/parameters.h>
 #include <core/sim_id.h>
+#include <cstddef>
 #include <cstdint>
-#include <cstring>
 #include <filesystem>
 #include <format>
 #include <functional>
+#include <iterator>
 #include <libfers/api.h>
 #include <limits>
 #include <math/path.h>
@@ -99,6 +100,7 @@ fers_context_t* fers_context_create()
 	discard_warning_capture();
 	try
 	{
+		// NOLINTNEXTLINE(cppcoreguidelines-owning-memory): Public C API returns an owned handle.
 		return new fers_context_t();
 	}
 	catch (const std::bad_alloc& e)
@@ -119,6 +121,7 @@ void fers_context_destroy(fers_context_t* context)
 	{
 		return;
 	}
+	// NOLINTNEXTLINE(cppcoreguidelines-owning-memory): Frees handles allocated by `fers_context_create`.
 	delete context;
 }
 
@@ -231,6 +234,14 @@ namespace
 		return std::nullopt;
 	}
 
+	void copy_visual_link_label(fers_visual_link_t& destination, const std::string& source) noexcept
+	{
+		const std::size_t count = std::min(source.size(), sizeof(destination.label) - 1);
+		std::copy_n(source.begin(), count, std::begin(destination.label));
+		destination.label[count] = '\0';
+		destination.label[sizeof(destination.label) - 1] = '\0';
+	}
+
 	[[nodiscard]] nlohmann::json stream_stats_to_json(const core::ReceiverStreamStats& stream)
 	{
 		auto timestamp_to_json = [](const std::optional<core::Vita49Timestamp>& timestamp) -> nlohmann::json
@@ -327,7 +338,7 @@ namespace
 		void* user_data = nullptr;
 
 		{
-			std::scoped_lock lock(log_callback_mutex);
+			std::scoped_lock const lock(log_callback_mutex);
 			callback = log_callback;
 			user_data = log_callback_user_data;
 		}
@@ -370,7 +381,7 @@ fers_log_level_t fers_get_log_level() { return map_internal_log_level(logging::l
 void fers_set_log_callback(fers_log_callback_t callback, void* user_data)
 {
 	{
-		std::scoped_lock lock(log_callback_mutex);
+		std::scoped_lock const lock(log_callback_mutex);
 		log_callback = callback;
 		log_callback_user_data = user_data;
 	}
@@ -413,7 +424,7 @@ int fers_set_output_directory(fers_context_t* context, const char* out_dir)
 		set_api_error("Invalid arguments: context or out_dir is NULL.");
 		return -1;
 	}
-	auto* ctx = reinterpret_cast<FersContext*>(context);
+	auto* ctx = context;
 	try
 	{
 		ctx->setOutputDir(out_dir);
@@ -435,7 +446,7 @@ int fers_use_hdf5_output(fers_context_t* context)
 		return -1;
 	}
 
-	auto* ctx = reinterpret_cast<FersContext*>(context);
+	auto* ctx = context;
 	try
 	{
 		core::OutputConfig config = ctx->getOutputConfig();
@@ -474,7 +485,7 @@ int fers_enable_vita49_udp_output(fers_context_t* context, const char* host, con
 		return 1;
 	}
 
-	auto* ctx = reinterpret_cast<FersContext*>(context);
+	auto* ctx = context;
 	try
 	{
 		core::OutputConfig config = ctx->getOutputConfig();
@@ -505,7 +516,7 @@ int fers_set_vita49_fullscale(fers_context_t* context, const double fullscale)
 		return 1;
 	}
 
-	auto* ctx = reinterpret_cast<FersContext*>(context);
+	auto* ctx = context;
 	core::OutputConfig config = ctx->getOutputConfig();
 	config.vita49.adc_fullscale = static_cast<RealType>(fullscale);
 	ctx->setOutputConfig(std::move(config));
@@ -526,7 +537,7 @@ int fers_set_vita49_epoch_unix_nanoseconds(fers_context_t* context, const std::u
 		return 1;
 	}
 
-	auto* ctx = reinterpret_cast<FersContext*>(context);
+	auto* ctx = context;
 	core::OutputConfig config = ctx->getOutputConfig();
 	config.vita49.epoch_unix_nanoseconds = epoch_unix_nanoseconds;
 	ctx->setOutputConfig(std::move(config));
@@ -547,7 +558,7 @@ int fers_set_vita49_max_udp_payload(fers_context_t* context, const std::uint16_t
 		return 1;
 	}
 
-	auto* ctx = reinterpret_cast<FersContext*>(context);
+	auto* ctx = context;
 	core::OutputConfig config = ctx->getOutputConfig();
 	config.vita49.max_udp_payload = max_udp_payload;
 	ctx->setOutputConfig(std::move(config));
@@ -568,7 +579,7 @@ int fers_set_vita49_queue_depth(fers_context_t* context, const std::uint32_t que
 		return 1;
 	}
 
-	auto* ctx = reinterpret_cast<FersContext*>(context);
+	auto* ctx = context;
 	core::OutputConfig config = ctx->getOutputConfig();
 	config.vita49.queue_depth = queue_depth;
 	ctx->setOutputConfig(std::move(config));
@@ -584,7 +595,7 @@ int fers_set_vita49_packet_trace_enabled(fers_context_t* context, const int enab
 		return -1;
 	}
 
-	auto* ctx = reinterpret_cast<FersContext*>(context);
+	auto* ctx = context;
 	core::OutputConfig config = ctx->getOutputConfig();
 	config.vita49.packet_trace_enabled = enabled != 0;
 	ctx->setOutputConfig(std::move(config));
@@ -603,11 +614,11 @@ int fers_load_scenario_from_xml_file(fers_context_t* context, const char* xml_fi
 		return -1;
 	}
 
-	auto* ctx = reinterpret_cast<FersContext*>(context);
+	auto* ctx = context;
 	try
 	{
 		// Set default output directory to the scenario file's directory
-		std::filesystem::path p(xml_filepath);
+		std::filesystem::path const p(xml_filepath);
 		auto parent = p.parent_path();
 		if (parent.empty())
 			parent = ".";
@@ -654,7 +665,7 @@ int fers_load_scenario_from_xml_string(fers_context_t* context, const char* xml_
 		return -1;
 	}
 
-	auto* ctx = reinterpret_cast<FersContext*>(context);
+	auto* ctx = context;
 	try
 	{
 		serial::parseSimulationFromString(xml_content, ctx->getWorld(), static_cast<bool>(validate),
@@ -697,7 +708,7 @@ char* fers_get_scenario_as_json(fers_context_t* context)
 		return nullptr;
 	}
 
-	const auto* ctx = reinterpret_cast<FersContext*>(context);
+	const auto* ctx = context;
 	try
 	{
 		const nlohmann::json j = serial::world_to_json(*ctx->getWorld());
@@ -724,7 +735,7 @@ char* fers_get_scenario_as_xml(fers_context_t* context)
 		return nullptr;
 	}
 
-	const auto* ctx = reinterpret_cast<FersContext*>(context);
+	const auto* ctx = context;
 	try
 	{
 		const std::string xml_str = serial::world_to_xml_string(*ctx->getWorld());
@@ -754,7 +765,7 @@ char* fers_get_last_output_metadata_json(fers_context_t* context)
 		return nullptr;
 	}
 
-	const auto* ctx = reinterpret_cast<FersContext*>(context);
+	const auto* ctx = context;
 	try
 	{
 		const std::string json_str = ctx->getLastOutputMetadataJson();
@@ -777,7 +788,7 @@ char* fers_get_memory_projection_json(fers_context_t* context)
 		return nullptr;
 	}
 
-	auto* ctx = reinterpret_cast<FersContext*>(context);
+	auto* ctx = context;
 
 	try
 	{
@@ -801,7 +812,7 @@ int fers_update_platform_from_json(fers_context_t* context, uint64_t id, const c
 		discard_warning_capture();
 		return -1;
 	}
-	auto* ctx = reinterpret_cast<FersContext*>(context);
+	auto* ctx = context;
 	try
 	{
 		auto* p = ctx->getWorld()->findPlatform(id);
@@ -837,7 +848,7 @@ int fers_update_parameters_from_json(fers_context_t* context, const char* json)
 		discard_warning_capture();
 		return -1;
 	}
-	auto* ctx = reinterpret_cast<FersContext*>(context);
+	auto* ctx = context;
 	try
 	{
 		auto j = nlohmann::json::parse(json);
@@ -858,7 +869,7 @@ int fers_update_antenna_from_json(fers_context_t* context, const char* json)
 	last_error_message.clear();
 	if ((context == nullptr) || (json == nullptr))
 		return -1;
-	auto* ctx = reinterpret_cast<FersContext*>(context);
+	auto* ctx = context;
 	try
 	{
 		auto j = nlohmann::json::parse(json);
@@ -884,7 +895,7 @@ int fers_update_waveform_from_json(fers_context_t* context, const char* json)
 	last_error_message.clear();
 	if ((context == nullptr) || (json == nullptr))
 		return -1;
-	auto* ctx = reinterpret_cast<FersContext*>(context);
+	auto* ctx = context;
 	try
 	{
 		auto j = nlohmann::json::parse(json);
@@ -907,7 +918,7 @@ int fers_update_transmitter_from_json(fers_context_t* context, uint64_t id, cons
 	last_error_message.clear();
 	if ((context == nullptr) || (json == nullptr))
 		return -1;
-	auto* ctx = reinterpret_cast<FersContext*>(context);
+	auto* ctx = context;
 	try
 	{
 		auto* tx = ctx->getWorld()->findTransmitter(id);
@@ -932,7 +943,7 @@ int fers_update_receiver_from_json(fers_context_t* context, uint64_t id, const c
 	last_error_message.clear();
 	if ((context == nullptr) || (json == nullptr))
 		return -1;
-	auto* ctx = reinterpret_cast<FersContext*>(context);
+	auto* ctx = context;
 	try
 	{
 		auto* rx = ctx->getWorld()->findReceiver(id);
@@ -957,7 +968,7 @@ int fers_update_target_from_json(fers_context_t* context, uint64_t id, const cha
 	last_error_message.clear();
 	if ((context == nullptr) || (json == nullptr))
 		return -1;
-	auto* ctx = reinterpret_cast<FersContext*>(context);
+	auto* ctx = context;
 	try
 	{
 		auto* tgt = ctx->getWorld()->findTarget(id);
@@ -982,13 +993,13 @@ int fers_update_monostatic_from_json(fers_context_t* context, const char* json)
 	last_error_message.clear();
 	if ((context == nullptr) || (json == nullptr))
 		return -1;
-	auto* ctx = reinterpret_cast<FersContext*>(context);
+	auto* ctx = context;
 	try
 	{
 		auto j = nlohmann::json::parse(json);
-		uint64_t tx_id =
+		uint64_t const tx_id =
 			j.at("tx_id").is_string() ? std::stoull(j.at("tx_id").get<std::string>()) : j.at("tx_id").get<uint64_t>();
-		uint64_t rx_id =
+		uint64_t const rx_id =
 			j.at("rx_id").is_string() ? std::stoull(j.at("rx_id").get<std::string>()) : j.at("rx_id").get<uint64_t>();
 		auto* tx = ctx->getWorld()->findTransmitter(tx_id);
 		auto* rx = ctx->getWorld()->findReceiver(rx_id);
@@ -1012,7 +1023,7 @@ int fers_update_timing_from_json(fers_context_t* context, uint64_t id, const cha
 	last_error_message.clear();
 	if ((context == nullptr) || (json == nullptr))
 		return -1;
-	auto* ctx = reinterpret_cast<FersContext*>(context);
+	auto* ctx = context;
 	try
 	{
 		if (ctx->getWorld()->findTiming(id) == nullptr)
@@ -1043,7 +1054,7 @@ int fers_update_scenario_from_json(fers_context_t* context, const char* scenario
 		return -1;
 	}
 
-	auto* ctx = reinterpret_cast<FersContext*>(context);
+	auto* ctx = context;
 	try
 	{
 		const nlohmann::json j = nlohmann::json::parse(scenario_json);
@@ -1079,6 +1090,7 @@ char* fers_get_last_error_message()
 	// `strdup` allocates with `malloc`, which is part of the C standard ABI,
 	// making it safe to transfer ownership across the FFI boundary. The caller
 	// must then free this memory using `fers_free_string`.
+	// NOLINTNEXTLINE(cppcoreguidelines-no-malloc): C ABI string ownership is freed by `fers_free_string`.
 	return strdup(last_error_message.c_str());
 }
 
@@ -1098,48 +1110,56 @@ void fers_free_string(char* str)
 {
 	if (str != nullptr)
 	{
+		// NOLINTNEXTLINE(cppcoreguidelines-owning-memory): Public C API frees strings returned by this library.
 		free(str);
 	}
 }
 
 namespace
 {
-	int run_simulation_common(fers_context_t* context, fers_progress_callback_t progress_callback,
-							  void* progress_user_data, fers_cancel_callback_t cancel_callback, void* cancel_user_data,
-							  fers_vita49_telemetry_callback_t vita49_telemetry_callback,
-							  void* vita49_telemetry_user_data, const char* function_name,
-							  const char* invalid_context_message)
+	struct SimulationRunRequest
+	{
+		fers_context_t* context;
+		fers_progress_callback_t progress_callback;
+		void* progress_user_data;
+		fers_cancel_callback_t cancel_callback;
+		void* cancel_user_data;
+		fers_vita49_telemetry_callback_t vita49_telemetry_callback;
+		void* vita49_telemetry_user_data;
+		const char* function_name;
+		const char* invalid_context_message;
+	};
+
+	int run_simulation_common(const SimulationRunRequest& request)
 	{
 		last_error_message.clear();
-		if (context == nullptr)
+		if (request.context == nullptr)
 		{
-			last_error_message = invalid_context_message;
+			last_error_message = request.invalid_context_message;
 			LOG(logging::Level::ERROR, last_error_message);
 			return -1;
 		}
 
-		auto* ctx = reinterpret_cast<FersContext*>(context);
+		auto* ctx = request.context;
 
 		std::function<void(const std::string&, int, int)> progress_fn;
-		if (progress_callback != nullptr)
+		if (request.progress_callback != nullptr)
 		{
-			progress_fn =
-				[progress_callback, progress_user_data](const std::string& msg, const int current, const int total)
-			{ progress_callback(msg.c_str(), current, total, progress_user_data); };
+			progress_fn = [&request](const std::string& msg, const int current, const int total)
+			{ request.progress_callback(msg.c_str(), current, total, request.progress_user_data); };
 		}
 
 		std::function<bool()> cancel_fn;
-		if (cancel_callback != nullptr)
+		if (request.cancel_callback != nullptr)
 		{
-			cancel_fn = [cancel_callback, cancel_user_data] { return cancel_callback(cancel_user_data) != 0; };
+			cancel_fn = [&request] { return request.cancel_callback(request.cancel_user_data) != 0; };
 		}
 
 		core::ReceiverOutputTelemetryCallback telemetry_fn;
-		if (vita49_telemetry_callback != nullptr)
+		if (request.vita49_telemetry_callback != nullptr)
 		{
-			telemetry_fn = [vita49_telemetry_callback,
-							vita49_telemetry_user_data](const std::optional<core::OutputStats>& stats,
-														std::span<const core::ReceiverOutputPacketTrace> packets)
+			telemetry_fn = [&request](const std::optional<core::OutputStats>& stats,
+									  std::span<const core::ReceiverOutputPacketTrace> packets)
 			{
 				std::string stats_json;
 				std::string packet_batch_json;
@@ -1157,7 +1177,7 @@ namespace
 					packet_batch_ptr = packet_batch_json.c_str();
 				}
 
-				vita49_telemetry_callback(stats_ptr, packet_batch_ptr, vita49_telemetry_user_data);
+				request.vita49_telemetry_callback(stats_ptr, packet_batch_ptr, request.vita49_telemetry_user_data);
 			};
 		}
 
@@ -1182,7 +1202,7 @@ namespace
 		}
 		catch (const std::exception& e)
 		{
-			handle_api_exception(e, function_name);
+			handle_api_exception(e, request.function_name);
 			return 1;
 		}
 	}
@@ -1190,17 +1210,32 @@ namespace
 
 int fers_run_simulation(fers_context_t* context, fers_progress_callback_t callback, void* user_data)
 {
-	return run_simulation_common(context, callback, user_data, nullptr, nullptr, nullptr, nullptr,
-								 "fers_run_simulation", "Invalid context provided to fers_run_simulation.");
+	return run_simulation_common(
+		SimulationRunRequest{.context = context,
+							 .progress_callback = callback,
+							 .progress_user_data = user_data,
+							 .cancel_callback = nullptr,
+							 .cancel_user_data = nullptr,
+							 .vita49_telemetry_callback = nullptr,
+							 .vita49_telemetry_user_data = nullptr,
+							 .function_name = "fers_run_simulation",
+							 .invalid_context_message = "Invalid context provided to fers_run_simulation."});
 }
 
 int fers_run_simulation_ex(fers_context_t* context, fers_progress_callback_t progress_callback,
 						   void* progress_user_data, fers_cancel_callback_t cancel_callback, void* cancel_user_data,
 						   fers_vita49_telemetry_callback_t vita49_telemetry_callback, void* vita49_telemetry_user_data)
 {
-	return run_simulation_common(context, progress_callback, progress_user_data, cancel_callback, cancel_user_data,
-								 vita49_telemetry_callback, vita49_telemetry_user_data, "fers_run_simulation_ex",
-								 "Invalid context provided to fers_run_simulation_ex.");
+	return run_simulation_common(
+		SimulationRunRequest{.context = context,
+							 .progress_callback = progress_callback,
+							 .progress_user_data = progress_user_data,
+							 .cancel_callback = cancel_callback,
+							 .cancel_user_data = cancel_user_data,
+							 .vita49_telemetry_callback = vita49_telemetry_callback,
+							 .vita49_telemetry_user_data = vita49_telemetry_user_data,
+							 .function_name = "fers_run_simulation_ex",
+							 .invalid_context_message = "Invalid context provided to fers_run_simulation_ex."});
 }
 
 int fers_generate_kml(const fers_context_t* context, const char* output_kml_filepath)
@@ -1213,7 +1248,7 @@ int fers_generate_kml(const fers_context_t* context, const char* output_kml_file
 		return -1;
 	}
 
-	const auto* ctx = reinterpret_cast<const FersContext*>(context);
+	const auto* ctx = context;
 
 	try
 	{
@@ -1300,7 +1335,9 @@ fers_interpolated_path_t* fers_get_interpolated_motion_path(const fers_motion_wa
 
 		path.finalize();
 
+		// NOLINTNEXTLINE(cppcoreguidelines-owning-memory): Public C API returns an owned path struct.
 		auto* result_path = new fers_interpolated_path_t();
+		// NOLINTNEXTLINE(cppcoreguidelines-owning-memory): Public C API frees this array with the parent path.
 		result_path->points = new fers_interpolated_point_t[num_points];
 		result_path->count = num_points;
 
@@ -1343,7 +1380,10 @@ void fers_free_interpolated_motion_path(fers_interpolated_path_t* path)
 {
 	if (path != nullptr)
 	{
+		// NOLINTNEXTLINE(cppcoreguidelines-owning-memory): Frees arrays owned by C API path structs.
 		delete[] path->points;
+		// NOLINTNEXTLINE(cppcoreguidelines-owning-memory): Frees structs allocated by
+		// `fers_get_interpolated_motion_path`.
 		delete path;
 	}
 }
@@ -1391,7 +1431,9 @@ fers_interpolated_rotation_path_t* fers_get_interpolated_rotation_path(const fer
 
 		path.finalize();
 
+		// NOLINTNEXTLINE(cppcoreguidelines-owning-memory): Public C API returns an owned path struct.
 		auto* result_path = new fers_interpolated_rotation_path_t();
+		// NOLINTNEXTLINE(cppcoreguidelines-owning-memory): Public C API frees this array with the parent path.
 		result_path->points = new fers_interpolated_rotation_point_t[num_points];
 		result_path->count = num_points;
 
@@ -1439,7 +1481,10 @@ void fers_free_interpolated_rotation_path(fers_interpolated_rotation_path_t* pat
 {
 	if (path != nullptr)
 	{
+		// NOLINTNEXTLINE(cppcoreguidelines-owning-memory): Frees arrays owned by C API path structs.
 		delete[] path->points;
+		// NOLINTNEXTLINE(cppcoreguidelines-owning-memory): Frees structs allocated by
+		// `fers_get_interpolated_rotation_path`.
 		delete path;
 	}
 }
@@ -1460,8 +1505,8 @@ fers_antenna_pattern_data_t* fers_get_antenna_pattern(const fers_context_t* cont
 
 	try
 	{
-		const auto* ctx = reinterpret_cast<const FersContext*>(context);
-		antenna::Antenna* ant = ctx->getWorld()->findAntenna(static_cast<SimId>(antenna_id));
+		const auto* ctx = context;
+		antenna::Antenna const* ant = ctx->getWorld()->findAntenna(static_cast<SimId>(antenna_id));
 
 		if (ant == nullptr)
 		{
@@ -1483,10 +1528,12 @@ fers_antenna_pattern_data_t* fers_get_antenna_pattern(const fers_context_t* cont
 			wavelength = params::c() / frequency_hz;
 		}
 
+		// NOLINTNEXTLINE(cppcoreguidelines-owning-memory): Public C API returns owned antenna pattern data.
 		auto* data = new fers_antenna_pattern_data_t();
 		data->az_count = az_samples;
 		data->el_count = el_samples;
 		const size_t total_samples = az_samples * el_samples;
+		// NOLINTNEXTLINE(cppcoreguidelines-owning-memory): Public C API frees this array with the parent data.
 		data->gains = new double[total_samples];
 
 		// The reference angle (boresight) is implicitly the local X-axis in the FERS engine.
@@ -1494,8 +1541,8 @@ fers_antenna_pattern_data_t* fers_get_antenna_pattern(const fers_context_t* cont
 		const math::SVec3 ref_angle(1.0, 0.0, 0.0);
 		double max_gain = 0.0;
 
-		const RealType az_denominator = static_cast<RealType>(az_samples - 1);
-		const RealType el_denominator = static_cast<RealType>(el_samples - 1);
+		const auto az_denominator = static_cast<RealType>(az_samples - 1);
+		const auto el_denominator = static_cast<RealType>(el_samples - 1);
 
 		for (size_t i = 0; i < el_samples; ++i)
 		{
@@ -1536,7 +1583,9 @@ void fers_free_antenna_pattern_data(fers_antenna_pattern_data_t* data)
 {
 	if (data != nullptr)
 	{
+		// NOLINTNEXTLINE(cppcoreguidelines-owning-memory): Frees arrays owned by C API pattern structs.
 		delete[] data->gains;
+		// NOLINTNEXTLINE(cppcoreguidelines-owning-memory): Frees structs allocated by `fers_get_antenna_pattern`.
 		delete data;
 	}
 }
@@ -1555,16 +1604,18 @@ fers_visual_link_list_t* fers_calculate_preview_links(const fers_context_t* cont
 
 	try
 	{
-		const auto* ctx = reinterpret_cast<const FersContext*>(context);
+		const auto* ctx = context;
 		// Call the core physics logic in channel_model.cpp
 		const auto cpp_links = simulation::calculatePreviewLinks(*ctx->getWorld(), time);
 
 		// Convert C++ vector to C-API struct
+		// NOLINTNEXTLINE(cppcoreguidelines-owning-memory): Public C API returns owned preview-link lists.
 		auto* result = new fers_visual_link_list_t();
 		result->count = cpp_links.size();
 
 		if (!cpp_links.empty())
 		{
+			// NOLINTNEXTLINE(cppcoreguidelines-owning-memory): Public C API frees this array with the parent list.
 			result->links = new fers_visual_link_t[result->count];
 			for (size_t i = 0; i < result->count; ++i)
 			{
@@ -1590,9 +1641,7 @@ fers_visual_link_list_t* fers_calculate_preview_links(const fers_context_t* cont
 
 				dst.quality = (src.quality == simulation::LinkQuality::Strong) ? FERS_LINK_STRONG : FERS_LINK_WEAK;
 
-				// Safe string copy
-				std::strncpy(dst.label, src.label.c_str(), sizeof(dst.label) - 1);
-				dst.label[sizeof(dst.label) - 1] = '\0';
+				copy_visual_link_label(dst, src.label);
 
 				dst.source_id = static_cast<uint64_t>(src.source_id);
 				dst.dest_id = static_cast<uint64_t>(src.dest_id);
@@ -1619,7 +1668,9 @@ void fers_free_preview_links(fers_visual_link_list_t* list)
 {
 	if (list != nullptr)
 	{
+		// NOLINTNEXTLINE(cppcoreguidelines-owning-memory): Frees arrays owned by C API preview-link lists.
 		delete[] list->links;
+		// NOLINTNEXTLINE(cppcoreguidelines-owning-memory): Frees structs allocated by `fers_calculate_preview_links`.
 		delete list;
 	}
 }

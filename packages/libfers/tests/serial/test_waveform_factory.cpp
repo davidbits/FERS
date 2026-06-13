@@ -24,6 +24,10 @@ namespace
 		params::Parameters saved;
 
 		ParamGuard() : saved(params::params) {}
+		ParamGuard(const ParamGuard&) = delete;
+		ParamGuard& operator=(const ParamGuard&) = delete;
+		ParamGuard(ParamGuard&&) = delete;
+		ParamGuard& operator=(ParamGuard&&) = delete;
 
 		~ParamGuard() { params::params = saved; }
 	};
@@ -82,7 +86,7 @@ namespace
 
 TEST_CASE("Waveform factory loads CSV waveform metadata", "[serial][waveform_factory]")
 {
-	ParamGuard guard;
+	ParamGuard const guard;
 	params::params.reset();
 	params::setRate(9999.0);
 	params::setOversampleRatio(2);
@@ -108,8 +112,9 @@ TEST_CASE("Waveform factory loads CSV waveform metadata", "[serial][waveform_fac
 	REQUIRE_THAT(waveform->getPower(), WithinAbs(power, 1e-12));
 	REQUIRE_THAT(waveform->getCarrier(), WithinAbs(carrier, 1e-3));
 	REQUIRE(waveform->getId() == explicitId);
-	REQUIRE(waveform->getFilename().has_value());
-	REQUIRE(*waveform->getFilename() == path.string());
+	const auto filename = waveform->getFilename();
+	REQUIRE(filename.has_value());
+	REQUIRE(filename.value_or("") == path.string());
 	REQUIRE_THAT(waveform->getRate(), WithinAbs(csvRate * params::oversampleRatio(), 1e-12));
 	REQUIRE_THAT(waveform->getLength(), WithinAbs(static_cast<RealType>(samples.size()) / csvRate, 1e-12));
 
@@ -118,7 +123,7 @@ TEST_CASE("Waveform factory loads CSV waveform metadata", "[serial][waveform_fac
 
 TEST_CASE("Waveform factory loads HDF5 waveform metadata", "[serial][waveform_factory]")
 {
-	ParamGuard guard;
+	ParamGuard const guard;
 	params::params.reset();
 	params::setRate(64.0);
 
@@ -143,8 +148,9 @@ TEST_CASE("Waveform factory loads HDF5 waveform metadata", "[serial][waveform_fa
 	REQUIRE_THAT(waveform->getPower(), WithinAbs(power, 1e-12));
 	REQUIRE_THAT(waveform->getCarrier(), WithinAbs(carrier, 1e-3));
 	REQUIRE(waveform->getId() == explicitId);
-	REQUIRE(waveform->getFilename().has_value());
-	REQUIRE(*waveform->getFilename() == path.string());
+	const auto filename = waveform->getFilename();
+	REQUIRE(filename.has_value());
+	REQUIRE(filename.value_or("") == path.string());
 	REQUIRE_THAT(waveform->getRate(), WithinAbs(params::rate(), 1e-12));
 	REQUIRE_THAT(waveform->getLength(), WithinAbs(static_cast<RealType>(samples.size()) / params::rate(), 1e-12));
 
@@ -153,7 +159,7 @@ TEST_CASE("Waveform factory loads HDF5 waveform metadata", "[serial][waveform_fa
 
 TEST_CASE("Waveform factory preserves explicit waveform id", "[serial][waveform_factory]")
 {
-	ParamGuard guard;
+	ParamGuard const guard;
 	params::params.reset();
 
 	const std::filesystem::path path = tempFilePath(uniqueFileName("waveform_factory_id", ".csv"));
@@ -184,7 +190,7 @@ TEST_CASE("Waveform factory throws for missing CSV file", "[serial][waveform_fac
 
 TEST_CASE("Waveform factory throws for missing HDF5 file", "[serial][waveform_factory]")
 {
-	ParamGuard guard;
+	ParamGuard const guard;
 	params::params.reset();
 	params::setRate(100.0);
 

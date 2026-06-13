@@ -89,6 +89,115 @@ namespace core
 										.end_timestamp = stats.end_timestamp};
 		}
 
+		[[nodiscard]] std::string fmcwCountToken(const std::optional<std::size_t>& count)
+		{
+			return count.has_value() ? std::format("{}", *count) : std::string("unbounded");
+		}
+
+		void logUnscheduledFmcwChirpSummary(const Transmitter& transmitter, const fers_signal::FmcwChirpSignal& fmcw,
+											const std::string& direction, const std::string& configured_count,
+											const RealType duty_cycle, const RealType average_power)
+		{
+			const RealType active_start = params::startTime();
+			const auto source = makeActiveSource(&transmitter, active_start, params::endTime());
+			const auto total_chirp_count = countFmcwChirpStarts(source, active_start, source.segment_end);
+			LOG(Level::INFO,
+				"FMCW transmitter '{}' shape=linear {} B={} Hz T_c={} s T_rep={} s f_0={} Hz alpha={} Hz/s "
+				"duty_cycle={} chirp_count={} total_chirp_count={} average_power={} W",
+				transmitter.getName(), direction, fmcw.getChirpBandwidth(), fmcw.getChirpDuration(),
+				fmcw.getChirpPeriod(), fmcw.getStartFrequencyOffset(), fmcw.getChirpRate(), duty_cycle,
+				configured_count, total_chirp_count, average_power);
+		}
+
+		void logScheduledFmcwChirpSummary(const Transmitter& transmitter, const fers_signal::FmcwChirpSignal& fmcw,
+										  const std::string& direction, const std::string& configured_count,
+										  const RealType duty_cycle, const RealType average_power)
+		{
+			std::uint64_t total_chirp_count = 0;
+			for (const auto& period : transmitter.getSchedule())
+			{
+				const RealType active_start = std::max(params::startTime(), period.start);
+				const auto source =
+					makeActiveSource(&transmitter, period.start, std::min(params::endTime(), period.end));
+				const auto segment_chirp_count = countFmcwChirpStarts(source, active_start, source.segment_end);
+				total_chirp_count += segment_chirp_count;
+				LOG(Level::INFO,
+					"FMCW transmitter '{}' segment [{}, {}] shape=linear {} B={} Hz T_c={} s T_rep={} s f_0={} "
+					"Hz alpha={} Hz/s duty_cycle={} chirp_count={} segment_chirp_count={} total_chirp_count={} "
+					"average_power={} W",
+					transmitter.getName(), period.start, source.segment_end, direction, fmcw.getChirpBandwidth(),
+					fmcw.getChirpDuration(), fmcw.getChirpPeriod(), fmcw.getStartFrequencyOffset(), fmcw.getChirpRate(),
+					duty_cycle, configured_count, segment_chirp_count, total_chirp_count, average_power);
+			}
+		}
+
+		void logFmcwChirpSummary(const Transmitter& transmitter, const fers_signal::RadarSignal& waveform,
+								 const fers_signal::FmcwChirpSignal& fmcw)
+		{
+			const RealType duty_cycle = fmcw.getChirpDuration() / fmcw.getChirpPeriod();
+			const RealType average_power = waveform.getPower() * duty_cycle;
+			const std::string direction(fers_signal::fmcwChirpDirectionToken(fmcw.getDirection()));
+			const auto configured_count = fmcwCountToken(fmcw.getChirpCount());
+			if (transmitter.getSchedule().empty())
+			{
+				logUnscheduledFmcwChirpSummary(transmitter, fmcw, direction, configured_count, duty_cycle,
+											   average_power);
+				return;
+			}
+			logScheduledFmcwChirpSummary(transmitter, fmcw, direction, configured_count, duty_cycle, average_power);
+		}
+
+		void logUnscheduledFmcwTriangleSummary(const Transmitter& transmitter,
+											   const fers_signal::FmcwTriangleSignal& triangle,
+											   const std::string& configured_count, const RealType average_power)
+		{
+			const RealType active_start = params::startTime();
+			const auto source = makeActiveSource(&transmitter, active_start, params::endTime());
+			const auto total_triangle_count = countFmcwTriangleStarts(source, active_start, source.segment_end);
+			LOG(Level::INFO,
+				"FMCW transmitter '{}' shape=triangle B={} Hz T_c={} s T_tri={} s f_0={} Hz alpha={} Hz/s "
+				"duty_cycle=1 triangle_count={} total_triangle_count={} average_power={} W",
+				transmitter.getName(), triangle.getChirpBandwidth(), triangle.getChirpDuration(),
+				triangle.getTrianglePeriod(), triangle.getStartFrequencyOffset(), triangle.getChirpRate(),
+				configured_count, total_triangle_count, average_power);
+		}
+
+		void logScheduledFmcwTriangleSummary(const Transmitter& transmitter,
+											 const fers_signal::FmcwTriangleSignal& triangle,
+											 const std::string& configured_count, const RealType average_power)
+		{
+			std::uint64_t total_triangle_count = 0;
+			for (const auto& period : transmitter.getSchedule())
+			{
+				const RealType active_start = std::max(params::startTime(), period.start);
+				const auto source =
+					makeActiveSource(&transmitter, period.start, std::min(params::endTime(), period.end));
+				const auto segment_triangle_count = countFmcwTriangleStarts(source, active_start, source.segment_end);
+				total_triangle_count += segment_triangle_count;
+				LOG(Level::INFO,
+					"FMCW transmitter '{}' segment [{}, {}] shape=triangle B={} Hz T_c={} s T_tri={} s f_0={} "
+					"Hz alpha={} Hz/s duty_cycle=1 triangle_count={} segment_triangle_count={} "
+					"total_triangle_count={} average_power={} W",
+					transmitter.getName(), period.start, source.segment_end, triangle.getChirpBandwidth(),
+					triangle.getChirpDuration(), triangle.getTrianglePeriod(), triangle.getStartFrequencyOffset(),
+					triangle.getChirpRate(), configured_count, segment_triangle_count, total_triangle_count,
+					average_power);
+			}
+		}
+
+		void logFmcwTriangleSummary(const Transmitter& transmitter, const fers_signal::RadarSignal& waveform,
+									const fers_signal::FmcwTriangleSignal& triangle)
+		{
+			const RealType average_power = waveform.getPower();
+			const auto configured_count = fmcwCountToken(triangle.getTriangleCount());
+			if (transmitter.getSchedule().empty())
+			{
+				logUnscheduledFmcwTriangleSummary(transmitter, triangle, configured_count, average_power);
+				return;
+			}
+			logScheduledFmcwTriangleSummary(transmitter, triangle, configured_count, average_power);
+		}
+
 		[[nodiscard]] bool isStreamingReceiver(const Receiver* const receiver) noexcept
 		{
 			return receiver != nullptr &&
@@ -166,6 +275,32 @@ namespace core
 			}
 		}
 
+		[[nodiscard]] RealType axisValue(const std::array<RealType, 3>& values, const std::size_t axis) noexcept
+		{
+			switch (axis)
+			{
+			case 0:
+				return values[0];
+			case 1:
+				return values[1];
+			default:
+				return values[2];
+			}
+		}
+
+		[[nodiscard]] RealType& axisValue(std::array<RealType, 3>& values, const std::size_t axis) noexcept
+		{
+			switch (axis)
+			{
+			case 0:
+				return values[0];
+			case 1:
+				return values[1];
+			default:
+				return values[2];
+			}
+		}
+
 		[[nodiscard]] RealType axisDistanceBound(const PositionBounds& lhs, const PositionBounds& rhs,
 												 const std::size_t axis) noexcept
 		{
@@ -222,9 +357,12 @@ namespace core
 
 			for (std::size_t axis = 0; axis < 3; ++axis)
 			{
-				const RealType a = 0.5 * h2 * (dd_right[axis] - dd_left[axis]);
-				const RealType b = h2 * dd_left[axis];
-				const RealType c = (right[axis] - left[axis]) + (h2 / 6.0) * (-2.0 * dd_left[axis] - dd_right[axis]);
+				const RealType dd_right_axis = axisValue(dd_right, axis);
+				const RealType dd_left_axis = axisValue(dd_left, axis);
+				const RealType a = 0.5 * h2 * (dd_right_axis - dd_left_axis);
+				const RealType b = h2 * dd_left_axis;
+				const RealType c = (axisValue(right, axis) - axisValue(left, axis)) +
+					(h2 / 6.0) * (-2.0 * dd_left_axis - dd_right_axis);
 
 				if (std::abs(a) <= EPSILON)
 				{
@@ -321,23 +459,36 @@ namespace core
 			return bounds;
 		}
 
-		void includeQuadraticVelocityExtremum(std::array<RealType, 3>& max_abs_velocity, const std::size_t axis,
-											  const RealType a, const RealType b, const RealType c,
-											  const RealType segment_length, const RealType root_u,
-											  const RealType lower_u, const RealType upper_u) noexcept
+		struct QuadraticVelocityExtremum
 		{
-			if (root_u < lower_u || root_u > upper_u || segment_length <= EPSILON)
+			RealType a;
+			RealType b;
+			RealType c;
+			RealType segment_length;
+			RealType root_u;
+			RealType lower_u;
+			RealType upper_u;
+		};
+
+		void includeQuadraticVelocityExtremum(std::array<RealType, 3>& max_abs_velocity, const std::size_t axis,
+											  const QuadraticVelocityExtremum& extremum) noexcept
+		{
+			if (extremum.root_u < extremum.lower_u || extremum.root_u > extremum.upper_u ||
+				extremum.segment_length <= EPSILON)
 			{
 				return;
 			}
-			const RealType velocity = (a * root_u * root_u + b * root_u + c) / segment_length;
+			const RealType velocity =
+				(extremum.a * extremum.root_u * extremum.root_u + extremum.b * extremum.root_u + extremum.c) /
+				extremum.segment_length;
 			if (std::isfinite(velocity))
 			{
-				max_abs_velocity[axis] = std::max(max_abs_velocity[axis], std::abs(velocity));
+				RealType& axis_max_velocity = axisValue(max_abs_velocity, axis);
+				axis_max_velocity = std::max(axis_max_velocity, std::abs(velocity));
 			}
 			else
 			{
-				max_abs_velocity[axis] = std::numeric_limits<RealType>::infinity();
+				axisValue(max_abs_velocity, axis) = std::numeric_limits<RealType>::infinity();
 			}
 		}
 
@@ -359,18 +510,39 @@ namespace core
 
 			for (std::size_t axis = 0; axis < 3; ++axis)
 			{
-				const RealType a = 0.5 * h2 * (dd_right[axis] - dd_left[axis]);
-				const RealType b = h2 * dd_left[axis];
-				const RealType c = (right[axis] - left[axis]) + (h2 / 6.0) * (-2.0 * dd_left[axis] - dd_right[axis]);
-				includeQuadraticVelocityExtremum(max_abs_velocity, axis, a, b, c, segment_length, lower_u, lower_u,
-												 upper_u);
-				includeQuadraticVelocityExtremum(max_abs_velocity, axis, a, b, c, segment_length, upper_u, lower_u,
-												 upper_u);
+				const RealType dd_right_axis = axisValue(dd_right, axis);
+				const RealType dd_left_axis = axisValue(dd_left, axis);
+				const RealType a = 0.5 * h2 * (dd_right_axis - dd_left_axis);
+				const RealType b = h2 * dd_left_axis;
+				const RealType c = (axisValue(right, axis) - axisValue(left, axis)) +
+					(h2 / 6.0) * (-2.0 * dd_left_axis - dd_right_axis);
+				includeQuadraticVelocityExtremum(max_abs_velocity, axis,
+												 QuadraticVelocityExtremum{.a = a,
+																		   .b = b,
+																		   .c = c,
+																		   .segment_length = segment_length,
+																		   .root_u = lower_u,
+																		   .lower_u = lower_u,
+																		   .upper_u = upper_u});
+				includeQuadraticVelocityExtremum(max_abs_velocity, axis,
+												 QuadraticVelocityExtremum{.a = a,
+																		   .b = b,
+																		   .c = c,
+																		   .segment_length = segment_length,
+																		   .root_u = upper_u,
+																		   .lower_u = lower_u,
+																		   .upper_u = upper_u});
 
 				if (std::abs(a) > EPSILON)
 				{
-					includeQuadraticVelocityExtremum(max_abs_velocity, axis, a, b, c, segment_length, -b / (2.0 * a),
-													 lower_u, upper_u);
+					includeQuadraticVelocityExtremum(max_abs_velocity, axis,
+													 QuadraticVelocityExtremum{.a = a,
+																			   .b = b,
+																			   .c = c,
+																			   .segment_length = segment_length,
+																			   .root_u = -b / (2.0 * a),
+																			   .lower_u = lower_u,
+																			   .upper_u = upper_u});
 				}
 			}
 		}
@@ -587,7 +759,8 @@ namespace core
 		_world(world), _pool(pool), _reporter(std::move(reporter)), _metadata_collector(std::move(metadata_collector)),
 		_output_sink(output_sink), _cancel_callback(std::move(cancel_callback)),
 		_eager_context_stream_open(eager_context_stream_open), _last_report_time(std::chrono::steady_clock::now()),
-		_next_context_heartbeat_time(params::startTime() + 1.0), _output_dir(std::move(output_dir))
+		_next_context_heartbeat_time(params::startTime() + 1.0), _output_dir(std::move(output_dir)),
+		_internal_stop_time(params::endTime())
 	{
 		_streaming_tracker_caches.resize(_world->getReceivers().size());
 		_if_pulse_tracker_caches.resize(_world->getReceivers().size());
@@ -612,7 +785,6 @@ namespace core
 		{
 			block.reserve(streaming_output_block_size);
 		}
-		_internal_stop_time = params::endTime();
 	}
 
 	void SimulationEngine::run()
@@ -683,84 +855,11 @@ namespace core
 
 			if (const auto* fmcw = waveform->getFmcwChirpSignal(); fmcw != nullptr)
 			{
-				const RealType duty_cycle = fmcw->getChirpDuration() / fmcw->getChirpPeriod();
-				const RealType average_power = waveform->getPower() * duty_cycle;
-				const auto direction = fers_signal::fmcwChirpDirectionToken(fmcw->getDirection());
-				const auto configured_count = fmcw->getChirpCount().has_value()
-					? std::format("{}", *fmcw->getChirpCount())
-					: std::string("unbounded");
-				if (transmitter_ptr->getSchedule().empty())
-				{
-					const RealType active_start = params::startTime();
-					const auto source = makeActiveSource(transmitter_ptr.get(), active_start, params::endTime());
-					const auto total_chirp_count = countFmcwChirpStarts(source, active_start, source.segment_end);
-					LOG(Level::INFO,
-						"FMCW transmitter '{}' shape=linear {} B={} Hz T_c={} s T_rep={} s f_0={} Hz alpha={} Hz/s "
-						"duty_cycle={} chirp_count={} total_chirp_count={} average_power={} W",
-						transmitter_ptr->getName(), direction, fmcw->getChirpBandwidth(), fmcw->getChirpDuration(),
-						fmcw->getChirpPeriod(), fmcw->getStartFrequencyOffset(), fmcw->getChirpRate(), duty_cycle,
-						configured_count, total_chirp_count, average_power);
-				}
-				else
-				{
-					std::uint64_t total_chirp_count = 0;
-					for (const auto& period : transmitter_ptr->getSchedule())
-					{
-						const RealType active_start = std::max(params::startTime(), period.start);
-						const auto source = makeActiveSource(transmitter_ptr.get(), period.start,
-															 std::min(params::endTime(), period.end));
-						const auto segment_chirp_count = countFmcwChirpStarts(source, active_start, source.segment_end);
-						total_chirp_count += segment_chirp_count;
-						LOG(Level::INFO,
-							"FMCW transmitter '{}' segment [{}, {}] shape=linear {} B={} Hz T_c={} s T_rep={} s f_0={} "
-							"Hz alpha={} Hz/s duty_cycle={} chirp_count={} segment_chirp_count={} total_chirp_count={} "
-							"average_power={} W",
-							transmitter_ptr->getName(), period.start, source.segment_end, direction,
-							fmcw->getChirpBandwidth(), fmcw->getChirpDuration(), fmcw->getChirpPeriod(),
-							fmcw->getStartFrequencyOffset(), fmcw->getChirpRate(), duty_cycle, configured_count,
-							segment_chirp_count, total_chirp_count, average_power);
-					}
-				}
+				logFmcwChirpSummary(*transmitter_ptr, *waveform, *fmcw);
 			}
 			else if (const auto* triangle = waveform->getFmcwTriangleSignal(); triangle != nullptr)
 			{
-				const RealType average_power = waveform->getPower();
-				const auto configured_count = triangle->getTriangleCount().has_value()
-					? std::format("{}", *triangle->getTriangleCount())
-					: std::string("unbounded");
-				if (transmitter_ptr->getSchedule().empty())
-				{
-					const RealType active_start = params::startTime();
-					const auto source = makeActiveSource(transmitter_ptr.get(), active_start, params::endTime());
-					const auto total_triangle_count = countFmcwTriangleStarts(source, active_start, source.segment_end);
-					LOG(Level::INFO,
-						"FMCW transmitter '{}' shape=triangle B={} Hz T_c={} s T_tri={} s f_0={} Hz alpha={} Hz/s "
-						"duty_cycle=1 triangle_count={} total_triangle_count={} average_power={} W",
-						transmitter_ptr->getName(), triangle->getChirpBandwidth(), triangle->getChirpDuration(),
-						triangle->getTrianglePeriod(), triangle->getStartFrequencyOffset(), triangle->getChirpRate(),
-						configured_count, total_triangle_count, average_power);
-				}
-				else
-				{
-					std::uint64_t total_triangle_count = 0;
-					for (const auto& period : transmitter_ptr->getSchedule())
-					{
-						const RealType active_start = std::max(params::startTime(), period.start);
-						const auto source = makeActiveSource(transmitter_ptr.get(), period.start,
-															 std::min(params::endTime(), period.end));
-						const auto segment_triangle_count =
-							countFmcwTriangleStarts(source, active_start, source.segment_end);
-						total_triangle_count += segment_triangle_count;
-						LOG(Level::INFO,
-							"FMCW transmitter '{}' segment [{}, {}] shape=triangle B={} Hz T_c={} s T_tri={} s f_0={} "
-							"Hz alpha={} Hz/s duty_cycle=1 triangle_count={} segment_triangle_count={} "
-							"total_triangle_count={} average_power={} W",
-							transmitter_ptr->getName(), period.start, source.segment_end, triangle->getChirpBandwidth(),
-							triangle->getChirpDuration(), triangle->getTrianglePeriod(),
-							triangle->getStartFrequencyOffset(), triangle->getChirpRate(), configured_count,
-							segment_triangle_count, total_triangle_count, average_power);
-					}
-				}
+				logFmcwTriangleSummary(*transmitter_ptr, *waveform, *triangle);
 			}
 		}
 	}
@@ -787,60 +886,66 @@ namespace core
 		_internal_stop_time = params::endTime();
 		for (std::size_t receiver_index = 0; receiver_index < _world->getReceivers().size(); ++receiver_index)
 		{
-			const auto& receiver_ptr = _world->getReceivers()[receiver_index];
-			if (!receiver_ptr->isDechirpEnabled() || !receiver_ptr->hasFmcwIfSampleRate())
-			{
-				continue;
-			}
-
-			const auto& request = receiver_ptr->getFmcwIfChainRequest();
-			const RealType output_rate = *request.sample_rate_hz;
-			const RealType bandwidth = request.filter_bandwidth_hz.value_or(0.40 * output_rate);
-			fers_signal::FmcwIfResamplerRequest resampler_request{
-				.input_sample_rate_hz = params::rate() * static_cast<RealType>(params::oversampleRatio()),
-				.output_sample_rate_hz = output_rate,
-				.filter_bandwidth_hz = bandwidth,
-				.filter_transition_width_hz = request.filter_transition_width_hz};
-			auto plan = fers_signal::planFmcwIfResampler(resampler_request);
-			const RealType block_time =
-				static_cast<RealType>(fmcw_if_block_size) / resampler_request.input_sample_rate_hz;
-			const RealType over_render =
-				plan.group_delay_seconds + 1.0 / plan.actual_output_sample_rate_hz + block_time;
-			_internal_stop_time = std::max(_internal_stop_time, params::endTime() + over_render);
-			if (_output_sink != nullptr)
-			{
-				receiver_ptr->setFmcwIfOutputCallback(
-					[this, receiver_index](const std::span<const ComplexType> samples, const std::uint64_t sample_start)
-					{
-						const auto& receiver = _world->getReceivers()[receiver_index];
-						const auto& if_plan = receiver->getFmcwIfResamplerPlan();
-						if (!if_plan.has_value())
-						{
-							return;
-						}
-						const RealType first_sample_time = params::startTime() +
-							static_cast<RealType>(sample_start) / if_plan->actual_output_sample_rate_hz;
-						emitStreamingOutputBlock(receiver_index, first_sample_time,
-												 if_plan->actual_output_sample_rate_hz, samples, sample_start);
-					});
-			}
-			receiver_ptr->initializeFmcwIfResampling(std::move(plan));
-			LOG(Level::INFO,
-				"Receiver '{}' enabled FMCW IF resampling: input_rate={} Hz requested_output_rate={} Hz "
-				"actual_output_rate={} Hz ratio={}/{} passband={} Hz transition={} Hz.",
-				receiver_ptr->getName(), resampler_request.input_sample_rate_hz, output_rate,
-				receiver_ptr->getFmcwIfResamplerPlan()->actual_output_sample_rate_hz,
-				receiver_ptr->getFmcwIfResamplerPlan()->overall_ratio.numerator,
-				receiver_ptr->getFmcwIfResamplerPlan()->overall_ratio.denominator,
-				receiver_ptr->getFmcwIfResamplerPlan()->filter_bandwidth_hz,
-				receiver_ptr->getFmcwIfResamplerPlan()->filter_transition_width_hz);
+			initializeFmcwIfResampler(receiver_index);
 		}
 
-		if (_internal_stop_time <= params::endTime())
+		if (_internal_stop_time > params::endTime())
+		{
+			extendDechirpSourcesForIfOverrender();
+		}
+	}
+
+	void SimulationEngine::initializeFmcwIfResampler(const std::size_t receiver_index)
+	{
+		const auto& receiver_ptr = _world->getReceivers()[receiver_index];
+		if (!receiver_ptr->isDechirpEnabled() || !receiver_ptr->hasFmcwIfSampleRate())
 		{
 			return;
 		}
 
+		const auto& request = receiver_ptr->getFmcwIfChainRequest();
+		const RealType output_rate = request.sample_rate_hz.value_or(0.0);
+		const RealType bandwidth = request.filter_bandwidth_hz.value_or(0.40 * output_rate);
+		const fers_signal::FmcwIfResamplerRequest resampler_request{
+			.input_sample_rate_hz = params::rate() * static_cast<RealType>(params::oversampleRatio()),
+			.output_sample_rate_hz = output_rate,
+			.filter_bandwidth_hz = bandwidth,
+			.filter_transition_width_hz = request.filter_transition_width_hz};
+		auto plan = fers_signal::planFmcwIfResampler(resampler_request);
+		const RealType block_time = static_cast<RealType>(fmcw_if_block_size) / resampler_request.input_sample_rate_hz;
+		const RealType over_render = plan.group_delay_seconds + 1.0 / plan.actual_output_sample_rate_hz + block_time;
+		_internal_stop_time = std::max(_internal_stop_time, params::endTime() + over_render);
+		if (_output_sink != nullptr)
+		{
+			receiver_ptr->setFmcwIfOutputCallback(
+				[this, receiver_index](const std::span<const ComplexType> samples, const std::uint64_t sample_start)
+				{
+					const auto& receiver = _world->getReceivers()[receiver_index];
+					const auto& if_plan = receiver->getFmcwIfResamplerPlan();
+					if (!if_plan.has_value())
+					{
+						return;
+					}
+					const RealType first_sample_time = params::startTime() +
+						static_cast<RealType>(sample_start) / if_plan->actual_output_sample_rate_hz;
+					emitStreamingOutputBlock(receiver_index, first_sample_time, if_plan->actual_output_sample_rate_hz,
+											 samples, sample_start);
+				});
+		}
+		const RealType actual_output_sample_rate_hz = plan.actual_output_sample_rate_hz;
+		const auto overall_ratio = plan.overall_ratio;
+		const RealType filter_bandwidth_hz = plan.filter_bandwidth_hz;
+		const RealType filter_transition_width_hz = plan.filter_transition_width_hz;
+		receiver_ptr->initializeFmcwIfResampling(std::move(plan));
+		LOG(Level::INFO,
+			"Receiver '{}' enabled FMCW IF resampling: input_rate={} Hz requested_output_rate={} Hz "
+			"actual_output_rate={} Hz ratio={}/{} passband={} Hz transition={} Hz.",
+			receiver_ptr->getName(), resampler_request.input_sample_rate_hz, output_rate, actual_output_sample_rate_hz,
+			overall_ratio.numerator, overall_ratio.denominator, filter_bandwidth_hz, filter_transition_width_hz);
+	}
+
+	void SimulationEngine::extendDechirpSourcesForIfOverrender()
+	{
 		for (const auto& receiver_ptr : _world->getReceivers())
 		{
 			if (!receiver_ptr->hasFmcwIfSampleRate())
@@ -894,7 +999,6 @@ namespace core
 	{
 		auto& state = _world->getSimulationState();
 		auto& t_current = state.t_current;
-		auto& active_streaming_transmitters = state.active_streaming_transmitters;
 
 		if (t_event <= t_current)
 		{
@@ -909,35 +1013,11 @@ namespace core
 
 		ensureCwPhaseNoiseLookup();
 
-		const auto next_cleanup_deadline = [&](const RealType from_time) -> std::optional<RealType>
-		{
-			std::optional<RealType> next_deadline;
-			for (const auto& source : active_streaming_transmitters)
-			{
-				if (source.segment_end > from_time)
-				{
-					continue;
-				}
-				const auto cleanup_deadline = streamingSourceCleanupDeadline(source, from_time);
-				if (cleanup_deadline.has_value() && *cleanup_deadline > from_time &&
-					(!next_deadline.has_value() || *cleanup_deadline < *next_deadline))
-				{
-					next_deadline = cleanup_deadline;
-				}
-			}
-			return next_deadline;
-		};
-
 		while (t_current < t_event && !isCancellationRequested())
 		{
 			cleanupInactiveStreamingSources(t_current);
 
-			RealType chunk_end = t_event;
-			if (const auto cleanup_deadline = next_cleanup_deadline(t_current);
-				cleanup_deadline.has_value() && *cleanup_deadline < chunk_end)
-			{
-				chunk_end = *cleanup_deadline;
-			}
+			const RealType chunk_end = streamingChunkEnd(t_current, t_event);
 			if (chunk_end <= t_current)
 			{
 				break;
@@ -947,46 +1027,101 @@ namespace core
 			const auto end_index = streamingSampleIndexAtOrAfter(chunk_end, dt_sim);
 			for (size_t sample_index = start_index; sample_index < end_index; ++sample_index)
 			{
-				if (((sample_index - start_index) % 1024) == 0 && isCancellationRequested())
+				if (shouldStopStreamingChunk(sample_index, start_index))
 				{
 					break;
 				}
-				const RealType t_step = params::startTime() + static_cast<RealType>(sample_index) * dt_sim;
-
-				for (std::size_t receiver_index = 0; receiver_index < _world->getReceivers().size(); ++receiver_index)
-				{
-					const auto& receiver_ptr = _world->getReceivers()[receiver_index];
-					if ((receiver_ptr->getMode() == OperationMode::CW_MODE ||
-						 receiver_ptr->getMode() == OperationMode::FMCW_MODE) &&
-						receiver_ptr->isActive())
-					{
-						ComplexType sample =
-							calculateStreamingSample(receiver_ptr.get(), t_step, active_streaming_transmitters,
-													 _streaming_tracker_caches[receiver_index]);
-						if (receiver_ptr->hasFmcwIfResamplingSink())
-						{
-							appendFmcwIfSample(receiver_index, t_step, sample);
-						}
-						else if (_output_sink != nullptr)
-						{
-							appendStreamingOutputSample(receiver_index, sample_index, t_step, sample);
-						}
-					}
-				}
-				if (_output_sink != nullptr && t_step >= _next_context_heartbeat_time)
-				{
-					emitContextHeartbeatsThrough(t_step);
-				}
-				if (((sample_index - first_index) % progress_report_stride) == 0 || sample_index + 1 == final_index)
-				{
-					reportSimulationProgress(t_step);
-				}
+				processStreamingSample(sample_index, first_index, final_index, progress_report_stride, dt_sim);
 			}
 
 			t_current = chunk_end;
 			emitContextHeartbeatsThrough(t_current);
 		}
 		cleanupInactiveStreamingSources(t_current);
+	}
+
+	std::optional<RealType> SimulationEngine::nextStreamingCleanupDeadline(const RealType from_time)
+	{
+		const auto& active_streaming_transmitters = _world->getSimulationState().active_streaming_transmitters;
+		std::optional<RealType> next_deadline;
+		for (const auto& source : active_streaming_transmitters)
+		{
+			if (source.segment_end > from_time)
+			{
+				continue;
+			}
+			const auto cleanup_deadline = streamingSourceCleanupDeadline(source, from_time);
+			if (cleanup_deadline.has_value() && *cleanup_deadline > from_time &&
+				(!next_deadline.has_value() || *cleanup_deadline < *next_deadline))
+			{
+				next_deadline = cleanup_deadline;
+			}
+		}
+		return next_deadline;
+	}
+
+	RealType SimulationEngine::streamingChunkEnd(const RealType from_time, const RealType event_time)
+	{
+		if (const auto cleanup_deadline = nextStreamingCleanupDeadline(from_time);
+			cleanup_deadline.has_value() && *cleanup_deadline < event_time)
+		{
+			return *cleanup_deadline;
+		}
+		return event_time;
+	}
+
+	bool SimulationEngine::shouldStopStreamingChunk(const std::size_t sample_index, const std::size_t chunk_start_index)
+	{
+		return ((sample_index - chunk_start_index) % 1024) == 0 && isCancellationRequested();
+	}
+
+	void SimulationEngine::processStreamingSample(const std::size_t sample_index, const std::size_t first_index,
+												  const std::size_t final_index,
+												  const std::size_t progress_report_stride, const RealType dt_sim)
+	{
+		const RealType t_step = params::startTime() + static_cast<RealType>(sample_index) * dt_sim;
+		appendActiveReceiverStreamingSamples(sample_index, t_step);
+
+		if (_output_sink != nullptr && t_step >= _next_context_heartbeat_time)
+		{
+			emitContextHeartbeatsThrough(t_step);
+		}
+		if (((sample_index - first_index) % progress_report_stride) == 0 || sample_index + 1 == final_index)
+		{
+			reportSimulationProgress(t_step);
+		}
+	}
+
+	void SimulationEngine::appendActiveReceiverStreamingSamples(const std::size_t sample_index, const RealType t_step)
+	{
+		for (std::size_t receiver_index = 0; receiver_index < _world->getReceivers().size(); ++receiver_index)
+		{
+			appendReceiverStreamingSample(receiver_index, sample_index, t_step);
+		}
+	}
+
+	void SimulationEngine::appendReceiverStreamingSample(const std::size_t receiver_index,
+														 const std::size_t sample_index, const RealType t_step)
+	{
+		const auto& receiver_ptr = _world->getReceivers()[receiver_index];
+		if ((receiver_ptr->getMode() != OperationMode::CW_MODE &&
+			 receiver_ptr->getMode() != OperationMode::FMCW_MODE) ||
+			!receiver_ptr->isActive())
+		{
+			return;
+		}
+
+		const auto& active_streaming_transmitters = _world->getSimulationState().active_streaming_transmitters;
+		ComplexType const sample = calculateStreamingSample(receiver_ptr.get(), t_step, active_streaming_transmitters,
+															_streaming_tracker_caches[receiver_index]);
+		if (receiver_ptr->hasFmcwIfResamplingSink())
+		{
+			appendFmcwIfSample(receiver_index, t_step, sample);
+		}
+		else if (_output_sink != nullptr)
+		{
+			appendStreamingOutputSample(receiver_index, sample_index, t_step, sample);
+		}
 	}
 
 	void SimulationEngine::appendFmcwIfSample(const std::size_t receiver_index, const RealType t_step,
@@ -1061,7 +1196,7 @@ namespace core
 			return;
 		}
 
-		auto& receiver = _world->getReceivers()[receiver_index];
+		const auto& receiver = _world->getReceivers()[receiver_index];
 		const bool dechirped = receiver->isDechirpEnabled();
 		const RealType input_sample_rate = params::rate() * static_cast<RealType>(params::oversampleRatio());
 		const RealType block_start_time = _streaming_output_block_start_times[receiver_index];
@@ -1157,7 +1292,7 @@ namespace core
 			return;
 		}
 
-		auto& receiver = _world->getReceivers()[receiver_index];
+		const auto& receiver = _world->getReceivers()[receiver_index];
 		auto streaming_sources = collectStreamingSourcesForWindow(params::startTime(), params::endTime());
 		if (_streaming_output_stream_ids[receiver_index] == 0)
 		{
@@ -1187,7 +1322,7 @@ namespace core
 			return;
 		}
 
-		auto& receiver = _world->getReceivers()[receiver_index];
+		const auto& receiver = _world->getReceivers()[receiver_index];
 		auto& processed = _streaming_output_processed_buffers[receiver_index];
 		processed.assign(samples.begin(), samples.end());
 		processing::applyThermalNoiseAtSampleRate(processed, receiver->getNoiseTemperature(), receiver->getRngEngine(),
@@ -1244,7 +1379,7 @@ namespace core
 		{
 			return;
 		}
-		auto& receiver = _world->getReceivers()[receiver_index];
+		const auto& receiver = _world->getReceivers()[receiver_index];
 		if (!receiver->hasFmcwIfResamplingSink())
 		{
 			block.clear();
@@ -1265,6 +1400,37 @@ namespace core
 												true);
 	}
 
+	void SimulationEngine::addPulsedInterferenceSamples(std::span<ComplexType> block,
+														std::span<const ComplexType> rendered_pulse,
+														const long long dest_begin, const long long dest_end,
+														const std::size_t crop_offset, const RealType block_start_time,
+														const RealType sample_rate, const bool dechirp_mix,
+														Receiver* receiver, ReceiverTrackerCache& tracker_cache) const
+	{
+		for (long long dest = dest_begin; dest < dest_end; ++dest)
+		{
+			const RealType t_sample = block_start_time + static_cast<RealType>(dest) / sample_rate;
+			const auto source_index = crop_offset + static_cast<std::size_t>(dest - dest_begin);
+			if (source_index >= rendered_pulse.size())
+			{
+				continue;
+			}
+			if (dechirp_mix)
+			{
+				const auto mixer = calculateDechirpMixer(receiver, t_sample, tracker_cache);
+				if (!mixer.has_value())
+				{
+					continue;
+				}
+				block[static_cast<std::size_t>(dest)] += *mixer * std::conj(rendered_pulse[source_index]);
+			}
+			else
+			{
+				block[static_cast<std::size_t>(dest)] += rendered_pulse[source_index];
+			}
+		}
+	}
+
 	void SimulationEngine::applyPulsedInterferenceToStreamingBlock(const std::size_t receiver_index,
 																   std::span<ComplexType> block,
 																   const RealType block_start_time,
@@ -1275,7 +1441,7 @@ namespace core
 			return;
 		}
 
-		auto& receiver = _world->getReceivers()[receiver_index];
+		const auto& receiver = _world->getReceivers()[receiver_index];
 		if (!std::isfinite(sample_rate) || sample_rate <= 0.0)
 		{
 			return;
@@ -1318,30 +1484,8 @@ namespace core
 			const auto render_count = static_cast<std::size_t>(padded_end - padded_begin);
 			const auto rendered_pulse = response->renderSlice(sample_rate, render_start, render_count, 0.0);
 			const auto crop_offset = static_cast<std::size_t>(dest_begin - padded_begin);
-
-			for (long long dest = dest_begin; dest < dest_end; ++dest)
-			{
-				const RealType t_sample = block_start_time + static_cast<RealType>(dest) / sample_rate;
-				const auto source_index = crop_offset + static_cast<std::size_t>(dest - dest_begin);
-				if (source_index >= rendered_pulse.size())
-				{
-					continue;
-				}
-				if (dechirp_mix)
-				{
-					const auto mixer = calculateDechirpMixer(receiver.get(), t_sample, tracker_cache);
-					if (!mixer.has_value())
-					{
-						continue;
-					}
-					block[static_cast<std::size_t>(dest)] +=
-						*mixer * std::conj(rendered_pulse[static_cast<std::size_t>(source_index)]);
-				}
-				else
-				{
-					block[static_cast<std::size_t>(dest)] += rendered_pulse[static_cast<std::size_t>(source_index)];
-				}
-			}
+			addPulsedInterferenceSamples(block, rendered_pulse, dest_begin, dest_end, crop_offset, block_start_time,
+										 sample_rate, dechirp_mix, receiver.get(), tracker_cache);
 		}
 	}
 
@@ -1358,8 +1502,7 @@ namespace core
 		if (!tracker_cache.last_dechirp_time.has_value() || t_step < *tracker_cache.last_dechirp_time)
 		{
 			tracker_cache.active_dechirp_source_index = 0;
-			std::fill(tracker_cache.dechirp_reference.begin(), tracker_cache.dechirp_reference.end(),
-					  FmcwChirpBoundaryTracker{});
+			std::ranges::fill(tracker_cache.dechirp_reference, FmcwChirpBoundaryTracker{});
 		}
 		tracker_cache.last_dechirp_time = t_step;
 
@@ -1910,7 +2053,7 @@ namespace core
 				auto vita49_metadata = vita49MetadataFromConfig(output_config.vita49);
 				if (stats.epoch_unix_nanoseconds.has_value())
 				{
-					vita49_metadata.epoch_unix_nanoseconds = *stats.epoch_unix_nanoseconds;
+					vita49_metadata.epoch_unix_nanoseconds = stats.epoch_unix_nanoseconds;
 				}
 				for (const auto& stream : stats.streams)
 				{

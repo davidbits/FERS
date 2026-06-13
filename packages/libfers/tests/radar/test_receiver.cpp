@@ -26,6 +26,10 @@ namespace
 	{
 		params::Parameters saved;
 		ParamGuard() : saved(params::params) {}
+		ParamGuard(const ParamGuard&) = delete;
+		ParamGuard& operator=(const ParamGuard&) = delete;
+		ParamGuard(ParamGuard&&) = delete;
+		ParamGuard& operator=(ParamGuard&&) = delete;
 		~ParamGuard() { params::params = saved; }
 	};
 
@@ -115,7 +119,7 @@ TEST_CASE("Receiver exposes RNG", "[radar][receiver]")
 
 TEST_CASE("Receiver windows quantize to sampling rate", "[radar][receiver]")
 {
-	ParamGuard guard;
+	ParamGuard const guard;
 	params::setTime(0.0, 10.0);
 	params::setRate(1000.0);
 	params::setOversampleRatio(1);
@@ -132,7 +136,7 @@ TEST_CASE("Receiver windows quantize to sampling rate", "[radar][receiver]")
 	REQUIRE_THAT(rx.getWindowSkip(), WithinAbs(expected_skip, 1e-12));
 	REQUIRE_THAT(rx.getWindowLength(), WithinAbs(2.0, 1e-12));
 
-	const unsigned expected_count = static_cast<unsigned>(std::ceil((10.0 - 0.0) * expected_prf));
+	const auto expected_count = static_cast<unsigned>(std::ceil((10.0 - 0.0) * expected_prf));
 	REQUIRE(rx.getWindowCount() == expected_count);
 
 	REQUIRE_THROWS_AS(rx.getWindowStart(0), std::logic_error);
@@ -148,7 +152,7 @@ TEST_CASE("Receiver inbox and interference log", "[radar][receiver]")
 {
 	radar::Platform platform("RxPlatform");
 	radar::Receiver rx(&platform, "RxA", 5, radar::OperationMode::CW_MODE);
-	radar::Transmitter tx(&platform, "TxA", radar::OperationMode::CW_MODE, 9001);
+	radar::Transmitter const tx(&platform, "TxA", radar::OperationMode::CW_MODE, 9001);
 
 	std::vector<std::unique_ptr<fers_signal::RadarSignal>> waves;
 	rx.addResponseToInbox(makeResponse(&tx, waves));
@@ -166,7 +170,7 @@ TEST_CASE("Receiver inbox and interference log", "[radar][receiver]")
 
 TEST_CASE("Receiver IF resampling preserves absolute output positions across schedule gaps", "[radar][receiver][fmcw]")
 {
-	ParamGuard guard;
+	ParamGuard const guard;
 	params::setTime(0.0, 1.0);
 	params::setRate(10.0);
 	params::setOversampleRatio(1);
@@ -206,7 +210,7 @@ TEST_CASE("Receiver IF resampling preserves absolute output positions across sch
 
 TEST_CASE("Receiver IF live output reports absolute sample positions", "[radar][receiver][fmcw][vita49]")
 {
-	ParamGuard guard;
+	ParamGuard const guard;
 	params::setTime(0.0, 1.0);
 	params::setRate(10.0);
 	params::setOversampleRatio(1);
@@ -249,7 +253,7 @@ TEST_CASE("Receiver IF live output reports absolute sample positions", "[radar][
 
 TEST_CASE("Receiver IF resampling aligns off-grid segments to the global IF grid", "[radar][receiver][fmcw]")
 {
-	ParamGuard guard;
+	ParamGuard const guard;
 	params::setTime(0.0, 1.0);
 	params::setRate(100.0);
 	params::setOversampleRatio(1);
@@ -296,7 +300,7 @@ TEST_CASE("Receiver IF resampling aligns off-grid segments to the global IF grid
 TEST_CASE("Receiver IF resampling flushes filtered tail samples after scheduled segment ends",
 		  "[radar][receiver][fmcw]")
 {
-	ParamGuard guard;
+	ParamGuard const guard;
 	params::setTime(0.0, 1.0);
 	params::setRate(100.0);
 	params::setOversampleRatio(1);
@@ -343,7 +347,7 @@ TEST_CASE("Receiver IF resampling flushes filtered tail samples after scheduled 
 
 TEST_CASE("Receiver IF resampling skips long inactive gaps without zero-sample work", "[radar][receiver][fmcw]")
 {
-	ParamGuard guard;
+	ParamGuard const guard;
 	params::setTime(0.0, 1000.0);
 	params::setRate(100000.0);
 	params::setOversampleRatio(1);
@@ -389,22 +393,22 @@ TEST_CASE("Receiver schedule determines next window time", "[radar][receiver]")
 	{
 		const auto next = rx.getNextWindowTime(2.0);
 		REQUIRE(next.has_value());
-		REQUIRE_THAT(*next, WithinAbs(2.0, 1e-12));
+		REQUIRE_THAT(next.value_or(0.0), WithinAbs(2.0, 1e-12));
 	}
 
 	SECTION("Schedule enforces active windows")
 	{
-		std::vector<radar::SchedulePeriod> schedule = {{1.0, 2.0}, {4.0, 5.0}};
+		std::vector<radar::SchedulePeriod> const schedule = {{1.0, 2.0}, {4.0, 5.0}};
 		rx.setSchedule(schedule);
 		REQUIRE(rx.getSchedule().size() == 2);
 
 		const auto inside = rx.getNextWindowTime(1.25);
 		REQUIRE(inside.has_value());
-		REQUIRE_THAT(*inside, WithinAbs(1.25, 1e-12));
+		REQUIRE_THAT(inside.value_or(0.0), WithinAbs(1.25, 1e-12));
 
 		const auto before = rx.getNextWindowTime(3.5);
 		REQUIRE(before.has_value());
-		REQUIRE_THAT(*before, WithinAbs(4.0, 1e-12));
+		REQUIRE_THAT(before.value_or(0.0), WithinAbs(4.0, 1e-12));
 
 		const auto after = rx.getNextWindowTime(6.0);
 		REQUIRE_FALSE(after.has_value());

@@ -16,6 +16,10 @@ namespace
 	{
 		params::Parameters saved;
 		ParamGuard() : saved(params::params) {}
+		ParamGuard(const ParamGuard&) = delete;
+		ParamGuard& operator=(const ParamGuard&) = delete;
+		ParamGuard(ParamGuard&&) = delete;
+		ParamGuard& operator=(ParamGuard&&) = delete;
 		~ParamGuard() { params::params = saved; }
 	};
 }
@@ -44,7 +48,7 @@ TEST_CASE("Transmitter basic accessors and signal setters", "[radar][transmitter
 
 TEST_CASE("Transmitter setPrf quantizes to sample rate", "[radar][transmitter]")
 {
-	ParamGuard guard;
+	ParamGuard const guard;
 	params::setRate(1000.0);
 	params::setOversampleRatio(1);
 
@@ -66,23 +70,23 @@ TEST_CASE("Transmitter schedule resolves next pulse time", "[radar][transmitter]
 	{
 		const auto next = tx.getNextPulseTime(2.5);
 		REQUIRE(next.has_value());
-		REQUIRE_THAT(*next, WithinAbs(2.5, 1e-12));
+		REQUIRE_THAT(next.value_or(0.0), WithinAbs(2.5, 1e-12));
 	}
 
 	SECTION("Schedule enforces active windows")
 	{
-		std::vector<radar::SchedulePeriod> schedule = {{1.0, 2.0}, {4.0, 5.0}};
+		std::vector<radar::SchedulePeriod> const schedule = {{1.0, 2.0}, {4.0, 5.0}};
 		tx.setSchedule(schedule);
 
 		REQUIRE(tx.getSchedule().size() == 2);
 
 		const auto inside = tx.getNextPulseTime(1.5);
 		REQUIRE(inside.has_value());
-		REQUIRE_THAT(*inside, WithinAbs(1.5, 1e-12));
+		REQUIRE_THAT(inside.value_or(0.0), WithinAbs(1.5, 1e-12));
 
 		const auto before = tx.getNextPulseTime(3.0);
 		REQUIRE(before.has_value());
-		REQUIRE_THAT(*before, WithinAbs(4.0, 1e-12));
+		REQUIRE_THAT(before.value_or(0.0), WithinAbs(4.0, 1e-12));
 
 		const auto after = tx.getNextPulseTime(6.0);
 		REQUIRE_FALSE(after.has_value());

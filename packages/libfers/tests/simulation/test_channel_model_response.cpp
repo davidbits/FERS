@@ -30,6 +30,10 @@ namespace
 	{
 		params::Parameters saved;
 		ParamGuard() : saved(params::params) {}
+		ParamGuard(const ParamGuard&) = delete;
+		ParamGuard& operator=(const ParamGuard&) = delete;
+		ParamGuard(ParamGuard&&) = delete;
+		ParamGuard& operator=(ParamGuard&&) = delete;
 		~ParamGuard() { params::params = saved; }
 	};
 
@@ -62,7 +66,7 @@ namespace
 TEST_CASE("calculateResponse returns nullptr when Tx and Rx share same platform (direct path)",
 		  "[simulation][channel_model][response]")
 {
-	ParamGuard guard;
+	ParamGuard const guard;
 	params::params.reset();
 	params::setSimSamplingRate(1000.0);
 
@@ -93,7 +97,7 @@ TEST_CASE("calculateResponse returns nullptr when Tx and Rx share same platform 
 TEST_CASE("calculateResponse returns nullptr when Tx is attached to Rx (monostatic, direct path)",
 		  "[simulation][channel_model][response]")
 {
-	ParamGuard guard;
+	ParamGuard const guard;
 	params::params.reset();
 	params::setSimSamplingRate(1000.0);
 
@@ -129,7 +133,7 @@ TEST_CASE("calculateResponse returns nullptr when Tx is attached to Rx (monostat
 TEST_CASE("calculateResponse returns nullptr for reflected path when target co-located with Tx",
 		  "[simulation][channel_model][response]")
 {
-	ParamGuard guard;
+	ParamGuard const guard;
 	params::params.reset();
 	params::setSimSamplingRate(1000.0);
 
@@ -165,7 +169,7 @@ TEST_CASE("calculateResponse returns nullptr for reflected path when target co-l
 TEST_CASE("calculateResponse returns nullptr for reflected path when target co-located with Rx",
 		  "[simulation][channel_model][response]")
 {
-	ParamGuard guard;
+	ParamGuard const guard;
 	params::params.reset();
 	params::setSimSamplingRate(1000.0);
 
@@ -205,7 +209,7 @@ TEST_CASE("calculateResponse returns nullptr for reflected path when target co-l
 TEST_CASE("calculateResponse direct path produces non-null response with interp points",
 		  "[simulation][channel_model][response]")
 {
-	ParamGuard guard;
+	ParamGuard const guard;
 	params::params.reset();
 	params::setSimSamplingRate(1000.0); // 1000 samples/sec
 
@@ -246,7 +250,7 @@ TEST_CASE("calculateResponse direct path produces non-null response with interp 
 
 TEST_CASE("calculateResponse reflected path produces valid response", "[simulation][channel_model][response]")
 {
-	ParamGuard guard;
+	ParamGuard const guard;
 	params::params.reset();
 	params::setSimSamplingRate(1000.0);
 
@@ -290,7 +294,7 @@ TEST_CASE("calculateResponse reflected path produces valid response", "[simulati
 TEST_CASE("calculateResponse direct path interp points have consistent Friis power",
 		  "[simulation][channel_model][response]")
 {
-	ParamGuard guard;
+	ParamGuard const guard;
 	params::params.reset();
 	params::setSimSamplingRate(10000.0); // High sample rate for many points
 
@@ -338,7 +342,7 @@ TEST_CASE("calculateResponse direct path interp points have consistent Friis pow
 
 TEST_CASE("calculateResponse exposes transmitter id", "[simulation][channel_model][response]")
 {
-	ParamGuard guard;
+	ParamGuard const guard;
 	params::params.reset();
 	params::setSimSamplingRate(1000.0);
 

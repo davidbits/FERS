@@ -18,7 +18,7 @@ TEST_CASE("InterpPoint defaults to zeros", "[interpolation][point]")
 
 TEST_CASE("InterpSetData returns nullopt when empty", "[interpolation][set]")
 {
-	interp::InterpSetData data;
+	interp::InterpSetData const data;
 	REQUIRE_FALSE(data.value(0.0).has_value());
 	REQUIRE_THAT(data.max(), WithinAbs(0.0, 0.0));
 }
@@ -31,7 +31,7 @@ TEST_CASE("InterpSetData clamps before first sample", "[interpolation][set]")
 
 	auto value = data.value(1.0);
 	REQUIRE(value.has_value());
-	REQUIRE_THAT(*value, WithinAbs(10.0, 1e-12));
+	REQUIRE_THAT(value.value_or(0.0), WithinAbs(10.0, 1e-12));
 }
 
 TEST_CASE("InterpSetData clamps after last sample", "[interpolation][set]")
@@ -42,7 +42,7 @@ TEST_CASE("InterpSetData clamps after last sample", "[interpolation][set]")
 
 	auto value = data.value(10.0);
 	REQUIRE(value.has_value());
-	REQUIRE_THAT(*value, WithinAbs(-15.0, 1e-12));
+	REQUIRE_THAT(value.value_or(0.0), WithinAbs(-15.0, 1e-12));
 }
 
 TEST_CASE("InterpSetData returns exact sample", "[interpolation][set]")
@@ -53,7 +53,7 @@ TEST_CASE("InterpSetData returns exact sample", "[interpolation][set]")
 
 	auto value = data.value(2.0);
 	REQUIRE(value.has_value());
-	REQUIRE_THAT(*value, WithinAbs(4.0, 1e-12));
+	REQUIRE_THAT(value.value_or(0.0), WithinAbs(4.0, 1e-12));
 }
 
 TEST_CASE("InterpSetData linearly interpolates", "[interpolation][set]")
@@ -64,7 +64,7 @@ TEST_CASE("InterpSetData linearly interpolates", "[interpolation][set]")
 
 	auto mid = data.value(2.5);
 	REQUIRE(mid.has_value());
-	REQUIRE_THAT(*mid, WithinAbs(5.0, 1e-12));
+	REQUIRE_THAT(mid.value_or(0.0), WithinAbs(5.0, 1e-12));
 }
 
 TEST_CASE("InterpSetData linearly interpolates float queries", "[interpolation][set]")
@@ -75,7 +75,7 @@ TEST_CASE("InterpSetData linearly interpolates float queries", "[interpolation][
 
 	auto mid = data.value(2.5f);
 	REQUIRE(mid.has_value());
-	REQUIRE_THAT(*mid, WithinAbs(5.0f, 1e-6f));
+	REQUIRE_THAT(mid.value_or(0.0f), WithinAbs(5.0f, 1e-6f));
 }
 
 TEST_CASE("InterpSetData max uses absolute magnitude", "[interpolation][set]")
@@ -97,7 +97,7 @@ TEST_CASE("InterpSetData divide scales values", "[interpolation][set]")
 
 	auto value = data.value(2.0);
 	REQUIRE(value.has_value());
-	REQUIRE_THAT(*value, WithinAbs(3.0, 1e-12));
+	REQUIRE_THAT(value.value_or(0.0), WithinAbs(3.0, 1e-12));
 }
 
 TEST_CASE("InterpSetData divide rejects zero", "[interpolation][set]")
@@ -109,23 +109,23 @@ TEST_CASE("InterpSetData divide rejects zero", "[interpolation][set]")
 
 TEST_CASE("InterpSet wrapper supports float interpolation", "[interpolation][set]")
 {
-	interp::InterpSet set;
+	interp::InterpSet const set;
 	set.insertSample(0.0f, 0.0f);
 	set.insertSample(1.0f, 1.0f);
 
 	auto value = set.getValueAt(0.5f);
 	REQUIRE(value.has_value());
-	REQUIRE_THAT(*value, WithinAbs(0.5f, 1e-6f));
+	REQUIRE_THAT(value.value_or(0.0f), WithinAbs(0.5f, 1e-6f));
 
 	set.divide(2.0f);
 	auto scaled = set.getValueAt(0.5f);
 	REQUIRE(scaled.has_value());
-	REQUIRE_THAT(*scaled, WithinAbs(0.25f, 1e-6f));
+	REQUIRE_THAT(scaled.value_or(0.0f), WithinAbs(0.25f, 1e-6f));
 }
 
 TEST_CASE("InterpSet wrapper exposes max", "[interpolation][set]")
 {
-	interp::InterpSet set;
+	interp::InterpSet const set;
 	set.insertSample(0.0, -2.0);
 	set.insertSample(1.0, 1.0);
 	REQUIRE_THAT(set.getMax(), WithinAbs(2.0, 1e-12));

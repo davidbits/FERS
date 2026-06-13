@@ -10,7 +10,7 @@
 #include "core/logging.h"
 
 // Helper to parse log level from an environment variable string
-logging::Level levelFromString(std::string_view levelStr)
+static logging::Level levelFromString(std::string_view levelStr)
 {
 	if (levelStr == "TRACE")
 		return logging::Level::TRACE;
@@ -36,20 +36,20 @@ int main(int argc, char* argv[])
 
 	// Allow overriding the log level with an environment variable for debugging.
 	// Example: FERS_TEST_LOG_LEVEL=DEBUG ctest -R my_failing_test
+	// NOLINTNEXTLINE(concurrency-mt-unsafe): Test runner reads environment before tests start worker threads.
 	if (const char* env_level = std::getenv("FERS_TEST_LOG_LEVEL"))
 	{
 		testLogLevel = levelFromString(env_level);
 		if (testLogLevel != logging::Level::OFF)
 		{
-			std::cout << "[Test Runner] Overriding log level to: " << logging::getLevelString(testLogLevel)
-					  << std::endl;
+			std::cout << "[Test Runner] Overriding log level to: " << logging::getLevelString(testLogLevel) << '\n';
 		}
 	}
 
 	logging::logger.setLevel(testLogLevel);
 
 	// Run the Catch2 test session
-	int result = Catch::Session().run(argc, argv);
+	int const result = Catch::Session().run(argc, argv);
 
 	return result;
 }

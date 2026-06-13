@@ -49,7 +49,7 @@ namespace pool
 						}
 
 						{
-							std::unique_lock lock(_queue_mutex);
+							std::unique_lock const lock(_queue_mutex);
 							--_pending_tasks;
 							if (_pending_tasks == 0)
 							{
@@ -64,7 +64,7 @@ namespace pool
 	ThreadPool::~ThreadPool()
 	{
 		{
-			std::unique_lock lock(_queue_mutex);
+			std::unique_lock const lock(_queue_mutex);
 			_stop = true;
 			_condition.notify_all();
 		}
@@ -76,13 +76,13 @@ namespace pool
 
 	unsigned ThreadPool::getAvailableThreads()
 	{
-		std::unique_lock lock(_queue_mutex);
+		std::unique_lock const lock(_queue_mutex);
 		const unsigned active_threads = _pending_tasks;
 		if (_workers.size() > static_cast<std::size_t>(std::numeric_limits<unsigned>::max()))
 		{
 			throw std::runtime_error("Thread pool size exceeds unsigned range.");
 		}
-		const unsigned total_threads = static_cast<unsigned>(_workers.size());
+		const auto total_threads = static_cast<unsigned>(_workers.size());
 		return total_threads > active_threads ? total_threads - active_threads : 0;
 	}
 }

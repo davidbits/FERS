@@ -184,8 +184,8 @@ namespace processing::pipeline
 	{
 		for (const auto& response : interference_log)
 		{
-			unsigned psize;
-			RealType prate;
+			unsigned psize = 0;
+			RealType prate = std::numeric_limits<RealType>::quiet_NaN();
 			const auto rendered_pulse = response->renderBinary(prate, psize, 0.0);
 			const RealType rate_tolerance = std::numeric_limits<RealType>::epsilon() *
 				std::max(std::abs(prate), std::abs(output_sample_rate)) * 16.0;
@@ -253,7 +253,7 @@ namespace processing::pipeline
 							   const RealType fullscale, const RealType ref_freq,
 							   const core::OutputFileMetadata* metadata, const RealType sample_rate)
 	{
-		std::scoped_lock lock(serial::hdf5_global_mutex);
+		std::scoped_lock const lock(serial::hdf5_global_mutex);
 		try
 		{
 			HighFive::File file(filename, HighFive::File::Truncate);

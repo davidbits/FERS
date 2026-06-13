@@ -76,20 +76,20 @@ namespace serial
 		{
 		}
 
-		void initializeRun(const core::OutputConfig& config, std::string /*simulation_name*/)
+		void initializeRun(const core::OutputConfig& config, const std::string& /*simulation_name*/)
 		{
 			if (config.mode != core::OutputMode::Hdf5)
 			{
 				throw std::invalid_argument("Hdf5OutputSink requires HDF5 output mode");
 			}
-			std::scoped_lock lock(mutex);
+			std::scoped_lock const lock(mutex);
 			std::filesystem::create_directories(output_dir);
 			finalized = false;
 		}
 
 		std::uint32_t registerStream(const core::ReceiverStreamDescriptor& stream)
 		{
-			std::scoped_lock lock(mutex);
+			std::scoped_lock const lock(mutex);
 			const auto key = streamKey(stream);
 			if (const auto found = stream_ids.find(key); found != stream_ids.end())
 			{
@@ -111,7 +111,7 @@ namespace serial
 
 		void openStream(const std::uint32_t stream_id, const RealType /*first_sample_time*/)
 		{
-			std::scoped_lock lock(mutex);
+			std::scoped_lock const lock(mutex);
 			auto& state = stateFor(stream_id);
 			if (state.opened)
 			{
@@ -120,7 +120,7 @@ namespace serial
 			std::filesystem::create_directories(output_dir);
 			if (isPulsed(state))
 			{
-				std::scoped_lock hdf5_lock(hdf5_global_mutex);
+				std::scoped_lock const hdf5_lock(hdf5_global_mutex);
 				state.pulsed_file = std::make_unique<HighFive::File>(state.metadata.path, HighFive::File::Truncate);
 			}
 			else
@@ -137,7 +137,7 @@ namespace serial
 
 		void submitBlock(const core::ReceiverSampleBlock& block)
 		{
-			std::scoped_lock lock(mutex);
+			std::scoped_lock const lock(mutex);
 			const auto stream_id = registerStream(block.stream);
 			auto& state = stateFor(stream_id);
 			if (!state.opened)
@@ -159,7 +159,7 @@ namespace serial
 
 		void closeStream(const std::uint32_t stream_id)
 		{
-			std::scoped_lock lock(mutex);
+			std::scoped_lock const lock(mutex);
 			auto& state = stateFor(stream_id);
 			if (state.closed)
 			{
@@ -179,7 +179,7 @@ namespace serial
 
 		core::OutputStats finalize()
 		{
-			std::scoped_lock lock(mutex);
+			std::scoped_lock const lock(mutex);
 			if (!finalized)
 			{
 				std::vector<std::uint32_t> ids;
@@ -265,9 +265,9 @@ namespace serial
 			{
 				state.streaming_buffer.resize(sample_end);
 			}
-			std::copy(block.samples.begin(), block.samples.end(),
-					  std::next(state.streaming_buffer.begin(),
-								static_cast<std::vector<ComplexType>::difference_type>(sample_start)));
+			std::ranges::copy(block.samples,
+							  std::next(state.streaming_buffer.begin(),
+										static_cast<std::vector<ComplexType>::difference_type>(sample_start)));
 		}
 
 		void closePulsedStream(StreamState& state)
@@ -278,7 +278,7 @@ namespace serial
 			}
 			finalizePulsedMetadata(state.metadata);
 			{
-				std::scoped_lock hdf5_lock(hdf5_global_mutex);
+				std::scoped_lock const hdf5_lock(hdf5_global_mutex);
 				writeOutputFileMetadataAttributes(*state.pulsed_file, state.metadata);
 				state.pulsed_file.reset();
 			}
@@ -348,7 +348,7 @@ namespace serial
 
 	void Hdf5OutputSink::initializeRun(const core::OutputConfig& config, std::string simulation_name)
 	{
-		_impl->initializeRun(config, std::move(simulation_name));
+		_impl->initializeRun(config, simulation_name);
 	}
 
 	std::uint32_t Hdf5OutputSink::registerStream(const core::ReceiverStreamDescriptor& stream)

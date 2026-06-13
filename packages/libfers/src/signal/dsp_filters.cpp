@@ -16,6 +16,7 @@
 #include <array>
 #include <cmath>
 #include <complex>
+#include <cstddef>
 #include <numeric>
 #include <ranges>
 #include <set>
@@ -150,20 +151,22 @@ namespace fers_signal
 		validateOversamplingConfig(ratio);
 		const unsigned filter_length = params::renderFilterLength();
 		const auto design = blackmanFir(1 / static_cast<RealType>(ratio), ratio, filter_length);
-		const unsigned filt_length = static_cast<unsigned>(design.coeffs.size());
+		const auto filt_length = static_cast<unsigned>(design.coeffs.size());
 
-		std::vector tmp(static_cast<size_t>(size * ratio + filt_length), ComplexType{0.0, 0.0});
+		const auto oversampled_size = static_cast<std::size_t>(size) * static_cast<std::size_t>(ratio);
+		std::vector tmp(oversampled_size + static_cast<std::size_t>(filt_length), ComplexType{0.0, 0.0});
 
 		for (unsigned i = 0; i < size; ++i)
 		{
-			tmp[static_cast<size_t>(i * ratio)] = in[i];
+			tmp[static_cast<std::size_t>(i) * static_cast<std::size_t>(ratio)] = in[i];
 		}
 
 		const FirFilter filt(design.coeffs);
 		filt.filter(tmp);
 
-		const auto delay = filt_length / 2;
-		std::ranges::copy_n(tmp.begin() + delay, size * ratio, out.begin());
+		const auto delay = static_cast<std::size_t>(filt_length / 2);
+		const std::span<const ComplexType> filtered_output(tmp.data() + delay, oversampled_size);
+		std::ranges::copy(filtered_output, out.begin());
 	}
 
 	/**
@@ -189,7 +192,7 @@ namespace fers_signal
 		validateOversamplingConfig(ratio);
 		const unsigned filter_length = params::renderFilterLength();
 		const auto design = blackmanFir(1 / static_cast<RealType>(ratio), ratio, filter_length);
-		const unsigned filt_length = static_cast<unsigned>(design.coeffs.size());
+		const auto filt_length = design.coeffs.size();
 
 		std::vector tmp(in.size() + filt_length, ComplexType{0, 0});
 
@@ -200,17 +203,18 @@ namespace fers_signal
 
 		const auto downsampled_size = in.size() / ratio;
 		std::vector<ComplexType> out(downsampled_size);
-		for (unsigned i = 0; i < downsampled_size; ++i)
+		const auto filter_delay = filt_length / 2;
+		for (std::size_t i = 0; i < downsampled_size; ++i)
 		{
-			out[i] = tmp[static_cast<size_t>(i * ratio + filt_length / 2)] / static_cast<RealType>(ratio);
+			const auto source_index = i * static_cast<std::size_t>(ratio) + filter_delay;
+			out[i] = tmp[source_index] / static_cast<RealType>(ratio);
 		}
 
 		return out;
 	}
 
-	DownsamplingSink::DownsamplingSink()
+	DownsamplingSink::DownsamplingSink() : _ratio(params::oversampleRatio())
 	{
-		_ratio = params::oversampleRatio();
 		validateOversamplingConfig(_ratio);
 		if (_ratio <= 1)
 		{

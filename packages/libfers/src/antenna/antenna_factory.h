@@ -12,6 +12,7 @@
 
 #pragma once
 
+#include <cstdint>
 #include <memory>
 #include <optional>
 #include <string>
@@ -46,8 +47,7 @@ namespace antenna
 		 * @param name The name of the antenna.
 		 */
 		explicit Antenna(std::string name, const SimId id = 0) noexcept :
-			_loss_factor(1), _id(id == 0 ? SimIdGenerator::instance().generateId(ObjectType::Antenna) : id),
-			_name(std::move(name))
+			_id(id == 0 ? SimIdGenerator::instance().generateId(ObjectType::Antenna) : id), _name(std::move(name))
 		{
 		}
 
@@ -127,7 +127,7 @@ namespace antenna
 		static RealType getAngle(const math::SVec3& angle, const math::SVec3& refangle) noexcept;
 
 	private:
-		RealType _loss_factor; ///< Efficiency factor of the antenna.
+		RealType _loss_factor{1}; ///< Efficiency factor of the antenna.
 		SimId _id; ///< Unique ID for this antenna.
 		std::string _name; ///< Name of the antenna.
 	};
@@ -438,7 +438,7 @@ namespace antenna
 	{
 	public:
 		/// Symmetry mode for one-dimensional XML antenna gain axes.
-		enum class AxisSymmetry
+		enum class AxisSymmetry : std::uint8_t
 		{
 			Mirrored, ///< Mirror positive-axis samples onto negative angles.
 			None, ///< Use the axis samples exactly as provided.

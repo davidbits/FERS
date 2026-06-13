@@ -1,5 +1,6 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_string.hpp>
+#include <cstdint>
 #include <iostream>
 #include <memory>
 #include <nlohmann/json.hpp>
@@ -27,12 +28,20 @@ namespace
 	{
 		params::Parameters saved;
 		ParamGuard() : saved(params::params) {}
+		ParamGuard(const ParamGuard&) = delete;
+		ParamGuard& operator=(const ParamGuard&) = delete;
+		ParamGuard(ParamGuard&&) = delete;
+		ParamGuard& operator=(ParamGuard&&) = delete;
 		~ParamGuard() { params::params = saved; }
 	};
 
 	struct LogLevelGuard
 	{
 		explicit LogLevelGuard(const logging::Level level) { logging::logger.setLevel(level); }
+		LogLevelGuard(const LogLevelGuard&) = delete;
+		LogLevelGuard& operator=(const LogLevelGuard&) = delete;
+		LogLevelGuard(LogLevelGuard&&) = delete;
+		LogLevelGuard& operator=(LogLevelGuard&&) = delete;
 		~LogLevelGuard() { logging::logger.setLevel(logging::Level::DEBUG); }
 	};
 
@@ -40,7 +49,11 @@ namespace
 	{
 		std::ostringstream buffer;
 		std::streambuf* old{nullptr};
-		CerrCapture() { old = std::cerr.rdbuf(buffer.rdbuf()); }
+		CerrCapture() : old(std::cerr.rdbuf(buffer.rdbuf())) {}
+		CerrCapture(const CerrCapture&) = delete;
+		CerrCapture& operator=(const CerrCapture&) = delete;
+		CerrCapture(CerrCapture&&) = delete;
+		CerrCapture& operator=(CerrCapture&&) = delete;
 		~CerrCapture() { std::cerr.rdbuf(old); }
 		[[nodiscard]] std::string str() const { return buffer.str(); }
 	};
@@ -109,7 +122,7 @@ namespace
 
 TEST_CASE("Simulation memory projection totals core categories", "[core][memory_projection]")
 {
-	ParamGuard guard;
+	ParamGuard const guard;
 	params::setTime(0.0, 1.0);
 	params::setRate(10.0);
 	params::setOversampleRatio(2);
@@ -128,7 +141,7 @@ TEST_CASE("Simulation memory projection totals core categories", "[core][memory_
 
 	REQUIRE(projection.phase_noise_lookup.bytes == 21 * sizeof(RealType));
 	REQUIRE(projection.streaming_iq_buffers.bytes == 20 * sizeof(ComplexType));
-	REQUIRE(projection.rendered_hdf5_payload.bytes == 16 * 2 * sizeof(RealType));
+	REQUIRE(projection.rendered_hdf5_payload.bytes == std::uint64_t{16} * 2 * sizeof(RealType));
 
 	const auto json = nlohmann::json::parse(core::memoryProjectionToJsonString(projection));
 	REQUIRE(json["phase_noise_lookups"]["bytes"] == projection.phase_noise_lookup.bytes);
@@ -139,7 +152,7 @@ TEST_CASE("Simulation memory projection totals core categories", "[core][memory_
 
 TEST_CASE("Simulation memory projection counts dechirped streaming output at RF rate", "[core][memory_projection]")
 {
-	ParamGuard guard;
+	ParamGuard const guard;
 	params::setTime(0.0, 1.0);
 	params::setRate(10.0);
 	params::setOversampleRatio(2);
@@ -161,13 +174,13 @@ TEST_CASE("Simulation memory projection counts dechirped streaming output at RF 
 	REQUIRE(projection.streaming_sample_count == 20);
 	REQUIRE(projection.streaming_receiver_count == 2);
 	REQUIRE(projection.rendered_hdf5_sample_count == 36);
-	REQUIRE(projection.rendered_hdf5_payload.bytes == 36 * 2 * sizeof(RealType));
+	REQUIRE(projection.rendered_hdf5_payload.bytes == std::uint64_t{36} * 2 * sizeof(RealType));
 }
 
 TEST_CASE("Simulation memory projection counts IF-rate dechirped output at receiver rate",
 		  "[core][memory_projection][fmcw]")
 {
-	ParamGuard guard;
+	ParamGuard const guard;
 	params::setTime(0.0, 1.0);
 	params::setRate(10.0);
 	params::setOversampleRatio(2);
@@ -192,13 +205,13 @@ TEST_CASE("Simulation memory projection counts IF-rate dechirped output at recei
 	REQUIRE(projection.streaming_receiver_count == 2);
 	REQUIRE(projection.rendered_hdf5_sample_count == 21);
 	REQUIRE(projection.streaming_iq_buffers.bytes == 25 * sizeof(ComplexType));
-	REQUIRE(projection.rendered_hdf5_payload.bytes == 21 * 2 * sizeof(RealType));
+	REQUIRE(projection.rendered_hdf5_payload.bytes == std::uint64_t{21} * 2 * sizeof(RealType));
 }
 
 TEST_CASE("Simulation memory projection starts phase-noise lookup at earliest streaming receiver",
 		  "[core][memory_projection]")
 {
-	ParamGuard guard;
+	ParamGuard const guard;
 	params::setTime(0.0, 2.0);
 	params::setRate(10.0);
 	params::setOversampleRatio(1);
@@ -215,14 +228,14 @@ TEST_CASE("Simulation memory projection starts phase-noise lookup at earliest st
 
 TEST_CASE("Simulation memory projection log names required categories", "[core][memory_projection][logging]")
 {
-	ParamGuard guard;
+	ParamGuard const guard;
 	params::setTime(0.0, 1.0);
 	params::setRate(10.0);
 	params::setOversampleRatio(2);
 
 	const auto world = makeProjectionWorld();
-	LogLevelGuard level_guard(logging::Level::DEBUG);
-	CerrCapture capture;
+	LogLevelGuard const level_guard(logging::Level::DEBUG);
+	CerrCapture const capture;
 
 	core::logSimulationMemoryProjection(*world);
 

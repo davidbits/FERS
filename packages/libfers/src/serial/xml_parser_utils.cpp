@@ -111,57 +111,28 @@ namespace serial::xml_parser_utils
 			return value;
 		}
 
-		/// Parses receiver-side dechirp settings from an FMCW mode block.
-		void parse_receiver_dechirp_config(const XmlElement& parent, radar::Receiver& receiver,
-										   const std::string& owner)
+		bool has_if_chain_fields(const radar::Receiver::FmcwIfChainRequest& if_chain) noexcept
 		{
-			if (receiver.getMode() != radar::OperationMode::FMCW_MODE)
-			{
-				receiver.setDechirpMode(radar::Receiver::DechirpMode::None);
-				return;
-			}
+			return if_chain.sample_rate_hz.has_value() || if_chain.filter_bandwidth_hz.has_value() ||
+				if_chain.filter_transition_width_hz.has_value();
+		}
 
-			const XmlElement fmcw_mode = parent.childElement("fmcw_mode", 0);
-			if (!fmcw_mode.isValid())
+		void reject_disabled_dechirp_fields(const XmlElement& ref_element,
+											const radar::Receiver::FmcwIfChainRequest& if_chain,
+											const std::string& owner)
+		{
+			if (ref_element.isValid())
 			{
-				receiver.setDechirpMode(radar::Receiver::DechirpMode::None);
-				return;
+				throw XmlException(owner + " declares <dechirp_reference> while dechirp_mode is 'none'.");
 			}
-
-			radar::Receiver::DechirpMode mode = radar::Receiver::DechirpMode::None;
-			if (const auto mode_attr = XmlElement::getOptionalAttribute(fmcw_mode, "dechirp_mode"))
+			if (has_if_chain_fields(if_chain))
 			{
-				try
-				{
-					mode = radar::parseDechirpModeToken(*mode_attr);
-				}
-				catch (const std::exception& e)
-				{
-					throw XmlException(owner + " has invalid dechirp_mode. " + e.what());
-				}
+				throw XmlException(owner + " declares IF-chain fields while dechirp_mode is 'none'.");
 			}
+		}
 
-			const XmlElement ref_element = fmcw_mode.childElement("dechirp_reference", 0);
-			radar::Receiver::FmcwIfChainRequest if_chain{
-				.sample_rate_hz = parse_optional_fmcw_if_child(fmcw_mode, "if_sample_rate", owner),
-				.filter_bandwidth_hz = parse_optional_fmcw_if_child(fmcw_mode, "if_filter_bandwidth", owner),
-				.filter_transition_width_hz =
-					parse_optional_fmcw_if_child(fmcw_mode, "if_filter_transition_width", owner)};
-			if (mode == radar::Receiver::DechirpMode::None)
-			{
-				if (ref_element.isValid())
-				{
-					throw XmlException(owner + " declares <dechirp_reference> while dechirp_mode is 'none'.");
-				}
-				if (if_chain.sample_rate_hz.has_value() || if_chain.filter_bandwidth_hz.has_value() ||
-					if_chain.filter_transition_width_hz.has_value())
-				{
-					throw XmlException(owner + " declares IF-chain fields while dechirp_mode is 'none'.");
-				}
-				receiver.setDechirpMode(mode);
-				return;
-			}
-
+		void validate_if_chain_request(const radar::Receiver::FmcwIfChainRequest& if_chain, const std::string& owner)
+		{
 			if ((if_chain.filter_bandwidth_hz.has_value() || if_chain.filter_transition_width_hz.has_value()) &&
 				!if_chain.sample_rate_hz.has_value())
 			{
@@ -175,14 +146,16 @@ namespace serial::xml_parser_utils
 					throw XmlException(owner + " <if_sample_rate> must not exceed the simulation sample rate.");
 				}
 			}
-			if (if_chain.sample_rate_hz.has_value() && if_chain.filter_bandwidth_hz.has_value())
+			if (if_chain.sample_rate_hz.has_value() && if_chain.filter_bandwidth_hz.has_value() &&
+				*if_chain.filter_bandwidth_hz >= *if_chain.sample_rate_hz / 2.0)
 			{
-				if (*if_chain.filter_bandwidth_hz >= *if_chain.sample_rate_hz / 2.0)
-				{
-					throw XmlException(owner + " <if_filter_bandwidth> must be less than half <if_sample_rate>.");
-				}
+				throw XmlException(owner + " <if_filter_bandwidth> must be less than half <if_sample_rate>.");
 			}
+		}
 
+		radar::Receiver::DechirpReference
+		parse_dechirp_reference(const XmlElement& fmcw_mode, const XmlElement& ref_element, const std::string& owner)
+		{
 			if (!ref_element.isValid())
 			{
 				throw XmlException(owner + " enables dechirping but does not declare <dechirp_reference>.");
@@ -233,9 +206,58 @@ namespace serial::xml_parser_utils
 				throw XmlException(owner + " dechirp_reference source must be attached, transmitter, or custom.");
 			}
 
+			return reference;
+		}
+
+		/// Parses receiver-side dechirp settings from an FMCW mode block.
+		void parse_receiver_dechirp_config(const XmlElement& parent, radar::Receiver& receiver,
+										   const std::string& owner)
+		{
+			if (receiver.getMode() != radar::OperationMode::FMCW_MODE)
+			{
+				receiver.setDechirpMode(radar::Receiver::DechirpMode::None);
+				return;
+			}
+
+			const XmlElement fmcw_mode = parent.childElement("fmcw_mode", 0);
+			if (!fmcw_mode.isValid())
+			{
+				receiver.setDechirpMode(radar::Receiver::DechirpMode::None);
+				return;
+			}
+
+			radar::Receiver::DechirpMode mode = radar::Receiver::DechirpMode::None;
+			if (const auto mode_attr = XmlElement::getOptionalAttribute(fmcw_mode, "dechirp_mode"))
+			{
+				try
+				{
+					mode = radar::parseDechirpModeToken(*mode_attr);
+				}
+				catch (const std::exception& e)
+				{
+					throw XmlException(owner + " has invalid dechirp_mode. " + e.what());
+				}
+			}
+
+			const XmlElement ref_element = fmcw_mode.childElement("dechirp_reference", 0);
+			radar::Receiver::FmcwIfChainRequest if_chain{
+				.sample_rate_hz = parse_optional_fmcw_if_child(fmcw_mode, "if_sample_rate", owner),
+				.filter_bandwidth_hz = parse_optional_fmcw_if_child(fmcw_mode, "if_filter_bandwidth", owner),
+				.filter_transition_width_hz =
+					parse_optional_fmcw_if_child(fmcw_mode, "if_filter_transition_width", owner)};
+			if (mode == radar::Receiver::DechirpMode::None)
+			{
+				reject_disabled_dechirp_fields(ref_element, if_chain, owner);
+				receiver.setDechirpMode(mode);
+				return;
+			}
+
+			validate_if_chain_request(if_chain, owner);
+			auto reference = parse_dechirp_reference(fmcw_mode, ref_element, owner);
+
 			receiver.setDechirpMode(mode);
 			receiver.setDechirpReference(std::move(reference));
-			receiver.setFmcwIfChainRequest(std::move(if_chain));
+			receiver.setFmcwIfChainRequest(if_chain);
 		}
 
 		/// Throws an XML validation exception with the provided message.
@@ -356,7 +378,7 @@ namespace serial::xml_parser_utils
 			unsigned p_idx = 0;
 			while (true)
 			{
-				XmlElement period_element = schedule_element.childElement("period", p_idx++);
+				XmlElement const period_element = schedule_element.childElement("period", p_idx++);
 				if (!period_element.isValid())
 				{
 					break;
@@ -373,104 +395,98 @@ namespace serial::xml_parser_utils
 				}
 			}
 		}
-		return radar::processRawSchedule(std::move(raw_periods), parentName, isPulsed, pri);
+		return radar::processRawSchedule(raw_periods, parentName, isPulsed, pri);
 	}
 
-	void parseParameters(const XmlElement& parameters, params::Parameters& params_out)
+	unsigned parseUnsignedParameter(const std::string_view param_name, const RealType raw_value)
 	{
-		params_out.start = get_child_real_type(parameters, "starttime");
-		params_out.end = get_child_real_type(parameters, "endtime");
-		LOG(logging::Level::INFO, "Simulation time set from {:.5f} to {:.5f} seconds", params_out.start,
-			params_out.end);
-
-		params_out.rate = get_child_real_type(parameters, "rate");
-		if (params_out.rate <= 0)
+		if (!std::isfinite(raw_value))
 		{
-			throw std::runtime_error("Sampling rate must be > 0");
+			throw XmlException(std::format("Parameter '{}' must be finite.", param_name));
 		}
-		LOG(logging::Level::DEBUG, "Sample rate set to: {:.5f}", params_out.rate);
-
-		const auto parse_unsigned_parameter = [&](const std::string_view param_name, const RealType raw_value)
+		if (raw_value < 0.0)
 		{
-			if (!std::isfinite(raw_value))
-			{
-				throw XmlException(std::format("Parameter '{}' must be finite.", param_name));
-			}
-			if (raw_value < 0.0)
-			{
-				throw XmlException(std::format("Parameter '{}' must be non-negative.", param_name));
-			}
+			throw XmlException(std::format("Parameter '{}' must be non-negative.", param_name));
+		}
 
-			const RealType floored_value = std::floor(raw_value);
-			if (floored_value > static_cast<RealType>(std::numeric_limits<unsigned>::max()))
-			{
-				throw XmlException(std::format("Parameter '{}' exceeds the supported unsigned range.", param_name));
-			}
-
-			return static_cast<unsigned>(floored_value);
-		};
-
-		auto set_optional_real_parameter = [&](const std::string& param_name, const RealType default_value, auto setter)
+		const RealType floored_value = std::floor(raw_value);
+		if (floored_value > static_cast<RealType>(std::numeric_limits<unsigned>::max()))
 		{
-			if (!parameters.childElement(param_name, 0).isValid())
-			{
-				LOG(logging::Level::DEBUG, "Parameter '{}' not specified. Using default value {}.", param_name,
-					default_value);
-				return;
-			}
+			throw XmlException(std::format("Parameter '{}' exceeds the supported unsigned range.", param_name));
+		}
 
-			setter(get_child_real_type(parameters, param_name));
-		};
+		return static_cast<unsigned>(floored_value);
+	}
 
-		auto set_optional_unsigned_parameter =
-			[&](const std::string& param_name, const unsigned default_value, auto setter)
+	template <typename Setter>
+	void setOptionalRealParameter(const XmlElement& parameters, const std::string& param_name,
+								  const RealType default_value, Setter setter)
+	{
+		if (!parameters.childElement(param_name, 0).isValid())
 		{
-			if (!parameters.childElement(param_name, 0).isValid())
-			{
-				LOG(logging::Level::DEBUG, "Parameter '{}' not specified. Using default value {}.", param_name,
-					default_value);
-				return;
-			}
+			LOG(logging::Level::DEBUG, "Parameter '{}' not specified. Using default value {}.", param_name,
+				default_value);
+			return;
+		}
 
-			setter(parse_unsigned_parameter(param_name, get_child_real_type(parameters, param_name)));
-		};
+		setter(get_child_real_type(parameters, param_name));
+	}
 
-		set_optional_real_parameter("c", params::Parameters::DEFAULT_C,
-									[&](const RealType value)
-									{
-										params_out.c = value;
-										LOG(logging::Level::INFO, "Propagation speed (c) set to: {:.5f}", value);
-									});
+	template <typename Setter>
+	void setOptionalUnsignedParameter(const XmlElement& parameters, const std::string& param_name,
+									  const unsigned default_value, Setter setter)
+	{
+		if (!parameters.childElement(param_name, 0).isValid())
+		{
+			LOG(logging::Level::DEBUG, "Parameter '{}' not specified. Using default value {}.", param_name,
+				default_value);
+			return;
+		}
 
-		set_optional_real_parameter("simSamplingRate", 1000.0,
-									[&](const RealType value)
-									{
-										params_out.sim_sampling_rate = value;
-										LOG(logging::Level::DEBUG, "Simulation sampling rate set to: {:.5f} Hz", value);
-									});
+		setter(parseUnsignedParameter(param_name, get_child_real_type(parameters, param_name)));
+	}
+
+	void parseOptionalNumericParameters(const XmlElement& parameters, params::Parameters& params_out)
+	{
+		setOptionalRealParameter(parameters, "c", params::Parameters::DEFAULT_C,
+								 [&](const RealType value)
+								 {
+									 params_out.c = value;
+									 LOG(logging::Level::INFO, "Propagation speed (c) set to: {:.5f}", value);
+								 });
+
+		setOptionalRealParameter(parameters, "simSamplingRate", 1000.0,
+								 [&](const RealType value)
+								 {
+									 params_out.sim_sampling_rate = value;
+									 LOG(logging::Level::DEBUG, "Simulation sampling rate set to: {:.5f} Hz", value);
+								 });
 
 		if (parameters.childElement("randomseed", 0).isValid())
 		{
-			const auto seed = parse_unsigned_parameter("randomseed", get_child_real_type(parameters, "randomseed"));
+			const auto seed = parseUnsignedParameter("randomseed", get_child_real_type(parameters, "randomseed"));
 			params_out.random_seed = seed;
 			LOG(logging::Level::DEBUG, "Random seed set to: {}", seed);
 		}
 
-		set_optional_unsigned_parameter("adc_bits", 0,
-										[&](const unsigned value)
-										{
-											params_out.adc_bits = value;
-											LOG(logging::Level::DEBUG, "ADC quantization bits set to: {}", value);
-										});
+		setOptionalUnsignedParameter(parameters, "adc_bits", 0,
+									 [&](const unsigned value)
+									 {
+										 params_out.adc_bits = value;
+										 LOG(logging::Level::DEBUG, "ADC quantization bits set to: {}", value);
+									 });
 
-		set_optional_unsigned_parameter("oversample", 1,
-										[&](const unsigned value)
-										{
-											params::validateOversampleRatio(value);
-											params_out.oversample_ratio = value;
-											LOG(logging::Level::DEBUG, "Oversampling enabled with ratio: {}", value);
-										});
+		setOptionalUnsignedParameter(parameters, "oversample", 1,
+									 [&](const unsigned value)
+									 {
+										 params::validateOversampleRatio(value);
+										 params_out.oversample_ratio = value;
+										 LOG(logging::Level::DEBUG, "Oversampling enabled with ratio: {}", value);
+									 });
+	}
 
+	void parseRotationAngleUnit(const XmlElement& parameters, params::Parameters& params_out)
+	{
 		try
 		{
 			const auto unit_token = parameters.childElement("rotationangleunit", 0).getText();
@@ -489,7 +505,10 @@ namespace serial::xml_parser_utils
 		catch (const XmlException&)
 		{
 		}
+	}
 
+	bool parseOriginParameter(const XmlElement& parameters, params::Parameters& params_out)
+	{
 		bool origin_set = false;
 		if (const XmlElement origin_element = parameters.childElement("origin", 0); origin_element.isValid())
 		{
@@ -516,39 +535,48 @@ namespace serial::xml_parser_utils
 					e.what());
 			}
 		}
+		return origin_set;
+	}
 
+	void parseUtmCoordinateSystem(const XmlElement& cs_element, params::Parameters& params_out)
+	{
+		params_out.coordinate_frame = params::CoordinateFrame::UTM;
+		params_out.utm_zone = std::stoi(XmlElement::getSafeAttribute(cs_element, "zone"));
+		const std::string hem_str = XmlElement::getSafeAttribute(cs_element, "hemisphere");
+
+		if (params_out.utm_zone < GeographicLib::UTMUPS::MINUTMZONE ||
+			params_out.utm_zone > GeographicLib::UTMUPS::MAXUTMZONE)
+		{
+			throw XmlException("KML UTM zone " + std::to_string(params_out.utm_zone) +
+							   " is invalid; must be in [1, 60].");
+		}
+		if (hem_str == "N" || hem_str == "n")
+		{
+			params_out.utm_north_hemisphere = true;
+		}
+		else if (hem_str == "S" || hem_str == "s")
+		{
+			params_out.utm_north_hemisphere = false;
+		}
+		else
+		{
+			throw XmlException("KML UTM hemisphere '" + hem_str + "' is invalid; must be 'N' or 'S'.");
+		}
+		LOG(logging::Level::INFO, "KML coordinate system set to UTM, zone {}{}", params_out.utm_zone,
+			params_out.utm_north_hemisphere ? 'N' : 'S');
+	}
+
+	void parseCoordinateSystemParameter(const XmlElement& parameters, params::Parameters& params_out,
+										const bool origin_set)
+	{
 		if (const XmlElement cs_element = parameters.childElement("coordinatesystem", 0); cs_element.isValid())
 		{
 			try
 			{
 				const std::string frame_str = XmlElement::getSafeAttribute(cs_element, "frame");
-
 				if (frame_str == "UTM")
 				{
-					params_out.coordinate_frame = params::CoordinateFrame::UTM;
-					params_out.utm_zone = std::stoi(XmlElement::getSafeAttribute(cs_element, "zone"));
-					const std::string hem_str = XmlElement::getSafeAttribute(cs_element, "hemisphere");
-
-					if (params_out.utm_zone < GeographicLib::UTMUPS::MINUTMZONE ||
-						params_out.utm_zone > GeographicLib::UTMUPS::MAXUTMZONE)
-					{
-						throw XmlException("KML UTM zone " + std::to_string(params_out.utm_zone) +
-										   " is invalid; must be in [1, 60].");
-					}
-					if (hem_str == "N" || hem_str == "n")
-					{
-						params_out.utm_north_hemisphere = true;
-					}
-					else if (hem_str == "S" || hem_str == "s")
-					{
-						params_out.utm_north_hemisphere = false;
-					}
-					else
-					{
-						throw XmlException("KML UTM hemisphere '" + hem_str + "' is invalid; must be 'N' or 'S'.");
-					}
-					LOG(logging::Level::INFO, "KML coordinate system set to UTM, zone {}{}", params_out.utm_zone,
-						params_out.utm_north_hemisphere ? 'N' : 'S');
+					parseUtmCoordinateSystem(cs_element, params_out);
 				}
 				else if (frame_str == "ECEF")
 				{
@@ -579,6 +607,26 @@ namespace serial::xml_parser_utils
 				params_out.utm_north_hemisphere = true;
 			}
 		}
+	}
+
+	void parseParameters(const XmlElement& parameters, params::Parameters& params_out)
+	{
+		params_out.start = get_child_real_type(parameters, "starttime");
+		params_out.end = get_child_real_type(parameters, "endtime");
+		LOG(logging::Level::INFO, "Simulation time set from {:.5f} to {:.5f} seconds", params_out.start,
+			params_out.end);
+
+		params_out.rate = get_child_real_type(parameters, "rate");
+		if (params_out.rate <= 0)
+		{
+			throw std::runtime_error("Sampling rate must be > 0");
+		}
+		LOG(logging::Level::DEBUG, "Sample rate set to: {:.5f}", params_out.rate);
+
+		parseOptionalNumericParameters(parameters, params_out);
+		parseRotationAngleUnit(parameters, params_out);
+		const bool origin_set = parseOriginParameter(parameters, params_out);
+		parseCoordinateSystemParameter(parameters, params_out, origin_set);
 	}
 
 	void parseWaveform(const XmlElement& waveform, ParserContext& ctx)
@@ -696,7 +744,7 @@ namespace serial::xml_parser_utils
 		unsigned noise_index = 0;
 		while (true)
 		{
-			XmlElement noise_element = timing.childElement("noise_entry", noise_index++);
+			XmlElement const noise_element = timing.childElement("noise_entry", noise_index++);
 			if (!noise_element.isValid())
 			{
 				break;
@@ -743,7 +791,7 @@ namespace serial::xml_parser_utils
 
 	void parseAntenna(const XmlElement& antenna, ParserContext& ctx)
 	{
-		std::string name = XmlElement::getSafeAttribute(antenna, "name");
+		const std::string name = XmlElement::getSafeAttribute(antenna, "name");
 		const SimId id = assign_id_from_attribute("antenna '" + name + "'", ObjectType::Antenna);
 		const std::string pattern = XmlElement::getSafeAttribute(antenna, "pattern");
 
@@ -841,7 +889,7 @@ namespace serial::xml_parser_utils
 		unsigned waypoint_index = 0;
 		while (true)
 		{
-			XmlElement waypoint = motionPath.childElement("positionwaypoint", waypoint_index);
+			XmlElement const waypoint = motionPath.childElement("positionwaypoint", waypoint_index);
 			if (!waypoint.isValid())
 			{
 				break;
@@ -900,7 +948,7 @@ namespace serial::xml_parser_utils
 		unsigned waypoint_index = 0;
 		while (true)
 		{
-			XmlElement waypoint = rotation.childElement("rotationwaypoint", waypoint_index);
+			XmlElement const waypoint = rotation.childElement("rotationwaypoint", waypoint_index);
 			if (!waypoint.isValid())
 			{
 				break;
@@ -970,9 +1018,9 @@ namespace serial::xml_parser_utils
 	}
 
 	/// Parses a transmitter after its operation mode has already been determined.
-	radar::Transmitter* parseTransmitterWithMode(const XmlElement& transmitter, radar::Platform* platform,
-												 ParserContext& ctx, const ReferenceLookup& refs,
-												 const radar::OperationMode mode)
+	static radar::Transmitter* parseTransmitterWithMode(const XmlElement& transmitter, radar::Platform* platform,
+														ParserContext& ctx, const ReferenceLookup& refs,
+														const radar::OperationMode mode)
 	{
 		const std::string name = XmlElement::getSafeAttribute(transmitter, "name");
 		const SimId id = assign_id_from_attribute("transmitter '" + name + "'", ObjectType::Transmitter);
@@ -1012,7 +1060,7 @@ namespace serial::xml_parser_utils
 			resolve_reference_id(transmitter, "timing", "transmitter '" + name + "'", *refs.timings);
 		transmitter_obj->setTiming(resolve_timing_instance(timing_id, ctx, "transmitter '" + name + "'"));
 
-		RealType pri = is_pulsed ? (1.0 / transmitter_obj->getPrf()) : 0.0;
+		RealType const pri = is_pulsed ? (1.0 / transmitter_obj->getPrf()) : 0.0;
 		auto schedule = parseSchedule(transmitter, name, is_pulsed, pri);
 		if (wave->isFmcwFamily())
 		{
@@ -1041,8 +1089,9 @@ namespace serial::xml_parser_utils
 	}
 
 	/// Parses a receiver after its operation mode has already been determined.
-	radar::Receiver* parseReceiverWithMode(const XmlElement& receiver, radar::Platform* platform, ParserContext& ctx,
-										   const ReferenceLookup& refs, const radar::OperationMode mode)
+	static radar::Receiver* parseReceiverWithMode(const XmlElement& receiver, radar::Platform* platform,
+												  ParserContext& ctx, const ReferenceLookup& refs,
+												  const radar::OperationMode mode)
 	{
 		const std::string name = XmlElement::getSafeAttribute(receiver, "name");
 		const SimId id = assign_id_from_attribute("receiver '" + name + "'", ObjectType::Receiver);
@@ -1114,7 +1163,7 @@ namespace serial::xml_parser_utils
 				receiver_obj->getName().c_str());
 		}
 
-		RealType pri = is_pulsed ? (1.0 / receiver_obj->getWindowPrf()) : 0.0;
+		RealType const pri = is_pulsed ? (1.0 / receiver_obj->getWindowPrf()) : 0.0;
 		auto schedule = parseSchedule(receiver, name, is_pulsed, pri);
 		if (!schedule.empty())
 		{
@@ -1247,7 +1296,7 @@ namespace serial::xml_parser_utils
 					   const std::function<void(const XmlElement&, std::string_view)>& register_name,
 					   const ReferenceLookup& refs)
 	{
-		std::string name = XmlElement::getSafeAttribute(platform, "name");
+		std::string const name = XmlElement::getSafeAttribute(platform, "name");
 		const SimId id = assign_id_from_attribute("platform '" + name + "'", ObjectType::Platform);
 		auto plat = std::make_unique<radar::Platform>(name, id);
 
@@ -1285,18 +1334,18 @@ namespace serial::xml_parser_utils
 		unsigned index = 0;
 		while (true)
 		{
-			XmlElement include_element = doc.getRootElement().childElement("include", index++);
+			XmlElement const include_element = doc.getRootElement().childElement("include", index++);
 			if (!include_element.isValid())
 				break;
 
-			std::string include_filename = include_element.getText();
+			std::string const include_filename = include_element.getText();
 			if (include_filename.empty())
 			{
 				LOG(logging::Level::ERROR, "<include> element is missing the filename!");
 				continue;
 			}
 
-			fs::path include_path = currentDir / include_filename;
+			fs::path const include_path = currentDir / include_filename;
 			includePaths.push_back(include_path);
 
 			XmlDocument included_doc;
@@ -1394,7 +1443,7 @@ namespace serial::xml_parser_utils
 			unsigned index = 0;
 			while (true)
 			{
-				XmlElement element = parent.childElement(elementName, index++);
+				XmlElement const element = parent.childElement(elementName, index++);
 				if (!element.isValid())
 					break;
 				parseFunction(element, parser_ctx);

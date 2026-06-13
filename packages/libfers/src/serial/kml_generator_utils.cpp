@@ -11,6 +11,7 @@
 #include <cmath>
 #include <cstddef>
 #include <iomanip>
+#include <limits>
 #include <map>
 #include <ranges>
 #include <sstream>
@@ -34,6 +35,11 @@ namespace serial::kml_generator_utils
 	constexpr int ISOTROPIC_PATTERN_POINTS = 100;
 	constexpr double ISOTROPIC_PATTERN_RADIUS_KM = 20.0;
 	constexpr double DIRECTIONAL_ANTENNA_ARROW_LENGTH_M = 20000.0;
+
+	namespace
+	{
+		[[nodiscard]] double unassignedCoordinate() noexcept { return std::numeric_limits<double>::quiet_NaN(); }
+	}
 
 	double sincAntennaGain(const double theta, const double alpha, const double beta, const double gamma)
 	{
@@ -151,7 +157,8 @@ namespace serial::kml_generator_utils
 		for (int i = 0; i < ISOTROPIC_PATTERN_POINTS; i++)
 		{
 			const double bearing = i * 360.0 / ISOTROPIC_PATTERN_POINTS;
-			double new_lat, new_lon;
+			double new_lat = unassignedCoordinate();
+			double new_lon = unassignedCoordinate();
 			calculateDestinationCoordinate(lat, lon, bearing, radius_km * 1000.0, new_lat, new_lon);
 			circle_coordinates.emplace_back(new_lat, new_lon);
 		}
@@ -266,7 +273,9 @@ namespace serial::kml_generator_utils
 	void generateIsotropicAntennaKml(std::ostream& out, const math::Vec3& position, const KmlContext& ctx,
 									 const std::string& indent)
 	{
-		double lat, lon, alt_abs;
+		double lat = unassignedCoordinate();
+		double lon = unassignedCoordinate();
+		double alt_abs = unassignedCoordinate();
 		ctx.converter(position, lat, lon, alt_abs);
 
 		const auto circle_coordinates = generateCircleCoordinates(lat, lon, ISOTROPIC_PATTERN_RADIUS_KM);
@@ -293,7 +302,9 @@ namespace serial::kml_generator_utils
 									   const std::optional<double>& angle3DbDropDeg, const std::string& indent)
 	{
 		const auto& first_wp_pos = platform->getMotionPath()->getCoords().front().pos;
-		double start_lat, start_lon, start_alt;
+		double start_lat = unassignedCoordinate();
+		double start_lon = unassignedCoordinate();
+		double start_alt = unassignedCoordinate();
 		ctx.converter(first_wp_pos, start_lat, start_lon, start_alt);
 		const std::string start_coords_str = formatCoordinates(start_lon, start_lat, start_alt);
 
@@ -315,7 +326,8 @@ namespace serial::kml_generator_utils
 		const double delta_altitude = DIRECTIONAL_ANTENNA_ARROW_LENGTH_M * std::sin(initial_rotation.elevation);
 		const double end_alt = start_alt + delta_altitude;
 
-		double dest_lat, dest_lon;
+		double dest_lat = unassignedCoordinate();
+		double dest_lon = unassignedCoordinate();
 		calculateDestinationCoordinate(start_lat, start_lon, start_azimuth_deg_kml, horizontal_distance, dest_lat,
 									   dest_lon);
 		const std::string end_coords_str = formatCoordinates(dest_lon, dest_lat, end_alt);
@@ -337,14 +349,16 @@ namespace serial::kml_generator_utils
 
 		if (angle3DbDropDeg.has_value() && *angle3DbDropDeg > EPSILON)
 		{
-			double side1_lat, side1_lon;
+			double side1_lat = unassignedCoordinate();
+			double side1_lon = unassignedCoordinate();
 			calculateDestinationCoordinate(start_lat, start_lon, start_azimuth_deg_kml - *angle3DbDropDeg,
 										   horizontal_distance, side1_lat, side1_lon);
 			const std::string side1_coords_str = formatCoordinates(side1_lon, side1_lat, end_alt);
 			writeAntennaBeamLine(out, indent, "Antenna 3dB Beamwidth", "#lineStyleBlue", start_coords_str,
 								 side1_coords_str);
 
-			double side2_lat, side2_lon;
+			double side2_lat = unassignedCoordinate();
+			double side2_lon = unassignedCoordinate();
 			calculateDestinationCoordinate(start_lat, start_lon, start_azimuth_deg_kml + *angle3DbDropDeg,
 										   horizontal_distance, side2_lat, side2_lon);
 			const std::string side2_coords_str = formatCoordinates(side2_lon, side2_lat, end_alt);
@@ -364,6 +378,72 @@ namespace serial::kml_generator_utils
 		out << indent << "</Placemark>\n";
 	}
 
+	std::optional<double> antennaCarrierWavelength(const radar::Radar* radar, const KmlContext& ctx)
+	{
+		if (const auto* tx = dynamic_cast<const radar::Transmitter*>(radar))
+		{
+			if (tx->getSignal() != nullptr)
+			{
+				return ctx.parameters.c / tx->getSignal()->getCarrier();
+			}
+			return std::nullopt;
+		}
+		if (const auto* rx = dynamic_cast<const radar::Receiver*>(radar))
+		{
+			if (const auto* attached_tx = dynamic_cast<const radar::Transmitter*>(rx->getAttached()))
+			{
+				if (attached_tx->getSignal() != nullptr)
+				{
+					return ctx.parameters.c / attached_tx->getSignal()->getCarrier();
+				}
+			}
+		}
+		return std::nullopt;
+	}
+
+	std::optional<double> antenna3DbDropAngle(const antenna::Antenna* ant, const std::optional<double> wavelength)
+	{
+		if (const auto* sinc_ant = dynamic_cast<const antenna::Sinc*>(ant))
+		{
+			return find3DbDropAngle(sinc_ant->getAlpha(), sinc_ant->getBeta(), sinc_ant->getGamma());
+		}
+		if (const auto* gaussian_ant = dynamic_cast<const antenna::Gaussian*>(ant))
+		{
+			return findGaussian3DbDropAngle(gaussian_ant);
+		}
+		if (const auto* parabolic_ant = dynamic_cast<const antenna::Parabolic*>(ant))
+		{
+			if (wavelength)
+			{
+				return findParabolic3DbDropAngle(parabolic_ant, *wavelength);
+			}
+			return std::nullopt;
+		}
+		if (const auto* squarehorn_ant = dynamic_cast<const antenna::SquareHorn*>(ant))
+		{
+			if (wavelength)
+			{
+				return findSquareHorn3DbDropAngle(squarehorn_ant, *wavelength);
+			}
+			return std::nullopt;
+		}
+		return std::nullopt;
+	}
+
+	void logSymbolicAntennaKml(const antenna::Antenna* ant)
+	{
+		if ((dynamic_cast<const antenna::XmlAntenna*>(ant) == nullptr) &&
+			(dynamic_cast<const antenna::H5Antenna*>(ant) == nullptr))
+		{
+			return;
+		}
+		LOG(logging::Level::INFO,
+			"KML visualization for antenna '{}' ('{}') is symbolic. "
+			"Only the boresight direction is shown, as a 3dB beamwidth is not calculated from file-based "
+			"patterns.",
+			ant->getName(), dynamic_cast<const antenna::XmlAntenna*>(ant) ? "xml" : "file");
+	}
+
 	void generateAntennaKml(std::ostream& out, const radar::Platform* platform, const radar::Radar* radar,
 							const KmlContext& ctx, const std::string& indent)
 	{
@@ -380,59 +460,9 @@ namespace serial::kml_generator_utils
 		}
 		else
 		{
-			std::optional<double> angle_3db_drop_deg;
-
-			std::optional<double> wavelength;
-			if (const auto* tx = dynamic_cast<const radar::Transmitter*>(radar))
-			{
-				if (tx->getSignal() != nullptr)
-				{
-					wavelength = ctx.parameters.c / tx->getSignal()->getCarrier();
-				}
-			}
-			else if (const auto* rx = dynamic_cast<const radar::Receiver*>(radar))
-			{
-				if (const auto* attached_tx = dynamic_cast<const radar::Transmitter*>(rx->getAttached()))
-				{
-					if (attached_tx->getSignal() != nullptr)
-					{
-						wavelength = ctx.parameters.c / attached_tx->getSignal()->getCarrier();
-					}
-				}
-			}
-
-			if (const auto* sinc_ant = dynamic_cast<const antenna::Sinc*>(ant))
-			{
-				angle_3db_drop_deg = find3DbDropAngle(sinc_ant->getAlpha(), sinc_ant->getBeta(), sinc_ant->getGamma());
-			}
-			else if (const auto* gaussian_ant = dynamic_cast<const antenna::Gaussian*>(ant))
-			{
-				angle_3db_drop_deg = findGaussian3DbDropAngle(gaussian_ant);
-			}
-			else if (const auto* parabolic_ant = dynamic_cast<const antenna::Parabolic*>(ant))
-			{
-				if (wavelength)
-				{
-					angle_3db_drop_deg = findParabolic3DbDropAngle(parabolic_ant, *wavelength);
-				}
-			}
-			else if (const auto* squarehorn_ant = dynamic_cast<const antenna::SquareHorn*>(ant))
-			{
-				if (wavelength)
-				{
-					angle_3db_drop_deg = findSquareHorn3DbDropAngle(squarehorn_ant, *wavelength);
-				}
-			}
-			else if ((dynamic_cast<const antenna::XmlAntenna*>(ant) != nullptr) ||
-					 (dynamic_cast<const antenna::H5Antenna*>(ant) != nullptr))
-			{
-				LOG(logging::Level::INFO,
-					"KML visualization for antenna '{}' ('{}') is symbolic. "
-					"Only the boresight direction is shown, as a 3dB beamwidth is not calculated from file-based "
-					"patterns.",
-					ant->getName(), dynamic_cast<const antenna::XmlAntenna*>(ant) ? "xml" : "file");
-			}
-
+			const auto wavelength = antennaCarrierWavelength(radar, ctx);
+			const auto angle_3db_drop_deg = antenna3DbDropAngle(ant, wavelength);
+			logSymbolicAntennaKml(ant);
 			generateDirectionalAntennaKml(out, platform, ctx, angle_3db_drop_deg, indent);
 		}
 	}
@@ -443,9 +473,10 @@ namespace serial::kml_generator_utils
 		const math::Path* path = platform->getMotionPath();
 		const auto& waypoints = path->getCoords();
 
-		double first_alt_abs;
+		double first_alt_abs = unassignedCoordinate();
 		{
-			double lat, lon;
+			double lat = unassignedCoordinate();
+			double lon = unassignedCoordinate();
 			ctx.converter(waypoints.front().pos, lat, lon, first_alt_abs);
 		}
 
@@ -465,7 +496,9 @@ namespace serial::kml_generator_utils
 		if (const double time_diff = end_time - start_time; time_diff <= 0.0)
 		{
 			const math::Vec3 p_pos = path->getPosition(start_time);
-			double p_lon, p_lat, p_alt_abs;
+			double p_lon = unassignedCoordinate();
+			double p_lat = unassignedCoordinate();
+			double p_alt_abs = unassignedCoordinate();
 			ctx.converter(p_pos, p_lat, p_lon, p_alt_abs);
 			out << indent << "    <when>" << start_time << "</when>\n";
 			out << indent << "    <gx:coord>" << p_lon << " " << p_lat << " " << p_alt_abs << "</gx:coord>\n";
@@ -477,7 +510,9 @@ namespace serial::kml_generator_utils
 			{
 				const double current_time = start_time + i * time_step;
 				const math::Vec3 p_pos = path->getPosition(current_time);
-				double p_lon, p_lat, p_alt_abs;
+				double p_lon = unassignedCoordinate();
+				double p_lat = unassignedCoordinate();
+				double p_alt_abs = unassignedCoordinate();
 				ctx.converter(p_pos, p_lat, p_lon, p_alt_abs);
 				out << indent << "    <when>" << current_time << "</when>\n";
 				out << indent << "    <gx:coord>" << p_lon << " " << p_lat << " " << p_alt_abs << "</gx:coord>\n";
@@ -500,11 +535,15 @@ namespace serial::kml_generator_utils
 		const auto& [start_wp_pos, start_wp_t] = path->getCoords().front();
 		const auto& [end_wp_pos, end_wp_t] = path->getCoords().back();
 
-		double start_lat, start_lon, start_alt_abs;
+		double start_lat = unassignedCoordinate();
+		double start_lon = unassignedCoordinate();
+		double start_alt_abs = unassignedCoordinate();
 		ctx.converter(start_wp_pos, start_lat, start_lon, start_alt_abs);
 		const std::string start_coordinates = formatCoordinates(start_lon, start_lat, start_alt_abs);
 
-		double end_lat, end_lon, end_alt_abs;
+		double end_lat = unassignedCoordinate();
+		double end_lon = unassignedCoordinate();
+		double end_alt_abs = unassignedCoordinate();
 		ctx.converter(end_wp_pos, end_lat, end_lon, end_alt_abs);
 		const std::string end_coordinates = formatCoordinates(end_lon, end_lat, end_alt_abs);
 
@@ -516,7 +555,9 @@ namespace serial::kml_generator_utils
 									const double refAlt, const KmlContext& ctx, const std::string& indent)
 	{
 		const auto& [first_wp_pos, first_wp_t] = platform->getMotionPath()->getCoords().front();
-		double lat, lon, alt_abs;
+		double lat = unassignedCoordinate();
+		double lon = unassignedCoordinate();
+		double alt_abs = unassignedCoordinate();
 		ctx.converter(first_wp_pos, lat, lon, alt_abs);
 		const std::string coordinates = formatCoordinates(lon, lat, alt_abs);
 

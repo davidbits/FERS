@@ -40,6 +40,73 @@ using timing::PrototypeTiming;
 
 namespace core
 {
+	namespace
+	{
+		std::vector<ActiveStreamingSource> transmitterDechirpSources(const Transmitter* const tx)
+		{
+			std::vector<ActiveStreamingSource> sources;
+			if (tx->getSchedule().empty())
+			{
+				auto source = makeActiveSource(tx, params::startTime(), params::endTime());
+				if (source.segment_start < source.segment_end)
+				{
+					sources.push_back(source);
+				}
+				return sources;
+			}
+
+			for (const auto& period : tx->getSchedule())
+			{
+				auto source = makeActiveSource(tx, period.start, std::min(params::endTime(), period.end));
+				if (source.segment_start < source.segment_end && source.segment_end > params::startTime())
+				{
+					sources.push_back(source);
+				}
+			}
+			return sources;
+		}
+
+		std::vector<ActiveStreamingSource> waveformDechirpSources(const RadarSignal* const waveform,
+																  const Receiver* const rx)
+		{
+			std::vector<ActiveStreamingSource> sources;
+			if (rx->getSchedule().empty())
+			{
+				auto source = makeActiveSourceFromWaveform(waveform, params::startTime(), params::endTime());
+				if (source.segment_start < source.segment_end)
+				{
+					sources.push_back(source);
+				}
+				return sources;
+			}
+
+			for (const auto& period : rx->getSchedule())
+			{
+				auto source =
+					makeActiveSourceFromWaveform(waveform, period.start, std::min(params::endTime(), period.end));
+				if (source.segment_start < source.segment_end && source.segment_end > params::startTime())
+				{
+					sources.push_back(source);
+				}
+			}
+			return sources;
+		}
+
+		void validateDechirpTransmitter(const Transmitter* const tx, const std::string& owner)
+		{
+			if (tx == nullptr)
+			{
+				throw std::runtime_error(owner + " references a missing dechirp transmitter.");
+			}
+			if (tx->getMode() != radar::OperationMode::FMCW_MODE || tx->getSignal() == nullptr ||
+				!tx->getSignal()->isFmcwFamily())
+			{
+				throw std::runtime_error(owner + " dechirp reference transmitter '" + tx->getName() +
+										 "' must be an FMCW transmitter with an FMCW waveform.");
+			}
+		}
+	}
+
 	void World::add(std::unique_ptr<Platform> plat) noexcept { _platforms.push_back(std::move(plat)); }
 
 	void World::add(std::unique_ptr<Transmitter> trans) noexcept
@@ -376,149 +443,114 @@ namespace core
 
 		for (const auto& transmitter : _transmitters)
 		{
-			if (transmitter->getMode() == radar::OperationMode::PULSED_MODE)
-			{
-				// Find the first valid pulse time starting from the simulation start time.
-				if (auto start_time = transmitter->getNextPulseTime(sim_start); start_time)
-				{
-					if (*start_time <= sim_end)
-					{
-						_event_queue.push({*start_time, EventType::TX_PULSED_START, transmitter.get()});
-					}
-				}
-			}
-			else
-			{
-				const auto& schedule = transmitter->getSchedule();
-				if (schedule.empty())
-				{
-					const RealType end = makeActiveSource(transmitter.get(), sim_start, sim_end).segment_end;
-					if (sim_start < end)
-					{
-						_event_queue.push({sim_start, EventType::TX_STREAMING_START, transmitter.get()});
-						_event_queue.push({end, EventType::TX_STREAMING_END, transmitter.get()});
-					}
-				}
-				else
-				{
-					for (const auto& period : schedule)
-					{
-						const RealType start = std::max(sim_start, period.start);
-						const RealType end =
-							makeActiveSource(transmitter.get(), period.start, std::min(sim_end, period.end))
-								.segment_end;
-
-						if (start < end)
-						{
-							_event_queue.push({start, EventType::TX_STREAMING_START, transmitter.get()});
-							_event_queue.push({end, EventType::TX_STREAMING_END, transmitter.get()});
-						}
-					}
-				}
-			}
+			scheduleInitialTransmitterEvents(transmitter.get(), sim_start, sim_end);
 		}
 
 		for (const auto& receiver : _receivers)
 		{
-			if (receiver->getMode() == radar::OperationMode::PULSED_MODE)
-			{
-				// Schedule the first receive window checking against schedule
-				const RealType nominal_start = receiver->getWindowStart(0);
-				if (auto start = receiver->getNextWindowTime(nominal_start); start && *start < params::endTime())
-				{
-					_event_queue.push({*start, EventType::RX_PULSED_WINDOW_START, receiver.get()});
-				}
-			}
-			else
-			{
-				const auto& schedule = receiver->getSchedule();
-				if (schedule.empty())
-				{
-					_event_queue.push({params::startTime(), EventType::RX_STREAMING_START, receiver.get()});
-					_event_queue.push({params::endTime(), EventType::RX_STREAMING_END, receiver.get()});
-				}
-				else
-				{
-					for (const auto& period : schedule)
-					{
-						const RealType start = std::max(params::startTime(), period.start);
-						const RealType end = std::min(params::endTime(), period.end);
-						if (start < end)
-						{
-							_event_queue.push({start, EventType::RX_STREAMING_START, receiver.get()});
-							_event_queue.push({end, EventType::RX_STREAMING_END, receiver.get()});
-						}
-					}
-				}
-			}
+			scheduleInitialReceiverEvents(receiver.get(), sim_start, sim_end);
+		}
+	}
+
+	void World::scheduleInitialTransmitterEvents(Transmitter* const transmitter, const RealType sim_start,
+												 const RealType sim_end)
+	{
+		if (transmitter->getMode() == radar::OperationMode::PULSED_MODE)
+		{
+			scheduleInitialPulsedTransmitterEvent(transmitter, sim_start, sim_end);
+			return;
+		}
+		scheduleInitialStreamingTransmitterEvents(transmitter, sim_start, sim_end);
+	}
+
+	void World::scheduleInitialPulsedTransmitterEvent(Transmitter* const transmitter, const RealType sim_start,
+													  const RealType sim_end)
+	{
+		// Find the first valid pulse time starting from the simulation start time.
+		if (auto start_time = transmitter->getNextPulseTime(sim_start); start_time && *start_time <= sim_end)
+		{
+			_event_queue.push({*start_time, EventType::TX_PULSED_START, transmitter});
+		}
+	}
+
+	void World::scheduleInitialStreamingTransmitterEvents(Transmitter* const transmitter, const RealType sim_start,
+														  const RealType sim_end)
+	{
+		const auto& schedule = transmitter->getSchedule();
+		if (schedule.empty())
+		{
+			const RealType end = makeActiveSource(transmitter, sim_start, sim_end).segment_end;
+			pushStreamingTransmitterEvents(transmitter, sim_start, end);
+			return;
+		}
+
+		for (const auto& period : schedule)
+		{
+			const RealType start = std::max(sim_start, period.start);
+			const RealType end = makeActiveSource(transmitter, period.start, std::min(sim_end, period.end)).segment_end;
+			pushStreamingTransmitterEvents(transmitter, start, end);
+		}
+	}
+
+	void World::pushStreamingTransmitterEvents(Transmitter* const transmitter, const RealType start, const RealType end)
+	{
+		if (start < end)
+		{
+			_event_queue.push({start, EventType::TX_STREAMING_START, transmitter});
+			_event_queue.push({end, EventType::TX_STREAMING_END, transmitter});
+		}
+	}
+
+	void World::scheduleInitialReceiverEvents(Receiver* const receiver, const RealType sim_start,
+											  const RealType sim_end)
+	{
+		if (receiver->getMode() == radar::OperationMode::PULSED_MODE)
+		{
+			scheduleInitialPulsedReceiverEvent(receiver, sim_end);
+			return;
+		}
+		scheduleInitialStreamingReceiverEvents(receiver, sim_start, sim_end);
+	}
+
+	void World::scheduleInitialPulsedReceiverEvent(Receiver* const receiver, const RealType sim_end)
+	{
+		const RealType nominal_start = receiver->getWindowStart(0);
+		if (auto start = receiver->getNextWindowTime(nominal_start); start && *start < sim_end)
+		{
+			_event_queue.push({*start, EventType::RX_PULSED_WINDOW_START, receiver});
+		}
+	}
+
+	void World::scheduleInitialStreamingReceiverEvents(Receiver* const receiver, const RealType sim_start,
+													   const RealType sim_end)
+	{
+		const auto& schedule = receiver->getSchedule();
+		if (schedule.empty())
+		{
+			_event_queue.push({sim_start, EventType::RX_STREAMING_START, receiver});
+			_event_queue.push({sim_end, EventType::RX_STREAMING_END, receiver});
+			return;
+		}
+
+		for (const auto& period : schedule)
+		{
+			const RealType start = std::max(sim_start, period.start);
+			const RealType end = std::min(sim_end, period.end);
+			pushStreamingReceiverEvents(receiver, start, end);
+		}
+	}
+
+	void World::pushStreamingReceiverEvents(Receiver* const receiver, const RealType start, const RealType end)
+	{
+		if (start < end)
+		{
+			_event_queue.push({start, EventType::RX_STREAMING_START, receiver});
+			_event_queue.push({end, EventType::RX_STREAMING_END, receiver});
 		}
 	}
 
 	void World::resolveReceiverDechirpReferences()
 	{
-		const auto append_transmitter_sources = [](const Transmitter* const tx)
-		{
-			std::vector<ActiveStreamingSource> sources;
-			if (tx->getSchedule().empty())
-			{
-				auto source = makeActiveSource(tx, params::startTime(), params::endTime());
-				if (source.segment_start < source.segment_end)
-				{
-					sources.push_back(source);
-				}
-				return sources;
-			}
-
-			for (const auto& period : tx->getSchedule())
-			{
-				auto source = makeActiveSource(tx, period.start, std::min(params::endTime(), period.end));
-				if (source.segment_start < source.segment_end && source.segment_end > params::startTime())
-				{
-					sources.push_back(source);
-				}
-			}
-			return sources;
-		};
-
-		const auto append_waveform_sources = [](const RadarSignal* const waveform, const Receiver* const rx)
-		{
-			std::vector<ActiveStreamingSource> sources;
-			if (rx->getSchedule().empty())
-			{
-				auto source = makeActiveSourceFromWaveform(waveform, params::startTime(), params::endTime());
-				if (source.segment_start < source.segment_end)
-				{
-					sources.push_back(source);
-				}
-				return sources;
-			}
-
-			for (const auto& period : rx->getSchedule())
-			{
-				auto source =
-					makeActiveSourceFromWaveform(waveform, period.start, std::min(params::endTime(), period.end));
-				if (source.segment_start < source.segment_end && source.segment_end > params::startTime())
-				{
-					sources.push_back(source);
-				}
-			}
-			return sources;
-		};
-
-		const auto validate_transmitter = [](const Transmitter* const tx, const std::string& owner)
-		{
-			if (tx == nullptr)
-			{
-				throw std::runtime_error(owner + " references a missing dechirp transmitter.");
-			}
-			if (tx->getMode() != radar::OperationMode::FMCW_MODE || tx->getSignal() == nullptr ||
-				!tx->getSignal()->isFmcwFamily())
-			{
-				throw std::runtime_error(owner + " dechirp reference transmitter '" + tx->getName() +
-										 "' must be an FMCW transmitter with an FMCW waveform.");
-			}
-		};
-
 		for (const auto& rx_ptr : _receivers)
 		{
 			auto& rx = *rx_ptr;
@@ -540,19 +572,19 @@ namespace core
 			case Receiver::DechirpReferenceSource::Attached:
 				{
 					const auto* const tx = dynamic_cast<const Transmitter*>(rx.getAttached());
-					validate_transmitter(tx, owner);
+					validateDechirpTransmitter(tx, owner);
 					reference.transmitter_id = tx->getId();
 					reference.transmitter_name = tx->getName();
-					sources = append_transmitter_sources(tx);
+					sources = transmitterDechirpSources(tx);
 					break;
 				}
 			case Receiver::DechirpReferenceSource::Transmitter:
 				{
 					auto* const tx = findTransmitterByName(reference.name);
-					validate_transmitter(tx, owner);
+					validateDechirpTransmitter(tx, owner);
 					reference.transmitter_id = tx->getId();
 					reference.transmitter_name = tx->getName();
-					sources = append_transmitter_sources(tx);
+					sources = transmitterDechirpSources(tx);
 					break;
 				}
 			case Receiver::DechirpReferenceSource::Custom:
@@ -565,7 +597,7 @@ namespace core
 					}
 					reference.waveform_id = waveform->getId();
 					reference.waveform_name = waveform->getName();
-					sources = append_waveform_sources(waveform, &rx);
+					sources = waveformDechirpSources(waveform, &rx);
 					break;
 				}
 			case Receiver::DechirpReferenceSource::None:
@@ -576,9 +608,8 @@ namespace core
 			{
 				throw std::runtime_error(owner + " dechirp reference has no active LO segments in the simulation.");
 			}
-			std::sort(sources.begin(), sources.end(),
-					  [](const ActiveStreamingSource& lhs, const ActiveStreamingSource& rhs)
-					  { return lhs.segment_start < rhs.segment_start; });
+			std::ranges::sort(sources, [](const ActiveStreamingSource& lhs, const ActiveStreamingSource& rhs)
+							  { return lhs.segment_start < rhs.segment_start; });
 			rx.setDechirpReference(std::move(reference));
 			rx.setResolvedDechirpSources(std::move(sources));
 		}

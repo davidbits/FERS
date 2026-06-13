@@ -1,10 +1,12 @@
 #include <atomic>
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_string.hpp>
+#include <chrono>
 #include <filesystem>
 #include <libfers/api.h>
 #include <limits>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "api_test_helpers.h"
@@ -40,7 +42,7 @@ namespace
 		auto* state = static_cast<CallbackState*>(user_data);
 		++state->calls;
 		state->seen_user_data = user_data;
-		state->messages.emplace_back(message ? message : "");
+		state->messages.emplace_back((message != nullptr) ? message : "");
 		state->message_times.push_back(std::chrono::steady_clock::now());
 	}
 
@@ -50,7 +52,7 @@ namespace
 		++state->calls;
 		state->seen_user_data = user_data;
 		state->levels.push_back(level);
-		state->lines.emplace_back(line ? line : "");
+		state->lines.emplace_back((line != nullptr) ? line : "");
 	}
 
 	int requestCancel(void* user_data)
@@ -58,14 +60,54 @@ namespace
 		auto* cancel = static_cast<std::atomic_bool*>(user_data);
 		return cancel->load() ? 1 : 0;
 	}
+
+	void replaceOnce(std::string& value, const std::string& from, const std::string& to)
+	{
+		const auto pos = value.find(from);
+		REQUIRE(pos != std::string::npos);
+		value.replace(pos, from.size(), to);
+	}
+
+	[[nodiscard]] std::string vita49DrainTimingScenarioXml()
+	{
+		std::string xml = api_test::previewScenarioXml("API VITA Drain Timing");
+		replaceOnce(xml, "<endtime>0.1</endtime>", "<endtime>0.2</endtime>");
+		replaceOnce(xml, "<rate>1000000</rate>", "<rate>100000</rate>");
+		return xml;
+	}
+
+	[[nodiscard]] std::chrono::steady_clock::time_point messageTime(const CallbackState& state,
+																	const std::string_view message)
+	{
+		for (std::size_t i = 0; i < state.messages.size(); ++i)
+		{
+			if (state.messages.at(i) == message)
+			{
+				return state.message_times.at(i);
+			}
+		}
+		return {};
+	}
+
+	void requireVita49DrainCompletionTiming(const CallbackState& state,
+											const std::chrono::steady_clock::time_point start)
+	{
+		const auto drain_time = messageTime(state, "Waiting for VITA output stream drain...");
+		const auto completion_time = messageTime(state, "Simulation complete");
+
+		REQUIRE(drain_time != std::chrono::steady_clock::time_point{});
+		REQUIRE(completion_time != std::chrono::steady_clock::time_point{});
+		CHECK(drain_time <= completion_time);
+		CHECK(completion_time >= start + std::chrono::milliseconds(180));
+	}
 }
 
 TEST_CASE("API log level mapping writes emitted enum values", "[api][runtime]")
 {
 	const auto log_path = api_test::uniqueTempPath("api_log_levels", ".log");
-	api_test::ScopedPath log_guard(log_path);
+	api_test::ScopedPath const log_guard(log_path);
 	const auto rollover_path = api_test::uniqueTempPath("api_log_levels_rollover", ".log");
-	api_test::ScopedPath rollover_guard(rollover_path);
+	api_test::ScopedPath const rollover_guard(rollover_path);
 
 	const struct
 	{
@@ -114,9 +156,9 @@ TEST_CASE("API log level getter round-trips configured levels", "[api][runtime]"
 TEST_CASE("API log ignores null messages", "[api][runtime]")
 {
 	const auto log_path = api_test::uniqueTempPath("api_log_null_message", ".log");
-	api_test::ScopedPath log_guard(log_path);
+	api_test::ScopedPath const log_guard(log_path);
 	const auto rollover_path = api_test::uniqueTempPath("api_log_null_message_rollover", ".log");
-	api_test::ScopedPath rollover_guard(rollover_path);
+	api_test::ScopedPath const rollover_guard(rollover_path);
 	const std::string log_path_string = api_test::pathString(log_path);
 	const std::string rollover_path_string = api_test::pathString(rollover_path);
 
@@ -134,20 +176,20 @@ TEST_CASE("API configure logging accepts null and writable file destinations", "
 	SECTION("null log path")
 	{
 		REQUIRE(fers_configure_logging(FERS_LOG_INFO, nullptr) == 0);
-		api_test::ApiString error = api_test::lastError();
+		api_test::ApiString const error = api_test::lastError();
 		REQUIRE(error.get() == nullptr);
 	}
 
 	SECTION("temp log path")
 	{
 		const auto log_path = api_test::uniqueTempPath("api_runtime", ".log");
-		api_test::ScopedPath log_guard(log_path);
+		api_test::ScopedPath const log_guard(log_path);
 		const std::string log_path_string = api_test::pathString(log_path);
 
 		REQUIRE(fers_configure_logging(FERS_LOG_INFO, log_path_string.c_str()) == 0);
 		REQUIRE(std::filesystem::exists(log_path));
 
-		api_test::ApiString error = api_test::lastError();
+		api_test::ApiString const error = api_test::lastError();
 		REQUIRE(error.get() == nullptr);
 	}
 }
@@ -156,13 +198,13 @@ TEST_CASE("API configure logging reports file open failures", "[api][runtime]")
 {
 	api_test::clearLastError();
 	const auto missing_parent = api_test::uniqueTempPath("api_log_dir");
-	api_test::ScopedPath missing_guard(missing_parent);
+	api_test::ScopedPath const missing_guard(missing_parent);
 	const auto log_path = missing_parent / "runtime.log";
 	const std::string log_path_string = api_test::pathString(log_path);
 
 	REQUIRE(fers_configure_logging(FERS_LOG_INFO, log_path_string.c_str()) == 1);
 
-	api_test::ApiString error = api_test::lastError();
+	api_test::ApiString const error = api_test::lastError();
 	REQUIRE(error.get() != nullptr);
 	REQUIRE_THAT(error.str(), ContainsSubstring("Unable to open log file:"));
 }
@@ -171,9 +213,9 @@ TEST_CASE("API log writes to configured file", "[api][runtime]")
 {
 	api_test::clearLastError();
 	const auto log_path = api_test::uniqueTempPath("api_log_smoke", ".log");
-	api_test::ScopedPath log_guard(log_path);
+	api_test::ScopedPath const log_guard(log_path);
 	const auto rollover_path = api_test::uniqueTempPath("api_log_rollover", ".log");
-	api_test::ScopedPath rollover_guard(rollover_path);
+	api_test::ScopedPath const rollover_guard(rollover_path);
 	const std::string log_path_string = api_test::pathString(log_path);
 	const std::string rollover_path_string = api_test::pathString(rollover_path);
 
@@ -191,9 +233,9 @@ TEST_CASE("API OFF log level suppresses file and callback output", "[api][runtim
 {
 	api_test::clearLastError();
 	const auto log_path = api_test::uniqueTempPath("api_log_off", ".log");
-	api_test::ScopedPath log_guard(log_path);
+	api_test::ScopedPath const log_guard(log_path);
 	const auto rollover_path = api_test::uniqueTempPath("api_log_off_rollover", ".log");
-	api_test::ScopedPath rollover_guard(rollover_path);
+	api_test::ScopedPath const rollover_guard(rollover_path);
 	const std::string log_path_string = api_test::pathString(log_path);
 	const std::string rollover_path_string = api_test::pathString(rollover_path);
 
@@ -240,8 +282,8 @@ TEST_CASE("API log callback receives formatted accepted lines", "[api][runtime]"
 
 TEST_CASE("API warning getter returns deduplicated rotation-unit warnings", "[api][runtime]")
 {
-	api_test::ParamGuard guard;
-	api_test::Context context;
+	api_test::ParamGuard const guard;
+	api_test::Context const context;
 	REQUIRE(context.get() != nullptr);
 
 	const std::string xml = api_test::minimalScenarioXml("API Warning Runtime");
@@ -253,7 +295,7 @@ TEST_CASE("API warning getter returns deduplicated rotation-unit warnings", "[ap
 
 	REQUIRE(fers_update_scenario_from_json(context.get(), scenario.dump().c_str()) == 0);
 
-	api_test::ApiString warnings_json(fers_get_last_warning_messages_json());
+	api_test::ApiString const warnings_json(fers_get_last_warning_messages_json());
 	REQUIRE(warnings_json.get() != nullptr);
 
 	const auto warnings = api_test::json::parse(warnings_json.str());
@@ -262,7 +304,7 @@ TEST_CASE("API warning getter returns deduplicated rotation-unit warnings", "[ap
 	REQUIRE_THAT(warnings[0].get<std::string>(), ContainsSubstring("platform 'api_sensor' rotation waypoint 0"));
 	REQUIRE_THAT(warnings[0].get<std::string>(), ContainsSubstring("'azimuth'"));
 
-	api_test::ApiString cleared(fers_get_last_warning_messages_json());
+	api_test::ApiString const cleared(fers_get_last_warning_messages_json());
 	REQUIRE(cleared.get() == nullptr);
 }
 
@@ -272,7 +314,7 @@ TEST_CASE("API run simulation rejects null context", "[api][runtime]")
 
 	REQUIRE(fers_run_simulation(nullptr, nullptr, nullptr) == -1);
 
-	api_test::ApiString error = api_test::lastError();
+	api_test::ApiString const error = api_test::lastError();
 	REQUIRE(error.get() != nullptr);
 	REQUIRE_THAT(error.str(), ContainsSubstring("Invalid context provided to fers_run_simulation"));
 }
@@ -280,56 +322,56 @@ TEST_CASE("API run simulation rejects null context", "[api][runtime]")
 TEST_CASE("API VITA49 setters validate control-plane inputs", "[api][runtime][vita49]")
 {
 	api_test::clearLastError();
-	api_test::Context context;
+	api_test::Context const context;
 	REQUIRE(context.get() != nullptr);
 
 	REQUIRE(fers_enable_vita49_udp_output(nullptr, "127.0.0.1", 4991) == -1);
-	api_test::ApiString null_context_error = api_test::lastError();
+	api_test::ApiString const null_context_error = api_test::lastError();
 	REQUIRE(null_context_error.get() != nullptr);
 	REQUIRE_THAT(null_context_error.str(), ContainsSubstring("context is NULL"));
 
 	REQUIRE(fers_enable_vita49_udp_output(context.get(), nullptr, 4991) == -1);
-	api_test::ApiString null_host_error = api_test::lastError();
+	api_test::ApiString const null_host_error = api_test::lastError();
 	REQUIRE(null_host_error.get() != nullptr);
 	REQUIRE_THAT(null_host_error.str(), ContainsSubstring("host is NULL"));
 
 	REQUIRE(fers_enable_vita49_udp_output(context.get(), "", 4991) == 1);
-	api_test::ApiString empty_host_error = api_test::lastError();
+	api_test::ApiString const empty_host_error = api_test::lastError();
 	REQUIRE(empty_host_error.get() != nullptr);
 	REQUIRE_THAT(empty_host_error.str(), ContainsSubstring("host must be non-empty"));
 
 	REQUIRE(fers_enable_vita49_udp_output(context.get(), "127.0.0.1", 0) == 1);
-	api_test::ApiString port_error = api_test::lastError();
+	api_test::ApiString const port_error = api_test::lastError();
 	REQUIRE(port_error.get() != nullptr);
 	REQUIRE_THAT(port_error.str(), ContainsSubstring("port must be in the range 1..65535"));
 
 	REQUIRE(fers_set_vita49_fullscale(context.get(), 0.0) == 1);
-	api_test::ApiString fullscale_error = api_test::lastError();
+	api_test::ApiString const fullscale_error = api_test::lastError();
 	REQUIRE(fullscale_error.get() != nullptr);
 	REQUIRE_THAT(fullscale_error.str(), ContainsSubstring("fullscale"));
 
 	REQUIRE(fers_set_vita49_fullscale(context.get(), std::numeric_limits<double>::infinity()) == 1);
-	api_test::ApiString infinite_fullscale_error = api_test::lastError();
+	api_test::ApiString const infinite_fullscale_error = api_test::lastError();
 	REQUIRE(infinite_fullscale_error.get() != nullptr);
 	REQUIRE_THAT(infinite_fullscale_error.str(), ContainsSubstring("positive and finite"));
 
 	REQUIRE(fers_set_vita49_epoch_unix_nanoseconds(context.get(), 4294967296000000000ULL) == 1);
-	api_test::ApiString epoch_error = api_test::lastError();
+	api_test::ApiString const epoch_error = api_test::lastError();
 	REQUIRE(epoch_error.get() != nullptr);
 	REQUIRE_THAT(epoch_error.str(), ContainsSubstring("32-bit UTC seconds"));
 
 	REQUIRE(fers_set_vita49_max_udp_payload(context.get(), 0) == 1);
-	api_test::ApiString payload_error = api_test::lastError();
+	api_test::ApiString const payload_error = api_test::lastError();
 	REQUIRE(payload_error.get() != nullptr);
 	REQUIRE_THAT(payload_error.str(), ContainsSubstring("max UDP payload"));
 
 	REQUIRE(fers_set_vita49_queue_depth(context.get(), 0) == 1);
-	api_test::ApiString queue_error = api_test::lastError();
+	api_test::ApiString const queue_error = api_test::lastError();
 	REQUIRE(queue_error.get() != nullptr);
 	REQUIRE_THAT(queue_error.str(), ContainsSubstring("queue depth"));
 
 	REQUIRE(fers_set_vita49_packet_trace_enabled(nullptr, 0) == -1);
-	api_test::ApiString trace_error = api_test::lastError();
+	api_test::ApiString const trace_error = api_test::lastError();
 	REQUIRE(trace_error.get() != nullptr);
 	REQUIRE_THAT(trace_error.str(), ContainsSubstring("context is NULL"));
 
@@ -339,9 +381,9 @@ TEST_CASE("API VITA49 setters validate control-plane inputs", "[api][runtime][vi
 
 TEST_CASE("API run simulation rejects VITA49 mode without fullscale", "[api][runtime][vita49]")
 {
-	api_test::ParamGuard guard;
+	api_test::ParamGuard const guard;
 	api_test::clearLastError();
-	api_test::Context context;
+	api_test::Context const context;
 	REQUIRE(context.get() != nullptr);
 
 	const std::string xml = api_test::minimalScenarioXml("API VITA Missing Fullscale");
@@ -349,16 +391,16 @@ TEST_CASE("API run simulation rejects VITA49 mode without fullscale", "[api][run
 	REQUIRE(fers_enable_vita49_udp_output(context.get(), "127.0.0.1", 4991) == 0);
 
 	REQUIRE(fers_run_simulation(context.get(), nullptr, nullptr) == 1);
-	api_test::ApiString error = api_test::lastError();
+	api_test::ApiString const error = api_test::lastError();
 	REQUIRE(error.get() != nullptr);
 	REQUIRE_THAT(error.str(), ContainsSubstring("VITA49 fullscale must be a positive finite value"));
 }
 
 TEST_CASE("API HDF5 reset clears stale VITA49 output mode", "[api][runtime][vita49]")
 {
-	api_test::ParamGuard guard;
+	api_test::ParamGuard const guard;
 	api_test::clearLastError();
-	api_test::Context context;
+	api_test::Context const context;
 	REQUIRE(context.get() != nullptr);
 
 	const std::string xml = api_test::minimalScenarioXml("API HDF5 Reset");
@@ -368,7 +410,7 @@ TEST_CASE("API HDF5 reset clears stale VITA49 output mode", "[api][runtime][vita
 
 	REQUIRE(fers_run_simulation(context.get(), nullptr, nullptr) == 0);
 
-	api_test::ApiString metadata_json(fers_get_last_output_metadata_json(context.get()));
+	api_test::ApiString const metadata_json(fers_get_last_output_metadata_json(context.get()));
 	REQUIRE(metadata_json.get() != nullptr);
 	const auto metadata = api_test::json::parse(metadata_json.str());
 	CHECK_FALSE(metadata.contains("vita49"));
@@ -376,9 +418,9 @@ TEST_CASE("API HDF5 reset clears stale VITA49 output mode", "[api][runtime][vita
 
 TEST_CASE("API extended simulation reports cooperative cancellation with metadata", "[api][runtime]")
 {
-	api_test::ParamGuard guard;
+	api_test::ParamGuard const guard;
 	api_test::clearLastError();
-	api_test::Context context;
+	api_test::Context const context;
 	REQUIRE(context.get() != nullptr);
 
 	const std::string xml = api_test::minimalScenarioXml("API Cancel Runtime");
@@ -387,7 +429,7 @@ TEST_CASE("API extended simulation reports cooperative cancellation with metadat
 	std::atomic_bool cancel{true};
 	REQUIRE(fers_run_simulation_ex(context.get(), nullptr, nullptr, requestCancel, &cancel, nullptr, nullptr) == 2);
 
-	api_test::ApiString metadata_json(fers_get_last_output_metadata_json(context.get()));
+	api_test::ApiString const metadata_json(fers_get_last_output_metadata_json(context.get()));
 	REQUIRE(metadata_json.get() != nullptr);
 	const auto metadata = api_test::json::parse(metadata_json.str());
 	CHECK(metadata.at("simulation_name").get<std::string>() == "API Cancel Runtime");
@@ -395,14 +437,14 @@ TEST_CASE("API extended simulation reports cooperative cancellation with metadat
 
 TEST_CASE("API run simulation accepts a minimal valid scenario", "[api][runtime]")
 {
-	api_test::ParamGuard guard;
+	api_test::ParamGuard const guard;
 	api_test::clearLastError();
-	api_test::Context context;
+	api_test::Context const context;
 	REQUIRE(context.get() != nullptr);
 
 	const auto out_dir = api_test::uniqueTempPath("api_out_dir");
 	std::filesystem::create_directories(out_dir);
-	api_test::ScopedPath dir_guard(out_dir);
+	api_test::ScopedPath const dir_guard(out_dir);
 
 	const std::string unique_rx_name =
 		"api_preview_rx_" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
@@ -420,11 +462,11 @@ TEST_CASE("API run simulation accepts a minimal valid scenario", "[api][runtime]
 	REQUIRE(fers_load_scenario_from_xml_string(context.get(), xml.c_str(), 0) == 0);
 	REQUIRE(fers_run_simulation(context.get(), nullptr, nullptr) == 0);
 
-	api_test::ApiString error = api_test::lastError();
+	api_test::ApiString const error = api_test::lastError();
 	REQUIRE(error.get() == nullptr);
 	REQUIRE(std::filesystem::exists(output_path));
 
-	api_test::ApiString metadata_json(fers_get_last_output_metadata_json(context.get()));
+	api_test::ApiString const metadata_json(fers_get_last_output_metadata_json(context.get()));
 	REQUIRE(metadata_json.get() != nullptr);
 	const auto metadata = api_test::json::parse(metadata_json.str());
 	CHECK_FALSE(metadata.contains("vita49"));
@@ -483,20 +525,12 @@ TEST_CASE("VITA49 metadata section records runtime output config", "[api][runtim
 
 TEST_CASE("API VITA49 completion waits for wall-clock stream drain", "[api][runtime][vita49]")
 {
-	api_test::ParamGuard guard;
+	api_test::ParamGuard const guard;
 	api_test::clearLastError();
-	api_test::Context context;
+	api_test::Context const context;
 	REQUIRE(context.get() != nullptr);
 
-	std::string xml = api_test::previewScenarioXml("API VITA Drain Timing");
-	auto replace_once = [](std::string& value, const std::string& from, const std::string& to)
-	{
-		const auto pos = value.find(from);
-		REQUIRE(pos != std::string::npos);
-		value.replace(pos, from.size(), to);
-	};
-	replace_once(xml, "<endtime>0.1</endtime>", "<endtime>0.2</endtime>");
-	replace_once(xml, "<rate>1000000</rate>", "<rate>100000</rate>");
+	const std::string xml = vita49DrainTimingScenarioXml();
 	REQUIRE(fers_load_scenario_from_xml_string(context.get(), xml.c_str(), 0) == 0);
 	REQUIRE(fers_enable_vita49_udp_output(context.get(), "127.0.0.1", 4991) == 0);
 	REQUIRE(fers_set_vita49_fullscale(context.get(), 1.0) == 0);
@@ -505,36 +539,19 @@ TEST_CASE("API VITA49 completion waits for wall-clock stream drain", "[api][runt
 	const auto start = std::chrono::steady_clock::now();
 	REQUIRE(fers_run_simulation(context.get(), recordProgress, &state) == 0);
 
-	auto drain_time = std::chrono::steady_clock::time_point{};
-	auto completion_time = std::chrono::steady_clock::time_point{};
-	for (std::size_t i = 0; i < state.messages.size(); ++i)
-	{
-		if (state.messages.at(i) == "Waiting for VITA output stream drain...")
-		{
-			drain_time = state.message_times.at(i);
-		}
-		if (state.messages.at(i) == "Simulation complete")
-		{
-			completion_time = state.message_times.at(i);
-		}
-	}
-
-	REQUIRE(drain_time != std::chrono::steady_clock::time_point{});
-	REQUIRE(completion_time != std::chrono::steady_clock::time_point{});
-	CHECK(drain_time <= completion_time);
-	CHECK(completion_time >= start + std::chrono::milliseconds(180));
+	requireVita49DrainCompletionTiming(state, start);
 }
 
 TEST_CASE("API run simulation invokes progress callbacks with caller user data", "[api][runtime]")
 {
-	api_test::ParamGuard guard;
+	api_test::ParamGuard const guard;
 	api_test::clearLastError();
-	api_test::Context context;
+	api_test::Context const context;
 	REQUIRE(context.get() != nullptr);
 
 	const auto out_dir = api_test::uniqueTempPath("api_out_dir_cb");
 	std::filesystem::create_directories(out_dir);
-	api_test::ScopedPath dir_guard(out_dir);
+	api_test::ScopedPath const dir_guard(out_dir);
 
 	const std::string unique_rx_name =
 		"api_preview_rx_cb_" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());

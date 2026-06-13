@@ -89,7 +89,7 @@ namespace core
 		{
 			if (_callback)
 			{
-				std::scoped_lock lock(_mutex);
+				std::scoped_lock const lock(_mutex);
 				_callback(msg, current, total);
 			}
 		}
@@ -201,8 +201,33 @@ namespace core
 		/// Removes ended streaming sources once no future receiver sample can observe their in-flight energy.
 		void cleanupInactiveStreamingSources(RealType from_time);
 
+		/// Returns the next time at which ended streaming sources can be cleaned up.
+		[[nodiscard]] std::optional<RealType> nextStreamingCleanupDeadline(RealType from_time);
+
+		/// Returns the next streaming chunk boundary before the target event time.
+		[[nodiscard]] RealType streamingChunkEnd(RealType from_time, RealType event_time);
+
+		/// Returns true when cooperative cancellation should stop the current streaming chunk.
+		[[nodiscard]] bool shouldStopStreamingChunk(std::size_t sample_index, std::size_t chunk_start_index);
+
+		/// Processes one simulation sample for all active streaming receivers.
+		void processStreamingSample(std::size_t sample_index, std::size_t first_index, std::size_t final_index,
+									std::size_t progress_report_stride, RealType dt_sim);
+
+		/// Adds one sample to every active streaming receiver.
+		void appendActiveReceiverStreamingSamples(std::size_t sample_index, RealType t_step);
+
+		/// Adds one sample to a single active streaming receiver.
+		void appendReceiverStreamingSample(std::size_t receiver_index, std::size_t sample_index, RealType t_step);
+
 		/// Builds and attaches IF resampling sinks for configured FMCW receivers.
 		void initializeFmcwIfResamplers();
+
+		/// Builds and attaches one receiver IF resampler when configured.
+		void initializeFmcwIfResampler(std::size_t receiver_index);
+
+		/// Extends resolved dechirp source spans to cover IF resampler over-render.
+		void extendDechirpSourcesForIfOverrender();
 
 		/// Flushes all pending high-rate samples buffered for IF resamplers.
 		void flushFmcwIfBlocks();
@@ -264,6 +289,12 @@ namespace core
 		/// Adds pulsed interference into a live streaming block before final noise/scaling.
 		void applyPulsedInterferenceToStreamingBlock(std::size_t receiver_index, std::span<ComplexType> block,
 													 RealType block_start_time, RealType sample_rate, bool dechirp_mix);
+
+		/// Adds one rendered pulsed-interference slice into a streaming block.
+		void addPulsedInterferenceSamples(std::span<ComplexType> block, std::span<const ComplexType> rendered_pulse,
+										  long long dest_begin, long long dest_end, std::size_t crop_offset,
+										  RealType block_start_time, RealType sample_rate, bool dechirp_mix,
+										  radar::Receiver* receiver, ReceiverTrackerCache& tracker_cache) const;
 
 		/// Emits summary logs for streaming receiver configuration.
 		void logStreamingSummaries() const;

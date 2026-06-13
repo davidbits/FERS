@@ -29,6 +29,10 @@ namespace
 	{
 		params::Parameters saved;
 		ParamGuard() : saved(params::params) {}
+		ParamGuard(const ParamGuard&) = delete;
+		ParamGuard& operator=(const ParamGuard&) = delete;
+		ParamGuard(ParamGuard&&) = delete;
+		ParamGuard& operator=(ParamGuard&&) = delete;
 		~ParamGuard() { params::params = saved; }
 	};
 
@@ -86,7 +90,7 @@ namespace
 TEST_CASE("applyStreamingInterference adds direct-path streaming energy sample by sample",
 		  "[processing][finalizer][interference]")
 {
-	ParamGuard guard;
+	ParamGuard const guard;
 	params::params.reset();
 
 	radar::Platform tx_platform("TxPlatform");
@@ -133,7 +137,7 @@ TEST_CASE("applyStreamingInterference adds direct-path streaming energy sample b
 TEST_CASE("applyStreamingInterference respects FLAG_NODIRECT and keeps only physically reflected energy",
 		  "[processing][finalizer][interference]")
 {
-	ParamGuard guard;
+	ParamGuard const guard;
 	params::params.reset();
 
 	radar::Platform tx_platform("TxPlatform");
@@ -183,7 +187,7 @@ TEST_CASE("applyStreamingInterference respects FLAG_NODIRECT and keeps only phys
 TEST_CASE("applyPulsedInterference clips rendered pulses to LO-active sample spans",
 		  "[processing][finalizer][interference][dechirp]")
 {
-	ParamGuard guard;
+	ParamGuard const guard;
 	params::params.reset();
 	params::setRate(10.0);
 	params::setTime(0.0, 1.0);
@@ -221,7 +225,7 @@ TEST_CASE("applyPulsedInterference clips rendered pulses to LO-active sample spa
 TEST_CASE("applyPulsedInterference rejects pulse resampling across mismatched rates",
 		  "[processing][finalizer][interference][dechirp]")
 {
-	ParamGuard guard;
+	ParamGuard const guard;
 	params::params.reset();
 	params::setRate(10.0);
 	params::setTime(0.0, 1.0);
@@ -252,7 +256,7 @@ TEST_CASE("applyPulsedInterference rejects pulse resampling across mismatched ra
 TEST_CASE("applyStreamingInterference adds FMCW energy to pulsed receiver windows",
 		  "[processing][finalizer][interference][fmcw]")
 {
-	ParamGuard guard;
+	ParamGuard const guard;
 	params::params.reset();
 	params::setRate(1.0e6);
 	params::setOversampleRatio(1);
@@ -294,7 +298,7 @@ TEST_CASE("applyStreamingInterference adds FMCW energy to pulsed receiver window
 TEST_CASE("applyStreamingInterference supports FMCW transmitter with CW streaming receiver",
 		  "[processing][finalizer][interference][fmcw]")
 {
-	ParamGuard guard;
+	ParamGuard const guard;
 	params::params.reset();
 	params::setRate(1.0e6);
 	params::setOversampleRatio(1);
@@ -341,7 +345,7 @@ TEST_CASE("applyStreamingInterference supports FMCW transmitter with CW streamin
 TEST_CASE("applyStreamingInterference superposes up- and down-chirp FMCW transmitters",
 		  "[processing][finalizer][interference][fmcw]")
 {
-	ParamGuard guard;
+	ParamGuard const guard;
 	params::params.reset();
 	params::setRate(1.0e6);
 	params::setOversampleRatio(1);
@@ -400,7 +404,7 @@ TEST_CASE("applyStreamingInterference superposes up- and down-chirp FMCW transmi
 TEST_CASE("applyStreamingInterference reuses tracker cache without carrying window state",
 		  "[processing][finalizer][interference][fmcw]")
 {
-	ParamGuard guard;
+	ParamGuard const guard;
 	params::params.reset();
 	params::setRate(1.0e6);
 	params::setOversampleRatio(1);
@@ -463,13 +467,13 @@ TEST_CASE("applyStreamingInterference reuses tracker cache without carrying wind
 TEST_CASE("applyPulsedInterference maps pulse start times to simulation sample indices and clips overflow",
 		  "[processing][finalizer][interference]")
 {
-	ParamGuard guard;
+	ParamGuard const guard;
 	params::setTime(10.0, 11.0);
 	params::setRate(4.0);
 	params::setOversampleRatio(1);
 
 	radar::Platform tx_platform("TxPlatform");
-	radar::Transmitter transmitter(&tx_platform, "TxA", radar::OperationMode::PULSED_MODE, 401);
+	radar::Transmitter const transmitter(&tx_platform, "TxA", radar::OperationMode::PULSED_MODE, 401);
 
 	std::vector<std::unique_ptr<fers_signal::RadarSignal>> wave_store;
 	std::vector<std::unique_ptr<serial::Response>> interference_log;
@@ -499,13 +503,13 @@ TEST_CASE("applyPulsedInterference maps pulse start times to simulation sample i
 TEST_CASE("applyPulsedInterference uses RF simulation rate for oversampled full-buffer path",
 		  "[processing][finalizer][interference]")
 {
-	ParamGuard guard;
+	ParamGuard const guard;
 	params::setTime(10.0, 11.0);
 	params::setRate(4.0);
 	params::setOversampleRatio(2);
 
 	radar::Platform tx_platform("TxPlatform");
-	radar::Transmitter transmitter(&tx_platform, "TxA", radar::OperationMode::PULSED_MODE, 402);
+	radar::Transmitter const transmitter(&tx_platform, "TxA", radar::OperationMode::PULSED_MODE, 402);
 
 	std::vector<std::unique_ptr<fers_signal::RadarSignal>> wave_store;
 	std::vector<std::unique_ptr<serial::Response>> interference_log;

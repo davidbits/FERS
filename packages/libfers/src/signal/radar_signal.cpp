@@ -16,6 +16,7 @@
 #include <cmath>
 #include <complex>
 #include <iterator>
+#include <limits>
 #include <stdexcept>
 #include <utility>
 
@@ -55,7 +56,7 @@ namespace fers_signal
 									 const RealType chirp_period, const RealType start_frequency_offset,
 									 std::optional<std::size_t> chirp_count, const FmcwChirpDirection direction) :
 		_chirp_bandwidth(chirp_bandwidth), _chirp_duration(chirp_duration), _chirp_period(chirp_period),
-		_start_frequency_offset(start_frequency_offset), _chirp_count(std::move(chirp_count)),
+		_start_frequency_offset(start_frequency_offset), _chirp_count(chirp_count),
 		_chirp_rate(chirp_bandwidth / chirp_duration), _direction(direction)
 	{
 	}
@@ -113,7 +114,7 @@ namespace fers_signal
 										   const RealType start_frequency_offset,
 										   std::optional<std::size_t> triangle_count) :
 		_chirp_bandwidth(chirp_bandwidth), _chirp_duration(chirp_duration),
-		_start_frequency_offset(start_frequency_offset), _triangle_count(std::move(triangle_count)),
+		_start_frequency_offset(start_frequency_offset), _triangle_count(triangle_count),
 		_chirp_rate(chirp_bandwidth / chirp_duration), _triangle_period(2.0 * chirp_duration),
 		_delta_phi_up(2.0 * PI * start_frequency_offset * chirp_duration +
 					  PI * _chirp_rate * chirp_duration * chirp_duration)
@@ -238,9 +239,14 @@ namespace fers_signal
 	{
 		clear();
 		const unsigned ratio = params::oversampleRatio();
-		_data.resize(samples * ratio);
-		_size = samples * ratio;
-		_rate = sampleRate * ratio;
+		const auto oversampled_samples = static_cast<std::size_t>(samples) * static_cast<std::size_t>(ratio);
+		if (oversampled_samples > std::numeric_limits<unsigned>::max())
+		{
+			throw std::overflow_error("Oversampled signal sample count exceeds unsigned range");
+		}
+		_data.resize(oversampled_samples);
+		_size = static_cast<unsigned>(oversampled_samples);
+		_rate = sampleRate * static_cast<RealType>(ratio);
 
 		if (ratio == 1)
 		{

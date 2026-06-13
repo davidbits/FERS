@@ -115,26 +115,26 @@ namespace radar
 
 	void Receiver::addResponseToInbox(std::unique_ptr<serial::Response> response) noexcept
 	{
-		std::scoped_lock lock(_inbox_mutex);
+		std::scoped_lock const lock(_inbox_mutex);
 		_inbox.push_back(std::move(response));
 	}
 
 	void Receiver::addInterferenceToLog(std::unique_ptr<serial::Response> response) noexcept
 	{
-		std::scoped_lock lock(_interference_log_mutex);
+		std::scoped_lock const lock(_interference_log_mutex);
 		_pulsed_interference_log.push_back(std::move(response));
 	}
 
 	void Receiver::prunePulsedInterferenceEndingBefore(const RealType cutoff_time) noexcept
 	{
-		std::scoped_lock lock(_interference_log_mutex);
+		std::scoped_lock const lock(_interference_log_mutex);
 		std::erase_if(_pulsed_interference_log,
 					  [cutoff_time](const auto& response) { return response && response->endTime() <= cutoff_time; });
 	}
 
 	std::vector<std::unique_ptr<serial::Response>> Receiver::drainInbox() noexcept
 	{
-		std::scoped_lock lock(_inbox_mutex);
+		std::scoped_lock const lock(_inbox_mutex);
 		std::vector<std::unique_ptr<serial::Response>> drained_responses;
 		drained_responses.swap(_inbox);
 		return drained_responses;
@@ -143,7 +143,7 @@ namespace radar
 	void Receiver::enqueueFinalizerJob(core::RenderingJob&& job)
 	{
 		{
-			std::scoped_lock lock(_finalizer_queue_mutex);
+			std::scoped_lock const lock(_finalizer_queue_mutex);
 			_finalizer_queue.push(std::move(job));
 		}
 		_finalizer_queue_cv.notify_one();
@@ -157,12 +157,8 @@ namespace radar
 		job = std::move(_finalizer_queue.front());
 		_finalizer_queue.pop();
 
-		// Check for shutdown signal (negative duration)
-		if (job.duration < 0.0)
-		{
-			return false; // Shutdown signal
-		}
-		return true;
+		const bool is_shutdown_job = job.duration < 0.0;
+		return !is_shutdown_job;
 	}
 
 	RealType Receiver::getNoiseTemperature(const math::SVec3& angle) const noexcept
@@ -215,7 +211,7 @@ namespace radar
 
 	void Receiver::setFmcwIfChainRequest(FmcwIfChainRequest request) noexcept
 	{
-		_fmcw_if_chain = std::move(request);
+		_fmcw_if_chain = request;
 		_fmcw_if_plan.reset();
 		_fmcw_if_sink.reset();
 		_fmcw_if_samples_to_discard = 0;
@@ -250,11 +246,12 @@ namespace radar
 		{
 			throw std::logic_error("FMCW IF resampling sink has not been initialized.");
 		}
+		const auto input_sample_rate_hz = _fmcw_if_plan->input_sample_rate_hz;
 		if (!_fmcw_if_segment_active)
 		{
 			beginFmcwIfResamplingSegment(block_start_time);
 		}
-		const auto block_start_index = ceilSampleIndexAtOrAfter(block_start_time, _fmcw_if_plan->input_sample_rate_hz);
+		const auto block_start_index = ceilSampleIndexAtOrAfter(block_start_time, input_sample_rate_hz);
 		if (block_start_index < _fmcw_if_input_cursor)
 		{
 			throw std::logic_error("FMCW IF resampling input blocks must be supplied in chronological order.");
