@@ -377,6 +377,11 @@ The serializer follows the receiver mode when stale mode blocks are present. For
 - `carrier_hz`
 - `power_w`
 
+For an attached CW receiver, these fields describe the attached transmitter's waveform. For a detached bistatic CW
+receiver, FERS binds them when the active source inventory contains one logical generated or file-backed CW source;
+repeated schedule segments from that same source are treated as one. If multiple distinct CW sources are active, the
+scalar CW context remains unbound rather than selecting an arbitrary transmitter.
+
 ### FMCW Metadata
 
 `fmcw` contains:
@@ -399,6 +404,10 @@ The serializer follows the receiver mode when stale mode blocks are present. For
 - `dechirp_reference_transmitter_name`
 - `dechirp_reference_waveform_id`
 - `dechirp_reference_waveform_name`
+
+For file-backed FMCW, `waveform_shape` is `file`. Analytic chirp fields are not inferred from the HDF5 samples. The
+current VITA context profile does not include the HDF5 `sampled_duration` and `sampled_count` fields available in normal
+FERS output metadata.
 
 ### SFCW Metadata
 
