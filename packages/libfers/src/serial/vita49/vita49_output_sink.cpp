@@ -87,13 +87,12 @@ namespace serial::vita49
 
 		_config = config;
 		_simulation_name = std::move(simulation_name);
-		const auto epoch_ns = config.vita49.epoch_unix_nanoseconds.value_or(defaultEpochNanoseconds());
-		_packetizer =
-			std::make_unique<Vita49Packetizer>(epoch_ns, config.vita49.adc_fullscale, config.vita49.max_udp_payload);
+		_packetizer.reset();
 		_sender = std::make_unique<PacedSender>(
 			_provided_sender ? std::move(_provided_sender) : std::make_unique<UdpSender>(), config.vita49.queue_depth);
 		_sender->open(config.vita49.host, config.vita49.port);
-		_sender->start(params::startTime());
+		_pending_contexts.clear();
+		_pacing_started = false;
 		_last_stats_emit = std::chrono::steady_clock::time_point::min();
 		_last_packet_trace_emit = std::chrono::steady_clock::now();
 		_pending_packet_traces.clear();
@@ -131,54 +130,99 @@ namespace serial::vita49
 		emitTelemetry({}, true);
 	}
 
-	void Vita49OutputSink::submitBlock(const core::ReceiverSampleBlock& block)
+	void Vita49OutputSink::submitBlock(const core::ReceiverSampleBlock& block) { submitBlocks({&block, 1}); }
+
+	void Vita49OutputSink::submitBlocks(const std::span<const core::ReceiverSampleBlock> blocks)
 	{
 		std::scoped_lock const lock(_mutex);
-		if (!_initialized || !_packetizer)
+		if (!_initialized || !_sender)
 		{
 			throw std::logic_error("VITA output sink has not been initialized");
 		}
 		emitTelemetry(consumeSenderDropsLocked(), false);
-		const auto stream_id = registerStream(block.stream);
-		auto& state = stateFor(stream_id);
-		if (!state.opened)
+		ensurePacketizer();
+
+		struct PacketAccounting
 		{
-			openStream(stream_id, block.first_sample_time);
+			std::uint32_t stream_id = 0;
+			std::uint64_t sample_count = 0;
+			RealType first_sample_time = 0.0;
+			RealType end_sample_time = 0.0;
+			core::Vita49Timestamp timestamp;
+			std::optional<core::Vita49Timestamp> end_timestamp;
+			bool over_range = false;
+		};
+
+		std::vector<SerializedPacket> packets;
+		std::vector<PacketAccounting> accounting;
+		std::vector<std::uint32_t> context_stream_ids;
+		for (const auto& block : blocks)
+		{
+			const auto stream_id = registerStream(block.stream);
+			auto& state = stateFor(stream_id);
+			if (!state.opened)
+			{
+				emitContext(stream_id, block.first_sample_time, true, false);
+				state.opened = true;
+			}
+		}
+		appendPendingContexts(packets, context_stream_ids);
+
+		for (const auto& block : blocks)
+		{
+			const auto stream_id = registerStream(block.stream);
+			auto& state = stateFor(stream_id);
+			auto result = _packetizer->packetize(block, stream_id, state.packet_counts, state.sample_loss_pending);
+			state.sample_loss_pending = false;
+			const RealType sample_rate = block.sample_rate > 0.0 ? block.sample_rate : state.stats.sample_rate;
+			for (const auto& packet : result.packets)
+			{
+				const auto end_sample_time = sample_rate > 0.0
+					? packet.first_sample_time + static_cast<RealType>(packet.sample_count) / sample_rate
+					: packet.first_sample_time;
+				accounting.push_back(PacketAccounting{
+					.stream_id = stream_id,
+					.sample_count = packet.sample_count,
+					.first_sample_time = packet.first_sample_time,
+					.end_sample_time = end_sample_time,
+					.timestamp = toCoreTimestamp(packet.timestamp),
+					.end_timestamp = tryCoreTimestampFromEpoch(_packetizer->epochUnixNanoseconds(), end_sample_time),
+					.over_range = packet.over_range});
+			}
+			state.stats.over_range_count += result.over_range_count;
+			packets.insert(packets.end(), std::make_move_iterator(result.packets.begin()),
+						   std::make_move_iterator(result.packets.end()));
 		}
 
-		const RealType sample_rate = block.sample_rate > 0.0 ? block.sample_rate : state.stats.sample_rate;
-		auto result = _packetizer->packetize(block, stream_id, state.packet_counts, state.sample_loss_pending);
-		state.sample_loss_pending = false;
-		for (auto& packet : result.packets)
+		std::stable_sort(packets.begin(), packets.end(), [](const SerializedPacket& lhs, const SerializedPacket& rhs)
+						 { return lhs.first_sample_time < rhs.first_sample_time; });
+		startPacing();
+		if (!enqueuePackets(std::move(packets)))
 		{
-			const auto packet_sample_count = packet.sample_count;
-			const auto packet_first_sample_time = packet.first_sample_time;
-			const auto packet_end_sample_time = sample_rate > 0.0
-				? packet_first_sample_time + static_cast<RealType>(packet_sample_count) / sample_rate
-				: packet_first_sample_time;
-			const auto packet_over_range = packet.over_range;
-			const auto packet_timestamp = toCoreTimestamp(packet.timestamp);
-			const auto packet_end_timestamp =
-				tryCoreTimestampFromEpoch(_packetizer->epochUnixNanoseconds(), packet_end_sample_time);
-			if (!enqueuePacket(std::move(packet)))
-			{
-				continue;
-			}
-			state.stats.samples_emitted += packet_sample_count;
+			return;
+		}
+
+		for (const auto stream_id : context_stream_ids)
+		{
+			++stateFor(stream_id).stats.context_packets;
+		}
+		for (const auto& packet : accounting)
+		{
+			auto& state = stateFor(packet.stream_id);
+			state.stats.samples_emitted += packet.sample_count;
 			++state.stats.packets_emitted;
 			if (!state.stats.first_sample_time.has_value())
 			{
-				state.stats.first_sample_time = packet_first_sample_time;
-				state.stats.first_timestamp = packet_timestamp;
+				state.stats.first_sample_time = packet.first_sample_time;
+				state.stats.first_timestamp = packet.timestamp;
 			}
-			state.stats.end_sample_time = packet_end_sample_time;
-			state.stats.end_timestamp = packet_end_timestamp;
-			if (packet_over_range)
+			state.stats.end_sample_time = packet.end_sample_time;
+			state.stats.end_timestamp = packet.end_timestamp;
+			if (packet.over_range)
 			{
 				state.over_range_pending = true;
 			}
 		}
-		state.stats.over_range_count += result.over_range_count;
 	}
 
 	void Vita49OutputSink::emitContextHeartbeat(const RealType simulation_time)
@@ -232,6 +276,25 @@ namespace serial::vita49
 			}
 		}
 
+		if (!_pacing_started && !_pending_contexts.empty())
+		{
+			ensurePacketizer();
+			std::vector<SerializedPacket> packets;
+			std::vector<std::uint32_t> context_stream_ids;
+			appendPendingContexts(packets, context_stream_ids);
+			std::stable_sort(packets.begin(), packets.end(),
+							 [](const SerializedPacket& lhs, const SerializedPacket& rhs)
+							 { return lhs.first_sample_time < rhs.first_sample_time; });
+			startPacing();
+			if (enqueuePackets(std::move(packets)))
+			{
+				for (const auto stream_id : context_stream_ids)
+				{
+					++stateFor(stream_id).stats.context_packets;
+				}
+			}
+		}
+
 		if (_sender)
 		{
 			_sender->stop();
@@ -241,13 +304,14 @@ namespace serial::vita49
 		core::OutputStats stats{.mode = core::OutputMode::Vita49Udp,
 								.epoch_unix_nanoseconds = _packetizer
 									? std::optional<std::uint64_t>(_packetizer->epochUnixNanoseconds())
-									: std::nullopt,
+									: _config.vita49.epoch_unix_nanoseconds,
 								.streams = {}};
 		for (auto& [stream_id, state] : _streams)
 		{
 			if (_sender)
 			{
-				state.stats.late_packet_count = _sender->latePacketCount(stream_id);
+				state.stats.late_data_packet_count = _sender->lateDataPacketCount(stream_id);
+				state.stats.late_context_packet_count = _sender->lateContextPacketCount(stream_id);
 			}
 			stats.streams.push_back(state.stats);
 		}
@@ -282,19 +346,59 @@ namespace serial::vita49
 		return found->second;
 	}
 
+	void Vita49OutputSink::ensurePacketizer()
+	{
+		if (_packetizer)
+		{
+			return;
+		}
+		const auto epoch_ns = _config.vita49.epoch_unix_nanoseconds.value_or(defaultEpochNanoseconds());
+		_packetizer =
+			std::make_unique<Vita49Packetizer>(epoch_ns, _config.vita49.adc_fullscale, _config.vita49.max_udp_payload);
+	}
+
+	void Vita49OutputSink::startPacing()
+	{
+		if (_pacing_started)
+		{
+			return;
+		}
+		if (!_sender)
+		{
+			throw std::logic_error("VITA paced sender is unavailable");
+		}
+		_sender->start(params::startTime());
+		_pacing_started = true;
+	}
+
+	void Vita49OutputSink::appendPendingContexts(std::vector<SerializedPacket>& packets,
+												 std::vector<std::uint32_t>& context_stream_ids)
+	{
+		packets.reserve(packets.size() + _pending_contexts.size());
+		context_stream_ids.reserve(context_stream_ids.size() + _pending_contexts.size());
+		for (const auto& pending : _pending_contexts)
+		{
+			packets.push_back(buildContextPacket(pending.stream_id, pending.simulation_time, pending.stream_open,
+												 pending.stream_close));
+			context_stream_ids.push_back(pending.stream_id);
+		}
+		_pending_contexts.clear();
+	}
+
 	core::OutputStats Vita49OutputSink::snapshotStatsLocked() const
 	{
 		core::OutputStats stats{.mode = core::OutputMode::Vita49Udp,
 								.epoch_unix_nanoseconds = _packetizer
 									? std::optional<std::uint64_t>(_packetizer->epochUnixNanoseconds())
-									: std::nullopt,
+									: _config.vita49.epoch_unix_nanoseconds,
 								.streams = {}};
 		for (const auto& [stream_id, state] : _streams)
 		{
 			auto stream_stats = state.stats;
 			if (_sender)
 			{
-				stream_stats.late_packet_count = _sender->latePacketCount(stream_id);
+				stream_stats.late_data_packet_count = _sender->lateDataPacketCount(stream_id);
+				stream_stats.late_context_packet_count = _sender->lateContextPacketCount(stream_id);
 			}
 			stats.streams.push_back(std::move(stream_stats));
 		}
@@ -348,6 +452,31 @@ namespace serial::vita49
 		}
 		emitTelemetry(std::move(traces), false);
 		return result.enqueued;
+	}
+
+	bool Vita49OutputSink::enqueuePackets(std::vector<SerializedPacket> packets)
+	{
+		if (!_sender)
+		{
+			throw std::logic_error("VITA paced sender is unavailable");
+		}
+
+		std::vector<core::ReceiverOutputPacketTrace> traces;
+		if (_config.vita49.packet_trace_enabled)
+		{
+			traces.reserve(packets.size());
+			for (const auto& packet : packets)
+			{
+				traces.push_back(makeTrace(packet, packet.context_packet ? "context" : "data"));
+			}
+		}
+		const bool enqueued = _sender->enqueueBatch(std::move(packets));
+		if (!enqueued)
+		{
+			traces.clear();
+		}
+		emitTelemetry(std::move(traces), false);
+		return enqueued;
 	}
 
 	void Vita49OutputSink::emitTelemetry(std::vector<core::ReceiverOutputPacketTrace> packets, const bool force_stats)
@@ -422,8 +551,8 @@ namespace serial::vita49
 											   .sample_loss = true};
 	}
 
-	void Vita49OutputSink::emitContext(const std::uint32_t stream_id, const RealType simulation_time,
-									   const bool stream_open, const bool stream_close)
+	SerializedPacket Vita49OutputSink::buildContextPacket(const std::uint32_t stream_id, const RealType simulation_time,
+														  const bool stream_open, const bool stream_close)
 	{
 		if (!_packetizer)
 		{
@@ -448,13 +577,30 @@ namespace serial::vita49
 		const auto context = Vita49ContextBuilder::build(request);
 		auto packet = _packetizer->makeContextPacket(context);
 		packet.first_sample_time = context_time;
-		if (enqueuePacket(std::move(packet)))
-		{
-			++state.stats.context_packets;
-		}
 		state.last_context_time = context_time;
 		state.sample_loss_pending = false;
 		state.over_range_pending = false;
+		return packet;
+	}
+
+	void Vita49OutputSink::emitContext(const std::uint32_t stream_id, const RealType simulation_time,
+									   const bool stream_open, const bool stream_close)
+	{
+		if (!_pacing_started)
+		{
+			const RealType context_time = simulation_time <= -1.0e200 ? 0.0 : simulation_time;
+			_pending_contexts.push_back(PendingContext{.stream_id = stream_id,
+													   .simulation_time = context_time,
+													   .stream_open = stream_open,
+													   .stream_close = stream_close});
+			stateFor(stream_id).last_context_time = context_time;
+			return;
+		}
+		auto packet = buildContextPacket(stream_id, simulation_time, stream_open, stream_close);
+		if (enqueuePacket(std::move(packet)))
+		{
+			++stateFor(stream_id).stats.context_packets;
+		}
 	}
 
 	void Vita49OutputSink::applyDropped(const DroppedDatagram& dropped)

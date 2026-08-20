@@ -894,6 +894,125 @@ TEST_CASE("VITA paced sender never sends packets before scheduled wall-clock tim
 	CHECK(recording_raw->sent.size() == 2u);
 }
 
+TEST_CASE("VITA paced sender preempts a later deadline when an earlier packet arrives", "[serial][vita49][ordering]")
+{
+	using namespace serial::vita49;
+	using namespace std::chrono_literals;
+
+	auto recording = std::make_unique<TimedRecordingSender>();
+	auto* recording_raw = recording.get();
+	PacedSender sender(std::move(recording), 4);
+	sender.open("127.0.0.1", 1);
+	sender.start(0.0);
+
+	auto later = testSerializedPacket(2, 1);
+	later.stream_id = 2;
+	later.first_sample_time = 0.06;
+	auto earlier = testSerializedPacket(1, 1);
+	earlier.stream_id = 1;
+	earlier.first_sample_time = 0.02;
+
+	REQUIRE(sender.enqueue(later).enqueued);
+	std::this_thread::sleep_for(2ms);
+	REQUIRE(sender.enqueue(earlier).enqueued);
+	sender.stop();
+
+	REQUIRE(recording_raw->sent.size() == 2u);
+	CHECK(recording_raw->sent.at(0).back() == 1u);
+	CHECK(recording_raw->sent.at(1).back() == 2u);
+	CHECK(sender.lateDataPacketCount(1) == 0u);
+	CHECK(sender.lateDataPacketCount(2) == 0u);
+	CHECK(sender.lateContextPacketCount(1) == 0u);
+	CHECK(sender.lateContextPacketCount(2) == 0u);
+}
+
+TEST_CASE("VITA paced sender admits an earlier deadline through saturated backpressure",
+		  "[serial][vita49][ordering][backpressure]")
+{
+	using namespace serial::vita49;
+	using namespace std::chrono_literals;
+
+	auto recording = std::make_unique<TimedRecordingSender>();
+	auto* recording_raw = recording.get();
+	PacedSender sender(std::move(recording), 1);
+	sender.open("127.0.0.1", 1);
+	sender.start(0.0);
+
+	auto later = testSerializedPacket(2, 1);
+	later.stream_id = 2;
+	later.first_sample_time = 0.06;
+	auto earlier = testSerializedPacket(1, 1);
+	earlier.stream_id = 1;
+	earlier.first_sample_time = 0.02;
+
+	REQUIRE(sender.enqueue(later).enqueued);
+	std::atomic_bool earlier_enqueue_finished = false;
+	auto earlier_result = enqueueAsync(sender, earlier, earlier_enqueue_finished);
+	std::this_thread::sleep_for(5ms);
+	CHECK_FALSE(earlier_enqueue_finished.load());
+	CHECK(earlier_result.get().enqueued);
+	sender.stop();
+
+	REQUIRE(recording_raw->sent.size() == 2u);
+	CHECK(recording_raw->sent.at(0).back() == 1u);
+	CHECK(recording_raw->sent.at(1).back() == 2u);
+	CHECK(sender.lateDataPacketCount(1) == 0u);
+	CHECK(sender.lateDataPacketCount(2) == 0u);
+	CHECK(sender.lateContextPacketCount(1) == 0u);
+	CHECK(sender.lateContextPacketCount(2) == 0u);
+}
+
+TEST_CASE("VITA paced sender preserves insertion order for equal deadlines", "[serial][vita49][ordering]")
+{
+	using namespace serial::vita49;
+
+	auto recording = std::make_unique<RecordingSender>();
+	auto* recording_raw = recording.get();
+	PacedSender sender(std::move(recording), 4);
+	sender.open("127.0.0.1", 1);
+	sender.start(0.0);
+
+	for (const auto payload : {1u, 2u, 3u})
+	{
+		auto packet = testSerializedPacket(static_cast<std::uint8_t>(payload), 1);
+		packet.stream_id = payload;
+		packet.first_sample_time = 0.02;
+		REQUIRE(sender.enqueue(packet).enqueued);
+	}
+	sender.stop();
+
+	REQUIRE(recording_raw->sent.size() == 3u);
+	CHECK(recording_raw->sent.at(0).back() == 1u);
+	CHECK(recording_raw->sent.at(1).back() == 2u);
+	CHECK(recording_raw->sent.at(2).back() == 3u);
+}
+
+TEST_CASE("VITA paced sender classifies late data and context packets independently", "[serial][vita49][late]")
+{
+	using namespace serial::vita49;
+
+	auto recording = std::make_unique<RecordingSender>();
+	PacedSender sender(std::move(recording), 4);
+	sender.open("127.0.0.1", 1);
+	sender.start(1.0);
+
+	auto data = testSerializedPacket(1, 1);
+	data.stream_id = 7;
+	auto context = testSerializedPacket(2, 0);
+	context.stream_id = 7;
+	context.data_packet = false;
+	context.context_packet = true;
+
+	REQUIRE(sender.enqueue(data).enqueued);
+	REQUIRE(sender.enqueue(context).enqueued);
+	sender.stop();
+
+	CHECK(sender.lateDataPacketCount(7) == 1u);
+	CHECK(sender.lateContextPacketCount(7) == 1u);
+	CHECK(sender.lateDataPacketCount(8) == 0u);
+	CHECK(sender.lateContextPacketCount(8) == 0u);
+}
+
 TEST_CASE("VITA paced sender catches datagram send failures", "[serial][vita49]")
 {
 	using namespace serial::vita49;
@@ -1265,6 +1384,118 @@ TEST_CASE("VITA output sink starts pacing at simulation start time", "[serial][v
 	REQUIRE(elapsed < std::chrono::milliseconds(500));
 }
 
+TEST_CASE("VITA output sink anchors automatic pacing when the first data batch is ready",
+		  "[serial][vita49][startup][timing]")
+{
+	using namespace serial::vita49;
+	using namespace std::chrono_literals;
+
+	ParamGuard const guard;
+	params::setTime(0.0, 1.0);
+
+	auto recording = std::make_unique<RecordingSender>();
+	auto* recording_raw = recording.get();
+	Vita49OutputSink sink(std::move(recording));
+	const core::OutputConfig config{
+		.mode = core::OutputMode::Vita49Udp,
+		.vita49 = {.host = "127.0.0.1", .port = 1, .adc_fullscale = 1.0, .queue_depth = 1, .max_udp_payload = 1400}};
+	sink.initializeRun(config, "deferred-auto");
+	const auto stream_id = sink.registerStream(basicCwStreamDescriptor());
+	sink.openStream(stream_id, 0.0);
+	CHECK_FALSE(sink.snapshotStats().epoch_unix_nanoseconds.has_value());
+
+	std::this_thread::sleep_for(20ms);
+	REQUIRE(recording_raw->sent.empty());
+	const auto epoch_lower_bound = static_cast<std::uint64_t>(
+		std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::system_clock::now().time_since_epoch())
+			.count());
+	std::vector<ComplexType> samples{ComplexType(0.25, -0.25)};
+	const core::ReceiverSampleBlock block{.stream = basicCwStreamDescriptor(),
+										  .first_sample_time = 0.0,
+										  .sample_rate = 1.0,
+										  .samples = samples,
+										  .sample_start = 0};
+	sink.submitBlock(block);
+	const auto epoch_upper_bound = static_cast<std::uint64_t>(
+		std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::system_clock::now().time_since_epoch())
+			.count());
+	const auto stats = sink.finalize();
+
+	REQUIRE(stats.epoch_unix_nanoseconds.has_value());
+	CHECK(*stats.epoch_unix_nanoseconds >= epoch_lower_bound);
+	CHECK(*stats.epoch_unix_nanoseconds <= epoch_upper_bound);
+	REQUIRE(stats.streams.size() == 1u);
+	CHECK(stats.streams.front().late_data_packet_count == 0u);
+	CHECK(stats.streams.front().packets_emitted == 1u);
+	CHECK(recording_raw->sent.size() >= 3u);
+}
+
+TEST_CASE("VITA output sink defers wall pacing while preserving a fixed timestamp epoch",
+		  "[serial][vita49][startup][timing]")
+{
+	using namespace serial::vita49;
+	using namespace std::chrono_literals;
+
+	ParamGuard const guard;
+	params::setTime(0.0, 1.0);
+	constexpr std::uint64_t fixed_epoch = 1'700'000'000'000'000'000ull;
+	auto recording = std::make_unique<RecordingSender>();
+	Vita49OutputSink sink(std::move(recording));
+	const core::OutputConfig config{.mode = core::OutputMode::Vita49Udp,
+									.vita49 = {.host = "127.0.0.1",
+											   .port = 1,
+											   .adc_fullscale = 1.0,
+											   .queue_depth = 1,
+											   .epoch_unix_nanoseconds = fixed_epoch,
+											   .max_udp_payload = 1400}};
+	sink.initializeRun(config, "deferred-fixed");
+	const auto stream_id = sink.registerStream(basicCwStreamDescriptor());
+	sink.openStream(stream_id, 0.0);
+	CHECK(sink.snapshotStats().epoch_unix_nanoseconds == std::optional<std::uint64_t>{fixed_epoch});
+	std::this_thread::sleep_for(20ms);
+
+	std::vector<ComplexType> samples{ComplexType(0.25, -0.25)};
+	const core::ReceiverSampleBlock block{.stream = basicCwStreamDescriptor(),
+										  .first_sample_time = 0.0,
+										  .sample_rate = 1.0,
+										  .samples = samples,
+										  .sample_start = 0};
+	sink.submitBlock(block);
+	const auto stats = sink.finalize();
+
+	REQUIRE(stats.epoch_unix_nanoseconds == std::optional<std::uint64_t>{fixed_epoch});
+	REQUIRE(stats.streams.size() == 1u);
+	CHECK(stats.streams.front().late_data_packet_count == 0u);
+}
+
+TEST_CASE("VITA output sink drains pending contexts when no data arrives", "[serial][vita49][startup][context]")
+{
+	using namespace serial::vita49;
+	using namespace std::chrono_literals;
+
+	ParamGuard const guard;
+	params::setTime(0.0, 0.0);
+	auto recording = std::make_unique<RecordingSender>();
+	auto* recording_raw = recording.get();
+	Vita49OutputSink sink(std::move(recording));
+	const core::OutputConfig config{
+		.mode = core::OutputMode::Vita49Udp,
+		.vita49 = {.host = "127.0.0.1", .port = 1, .adc_fullscale = 1.0, .queue_depth = 1, .max_udp_payload = 1400}};
+	sink.initializeRun(config, "context-only");
+	const auto stream_id = sink.registerStream(basicCwStreamDescriptor());
+	sink.openStream(stream_id, 0.0);
+	std::this_thread::sleep_for(10ms);
+	REQUIRE(recording_raw->sent.empty());
+
+	const auto stats = sink.finalize();
+
+	REQUIRE(stats.epoch_unix_nanoseconds.has_value());
+	REQUIRE(stats.streams.size() == 1u);
+	CHECK(stats.streams.front().context_packets == 2u);
+	CHECK(stats.streams.front().late_context_packet_count == 0u);
+	CHECK(recording_raw->sent.size() == 2u);
+}
+
 TEST_CASE("VITA output sink drains future packets before final stats", "[serial][vita49]")
 {
 	using namespace serial::vita49;
@@ -1309,6 +1540,77 @@ TEST_CASE("VITA output sink drains future packets before final stats", "[serial]
 	CHECK(stats.streams.front().context_packets >= 2u);
 	CHECK(stats.streams.front().packets_dropped == 0u);
 	CHECK(stats.streams.front().samples_dropped == 0u);
+}
+
+TEST_CASE("VITA output sink deadline-merges synchronized receiver blocks under saturated backpressure",
+		  "[serial][vita49][ordering][backpressure][integration]")
+{
+	using namespace serial::vita49;
+
+	auto recording = std::make_unique<RecordingSender>();
+	auto* recording_raw = recording.get();
+	Vita49OutputSink sink(std::move(recording));
+	const core::OutputConfig config{.mode = core::OutputMode::Vita49Udp,
+									.vita49 = {.host = "127.0.0.1",
+											   .port = 1,
+											   .adc_fullscale = 1.0,
+											   .queue_depth = 1,
+											   .epoch_unix_nanoseconds = 1'700'000'000'000'000'000ull,
+											   .max_udp_payload = 1400}};
+	sink.initializeRun(config, "synchronized");
+
+	const core::ReceiverStreamDescriptor reference{.receiver_id = 101,
+												   .receiver_name = "reference",
+												   .mode = "cw",
+												   .sample_rate = 100'000.0,
+												   .reference_frequency = 1.0e9,
+												   .coordinate = {},
+												   .initial_platform_state = {},
+												   .fmcw = {}};
+	auto surveillance = reference;
+	surveillance.receiver_id = 102;
+	surveillance.receiver_name = "surveillance";
+	sink.openStream(sink.registerStream(reference), 0.03);
+	sink.openStream(sink.registerStream(surveillance), 0.03);
+	std::this_thread::sleep_for(std::chrono::milliseconds(20));
+	REQUIRE(recording_raw->sent.empty());
+	std::vector<ComplexType> reference_samples(1026, ComplexType{0.1, 0.2});
+	std::vector<ComplexType> surveillance_samples(1026, ComplexType{0.3, 0.4});
+	const std::vector blocks = {core::ReceiverSampleBlock{.stream = reference,
+														  .first_sample_time = 0.03,
+														  .sample_rate = 100'000.0,
+														  .samples = reference_samples,
+														  .sample_start = 0},
+								core::ReceiverSampleBlock{.stream = surveillance,
+														  .first_sample_time = 0.03,
+														  .sample_rate = 100'000.0,
+														  .samples = surveillance_samples,
+														  .sample_start = 0}};
+
+	sink.submitBlocks(blocks);
+	const auto stats = sink.finalize();
+
+	std::vector<std::uint32_t> data_stream_ids;
+	for (const auto& bytes : recording_raw->sent)
+	{
+		if ((bytes.front() >> 4u) == static_cast<std::uint8_t>(PacketType::SignalDataWithStreamId))
+		{
+			data_stream_ids.push_back(readU32(bytes, 4));
+		}
+	}
+	REQUIRE(data_stream_ids.size() == 6u);
+	CHECK(data_stream_ids.at(0) != data_stream_ids.at(1));
+	CHECK(data_stream_ids.at(0) == data_stream_ids.at(2));
+	CHECK(data_stream_ids.at(1) == data_stream_ids.at(3));
+	CHECK(data_stream_ids.at(0) == data_stream_ids.at(4));
+	CHECK(data_stream_ids.at(1) == data_stream_ids.at(5));
+	REQUIRE(stats.streams.size() == 2u);
+	CAPTURE(stats.streams.at(0).late_data_packet_count, stats.streams.at(1).late_data_packet_count,
+			stats.streams.at(0).late_context_packet_count, stats.streams.at(1).late_context_packet_count);
+	CHECK(std::ranges::all_of(stats.streams, [](const auto& stream) { return stream.late_data_packet_count == 0u; }));
+	CHECK(
+		std::ranges::all_of(stats.streams, [](const auto& stream) { return stream.late_context_packet_count <= 1u; }));
+	CHECK(std::ranges::all_of(stats.streams, [](const auto& stream) { return stream.packets_dropped == 0u; }));
 }
 
 #ifndef _WIN32

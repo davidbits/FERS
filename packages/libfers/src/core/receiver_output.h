@@ -163,7 +163,8 @@ namespace core
 		std::uint64_t packets_dropped = 0;
 		std::uint64_t samples_dropped = 0;
 		std::uint64_t over_range_count = 0;
-		std::uint64_t late_packet_count = 0;
+		std::uint64_t late_data_packet_count = 0;
+		std::uint64_t late_context_packet_count = 0;
 		std::optional<RealType> first_sample_time = std::nullopt;
 		std::optional<RealType> end_sample_time = std::nullopt;
 		std::optional<Vita49Timestamp> first_timestamp = std::nullopt;
@@ -205,6 +206,13 @@ namespace core
 		virtual std::uint32_t registerStream(const ReceiverStreamDescriptor& stream) = 0;
 		virtual void openStream(std::uint32_t stream_id, RealType first_sample_time) = 0;
 		virtual void submitBlock(const ReceiverSampleBlock& block) = 0;
+		virtual void submitBlocks(const std::span<const ReceiverSampleBlock> blocks)
+		{
+			for (const auto& block : blocks)
+			{
+				submitBlock(block);
+			}
+		}
 		virtual void emitContextHeartbeat(RealType simulation_time) = 0;
 		virtual void closeStream(std::uint32_t stream_id) = 0;
 		virtual OutputStats finalize() = 0;

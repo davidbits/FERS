@@ -37,6 +37,7 @@ namespace serial::vita49
 		std::uint32_t registerStream(const core::ReceiverStreamDescriptor& stream) override;
 		void openStream(std::uint32_t stream_id, RealType first_sample_time) override;
 		void submitBlock(const core::ReceiverSampleBlock& block) override;
+		void submitBlocks(std::span<const core::ReceiverSampleBlock> blocks) override;
 		void emitContextHeartbeat(RealType simulation_time) override;
 		void closeStream(std::uint32_t stream_id) override;
 		core::OutputStats finalize() override;
@@ -55,15 +56,30 @@ namespace serial::vita49
 			RealType last_context_time = -1.0e300;
 		};
 
+		struct PendingContext
+		{
+			std::uint32_t stream_id = 0;
+			RealType simulation_time = 0.0;
+			bool stream_open = false;
+			bool stream_close = false;
+		};
+
 		[[nodiscard]] StreamState& stateFor(std::uint32_t stream_id);
 		[[nodiscard]] const StreamState& stateFor(std::uint32_t stream_id) const;
 		[[nodiscard]] core::OutputStats snapshotStatsLocked() const;
+		void ensurePacketizer();
+		void startPacing();
+		void appendPendingContexts(std::vector<SerializedPacket>& packets,
+								   std::vector<std::uint32_t>& context_stream_ids);
 		[[nodiscard]] bool enqueuePacket(SerializedPacket&& packet);
+		[[nodiscard]] bool enqueuePackets(std::vector<SerializedPacket> packets);
 		void emitTelemetry(std::vector<core::ReceiverOutputPacketTrace> packets = {}, bool force_stats = false);
 		[[nodiscard]] std::vector<core::ReceiverOutputPacketTrace> consumeSenderDropsLocked();
 		[[nodiscard]] core::ReceiverOutputPacketTrace makeTrace(const SerializedPacket& packet,
 																std::string event) const;
 		[[nodiscard]] core::ReceiverOutputPacketTrace makeDropTrace(const DroppedDatagram& dropped) const;
+		[[nodiscard]] SerializedPacket buildContextPacket(std::uint32_t stream_id, RealType simulation_time,
+														  bool stream_open, bool stream_close);
 		void emitContext(std::uint32_t stream_id, RealType simulation_time, bool stream_open, bool stream_close);
 		void applyDropped(const DroppedDatagram& dropped);
 
@@ -75,6 +91,7 @@ namespace serial::vita49
 		std::unique_ptr<Vita49Packetizer> _packetizer;
 		std::unique_ptr<PacedSender> _sender;
 		std::unordered_map<std::uint32_t, StreamState> _streams;
+		std::vector<PendingContext> _pending_contexts;
 		mutable std::recursive_mutex _mutex;
 		std::chrono::steady_clock::time_point _last_stats_emit = std::chrono::steady_clock::time_point::min();
 		std::chrono::steady_clock::time_point _last_packet_trace_emit = std::chrono::steady_clock::time_point::min();
@@ -82,6 +99,7 @@ namespace serial::vita49
 		std::uint64_t _trace_sequence = 0;
 		bool _initialized = false;
 		bool _finalized = false;
+		bool _pacing_started = false;
 	};
 
 	[[nodiscard]] std::unique_ptr<core::ReceiverOutputSink>
