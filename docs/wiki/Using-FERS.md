@@ -118,6 +118,26 @@ FERS stores metadata in the HDF5 output, including receiver mode, sample rates, 
 
 Use the metadata whenever possible instead of hard-coding assumptions in analysis scripts.
 
+### SFCW HDF5 Metadata
+
+Complete native SFCW metadata uses this hierarchy:
+
+```text
+/metadata/sfcw
+└── sources
+    ├── source_0
+    │   ├── waveform
+    │   └── segments
+    │       ├── segment_0
+    │       └── ...
+    └── source_1
+        └── ...
+```
+
+Each source group records transmitter and waveform identity. Its `waveform` group records carrier, step grid, dwell timing, sweep count, and derived range values. Each segment group records schedule bounds, first emitted step time, and emitted step count when available. This hierarchy represents every SFCW source in a receiver output and is semantically equivalent to `sfcw_sources` inside `fers_metadata_json`.
+
+Root-level `sfcw_*` attributes remain compatibility summaries for single-source files. They do not contain source or schedule nesting and must not be treated as complete multi-source metadata. `sfcw_flat_attributes_are_summary` marks this explicitly, while `sfcw_metadata_path` points to the complete native hierarchy.
+
 ## Sample Rates
 
 The most important rates are:

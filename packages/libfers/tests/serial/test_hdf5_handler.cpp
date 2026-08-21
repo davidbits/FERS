@@ -252,6 +252,87 @@ TEST_CASE("Output metadata uses per-file sampling rates when outputs differ", "[
 	REQUIRE(json.at("files").at(1).at("sampling_rate") == 4'000.0);
 }
 
+TEST_CASE("HDF5 writer exports complete nested SFCW source metadata", "[serial][hdf5][sfcw]")
+{
+	const std::string path = tempFilePath(uniqueFileName("nested_sfcw_metadata"));
+	removeIfExists(path);
+
+	const auto waveform_metadata = [](const RealType carrier)
+	{
+		return core::SfcwMetadata{.carrier_frequency = carrier,
+								  .start_frequency_offset = -200.0,
+								  .step_size = 100.0,
+								  .step_count = 4,
+								  .dwell_time = 0.01,
+								  .step_period = 0.02,
+								  .sweep_count = 2,
+								  .first_frequency = carrier - 200.0,
+								  .last_frequency = carrier + 100.0,
+								  .frequency_span = 300.0,
+								  .effective_bandwidth = 400.0,
+								  .range_resolution = 10.0,
+								  .unambiguous_range = 20.0};
+	};
+
+	core::OutputFileMetadata metadata{.receiver_id = 90, .receiver_name = "MultiSfcwRx", .mode = "sfcw", .path = path};
+	metadata.sfcw_sources = {
+		core::SfcwSourceMetadata{
+			.transmitter_id = 101,
+			.transmitter_name = "TxA",
+			.waveform_id = 201,
+			.waveform_name = "WaveA",
+			.waveform = waveform_metadata(1'000.0),
+			.segments = {{.start_time = 0.0, .end_time = 0.16, .first_step_start_time = 0.0, .emitted_step_count = 8}}},
+		core::SfcwSourceMetadata{.transmitter_id = 102,
+								 .transmitter_name = "TxB",
+								 .waveform_id = 202,
+								 .waveform_name = "WaveB",
+								 .waveform = waveform_metadata(2'000.0),
+								 .segments = {{.start_time = 1.0, .end_time = 1.08}}}};
+
+	{
+		HighFive::File file(path, HighFive::File::Overwrite);
+		std::scoped_lock const lock(serial::hdf5_global_mutex);
+		serial::writeOutputFileMetadataAttributes(file, metadata);
+	}
+
+	{
+		HighFive::File const file(path, HighFive::File::ReadOnly);
+		REQUIRE_FALSE(file.hasAttribute("sfcw_step_count"));
+		std::string metadata_path;
+		file.getAttribute("sfcw_metadata_path").read(metadata_path);
+		REQUIRE(metadata_path == "/metadata/sfcw");
+
+		const auto sfcw_group = file.getGroup("/metadata/sfcw");
+		unsigned long long source_count = 0;
+		sfcw_group.getAttribute("source_count").read(source_count);
+		REQUIRE(source_count == 2ULL);
+
+		const auto first_source = file.getGroup("/metadata/sfcw/sources/source_0");
+		std::string transmitter_name;
+		first_source.getAttribute("transmitter_name").read(transmitter_name);
+		REQUIRE(transmitter_name == "TxA");
+
+		const auto first_waveform = first_source.getGroup("waveform");
+		unsigned long long step_count = 0;
+		first_waveform.getAttribute("step_count").read(step_count);
+		REQUIRE(step_count == 4ULL);
+
+		const auto first_segment = first_source.getGroup("segments/segment_0");
+		unsigned long long emitted_step_count = 0;
+		first_segment.getAttribute("emitted_step_count").read(emitted_step_count);
+		REQUIRE(emitted_step_count == 8ULL);
+
+		const auto second_source = file.getGroup("/metadata/sfcw/sources/source_1");
+		second_source.getAttribute("transmitter_name").read(transmitter_name);
+		REQUIRE(transmitter_name == "TxB");
+		second_source.getGroup("waveform").getAttribute("step_count").read(step_count);
+		REQUIRE(step_count == 4ULL);
+	}
+
+	removeIfExists(path);
+}
+
 TEST_CASE("HDF5 writer preserves finite file FMCW sample metadata", "[serial][hdf5][file-waveform]")
 {
 	const std::string path = tempFilePath(uniqueFileName("file_fmcw_metadata"));
