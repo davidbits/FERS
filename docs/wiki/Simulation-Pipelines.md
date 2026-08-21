@@ -118,6 +118,10 @@ Important SFCW settings:
 | `<step_period>` | Time from one step start to the next. Larger values introduce silent gaps. |
 | `<sweep_count>` | Optional finite number of sweeps per active schedule period. |
 
+An SFCW receiver remains active throughout its scheduled streaming interval, including transmitter gaps between dwells. Each path is evaluated at retarded transmit time `receive_time - propagation_delay`. A sample taken during a transmitter gap can therefore contain a delayed echo emitted during an earlier dwell. FERS does not automatically blank the receiver from SFCW transmitter dwell timing; apply intentional receive gating during analysis or with an explicit receiver schedule.
+
+For hardware whose transmitter and receiver share a retuned oscillator, post-processing time gates approximate synchronized blanking. FERS does not model a frequency-selective receiver front end that rejects an earlier dwell's delayed RF after retuning.
+
 ## Pulsed Radar Pipeline
 
 Pulsed radar is organized around transmitted pulses and receiver windows.

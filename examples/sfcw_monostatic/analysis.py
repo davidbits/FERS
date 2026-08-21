@@ -40,19 +40,24 @@ def load_iq(path):
         fs = float(h5.attrs["sampling_rate"])
         start_time = float(h5.attrs["start_time"])
         fullscale = float(h5.attrs["fullscale"])
-        metadata = json.loads(attr_text(h5.attrs, "fers_metadata_json"))
         iq = (h5["I_data"][:] + 1j * h5["Q_data"][:]) * fullscale
 
         assert attr_text(h5.attrs, "data_mode") == "sfcw"
-        assert int(h5.attrs["sfcw_step_count"]) == STEP_COUNT
-        assert int(h5.attrs["sfcw_sweep_count"]) == SWEEP_COUNT
-        assert int(h5.attrs["sfcw_source_count"]) == 1
-        assert np.isclose(float(h5.attrs["sfcw_step_size"]), STEP_SIZE_HZ)
-        assert np.isclose(float(h5.attrs["sfcw_dwell_time"]), DWELL_TIME_S)
-        assert np.isclose(float(h5.attrs["sfcw_step_period"]), STEP_PERIOD_S)
-        assert metadata["mode"] == "sfcw"
-        assert metadata["sfcw"]["step_count"] == STEP_COUNT
-        assert metadata["sfcw"]["sweep_count"] == SWEEP_COUNT
+        sfcw_group = h5["metadata/sfcw"]
+        assert int(sfcw_group.attrs["source_count"]) == 1
+        source_group = sfcw_group["sources/source_0"]
+        waveform = source_group["waveform"].attrs
+        assert int(waveform["step_count"]) == STEP_COUNT
+        assert int(waveform["sweep_count"]) == SWEEP_COUNT
+        assert np.isclose(float(waveform["step_size"]), STEP_SIZE_HZ)
+        assert np.isclose(float(waveform["dwell_time"]), DWELL_TIME_S)
+        assert np.isclose(float(waveform["step_period"]), STEP_PERIOD_S)
+        metadata = {
+            "mode": attr_text(h5.attrs, "data_mode"),
+            "range_resolution": float(waveform["range_resolution"]),
+            "unambiguous_range": float(waveform["unambiguous_range"]),
+            "effective_bandwidth": float(waveform["effective_bandwidth"]),
+        }
 
     if fullscale <= 0.0:
         raise ValueError("simulation produced an all-zero SFCW result")
@@ -116,8 +121,8 @@ def main():
     peak_index = int(np.argmax(magnitude_db))
     estimated_range = float(ranges[peak_index])
     range_error = abs(estimated_range - TARGET_RANGE_M)
-    resolution = float(metadata["sfcw"]["range_resolution"])
-    unambiguous = float(metadata["sfcw"]["unambiguous_range"])
+    resolution = metadata["range_resolution"]
+    unambiguous = metadata["unambiguous_range"]
 
     print("Monostatic SFCW verification")
     print(f"Samples: {len(iq)} at {fs:.1f} Hz, fullscale={fullscale:.6e}")
@@ -142,7 +147,7 @@ def main():
         "range_error_m": range_error,
         "range_resolution_m": resolution,
         "unambiguous_range_m": unambiguous,
-        "effective_bandwidth_hz": float(metadata["sfcw"]["effective_bandwidth"]),
+        "effective_bandwidth_hz": metadata["effective_bandwidth"],
     }
     summary_path = output_dir / SUMMARY_FILE
     summary_path.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n")

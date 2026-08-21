@@ -236,6 +236,73 @@ namespace serial
 			file.createAttribute("sfcw_effective_bandwidth", sfcw.effective_bandwidth);
 			file.createAttribute("sfcw_range_resolution", sfcw.range_resolution);
 			file.createAttribute("sfcw_unambiguous_range", sfcw.unambiguous_range);
+			file.createAttribute("sfcw_flat_attributes_are_summary", true);
+		}
+
+		void writeSfcwWaveformGroup(HighFive::Group& group, const core::SfcwMetadata& waveform)
+		{
+			group.createAttribute("carrier_frequency", waveform.carrier_frequency);
+			group.createAttribute("start_frequency_offset", waveform.start_frequency_offset);
+			group.createAttribute("step_size", waveform.step_size);
+			group.createAttribute("step_count", static_cast<unsigned long long>(waveform.step_count));
+			group.createAttribute("dwell_time", waveform.dwell_time);
+			group.createAttribute("step_period", waveform.step_period);
+			if (waveform.sweep_count.has_value())
+			{
+				group.createAttribute("sweep_count", static_cast<unsigned long long>(*waveform.sweep_count));
+			}
+			group.createAttribute("first_frequency", waveform.first_frequency);
+			group.createAttribute("last_frequency", waveform.last_frequency);
+			group.createAttribute("frequency_span", waveform.frequency_span);
+			group.createAttribute("effective_bandwidth", waveform.effective_bandwidth);
+			group.createAttribute("range_resolution", waveform.range_resolution);
+			group.createAttribute("unambiguous_range", waveform.unambiguous_range);
+		}
+
+		void writeNestedSfcwMetadata(HighFive::File& file, const core::OutputFileMetadata& metadata)
+		{
+			if (metadata.sfcw_sources.empty())
+			{
+				return;
+			}
+
+			auto metadata_group = file.createGroup("/metadata");
+			auto sfcw_group = metadata_group.createGroup("sfcw");
+			sfcw_group.createAttribute("schema_version", 1U);
+			sfcw_group.createAttribute("source_count", static_cast<unsigned long long>(metadata.sfcw_sources.size()));
+			auto sources_group = sfcw_group.createGroup("sources");
+			for (std::size_t source_index = 0; source_index < metadata.sfcw_sources.size(); ++source_index)
+			{
+				const auto& source = metadata.sfcw_sources[source_index];
+				auto source_group = sources_group.createGroup("source_" + std::to_string(source_index));
+				source_group.createAttribute("transmitter_id", static_cast<unsigned long long>(source.transmitter_id));
+				source_group.createAttribute("transmitter_name", source.transmitter_name);
+				source_group.createAttribute("waveform_id", static_cast<unsigned long long>(source.waveform_id));
+				source_group.createAttribute("waveform_name", source.waveform_name);
+
+				auto waveform_group = source_group.createGroup("waveform");
+				writeSfcwWaveformGroup(waveform_group, source.waveform);
+
+				auto segments_group = source_group.createGroup("segments");
+				segments_group.createAttribute("count", static_cast<unsigned long long>(source.segments.size()));
+				for (std::size_t segment_index = 0; segment_index < source.segments.size(); ++segment_index)
+				{
+					const auto& segment = source.segments[segment_index];
+					auto segment_group = segments_group.createGroup("segment_" + std::to_string(segment_index));
+					segment_group.createAttribute("start_time", segment.start_time);
+					segment_group.createAttribute("end_time", segment.end_time);
+					if (segment.first_step_start_time.has_value())
+					{
+						segment_group.createAttribute("first_step_start_time", *segment.first_step_start_time);
+					}
+					if (segment.emitted_step_count.has_value())
+					{
+						segment_group.createAttribute("emitted_step_count",
+													  static_cast<unsigned long long>(*segment.emitted_step_count));
+					}
+				}
+			}
+			file.createAttribute("sfcw_metadata_path", std::string("/metadata/sfcw"));
 		}
 	}
 
@@ -246,6 +313,7 @@ namespace serial
 		writeDechirpReferenceAttributes(file, metadata);
 		writeFmcwAttributes(file, metadata);
 		writeSfcwAttributes(file, metadata);
+		writeNestedSfcwMetadata(file, metadata);
 	}
 
 	void readPulseData(const std::string& name, std::vector<ComplexType>& data)
