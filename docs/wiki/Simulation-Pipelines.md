@@ -186,6 +186,7 @@ Important CW settings:
 | Antenna patterns and platform rotation | Directional gain over time. |
 | `nodirect` | Removes direct transmitter-to-receiver path. |
 | `nopropagationloss` | Removes path-loss scaling for debugging. |
+| `<cwSimSamplingRate>` | The CW analogue of `<simSamplingRate>`. Sets the propagation/geometry sampling rate. |
 
 ## FMCW Pipeline Without Built-In Dechirp
 

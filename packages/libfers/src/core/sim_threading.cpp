@@ -18,7 +18,6 @@
 
 #include <algorithm>
 #include <array>
-#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <complex>
@@ -27,8 +26,10 @@
 #include <format>
 #include <limits>
 #include <optional>
+#include <unordered_map>
 #include <utility>
 
+#include "core/simulation_state.h"
 #include "logging.h"
 #include "math/path_utils.h"
 #include "memory_projection.h"
@@ -36,8 +37,10 @@
 #include "processing/finalizer.h"
 #include "processing/finalizer_pipeline.h"
 #include "processing/signal_processor.h"
+#include "propagation/pointscatter/pointscatter.h"
+#include "propagation/propagation_model.h"
+#include "propagation/raytracing/raytracing_model.h"
 #include "radar/receiver.h"
-#include "radar/target.h"
 #include "radar/transmitter.h"
 #include "serial/hdf5_output_sink.h"
 #include "serial/response.h"
@@ -47,7 +50,6 @@
 #include "sim_events.h"
 #include "simulation/channel_model.h"
 #include "thread_pool.h"
-#include "timing/timing.h"
 #include "world.h"
 
 using logging::Level;
@@ -66,6 +68,20 @@ namespace core
 		{
 			return static_cast<std::size_t>(
 				std::ceil(std::max<RealType>(0.0, params::endTime() - params::startTime()) * sample_rate));
+		}
+
+		[[nodiscard]] std::shared_ptr<propagation::PropagationModel> makePropagationModel(World* world,
+																						  pool::ThreadPool& pool)
+		{
+			switch (params::propagationModel())
+			{
+			case params::PropagationModelKind::SbrRayTracing:
+				return std::make_shared<propagation::raytracing::RayTracingModel>(
+					world, params::rayTracingEnginePreference(), pool);
+			case params::PropagationModelKind::RcsPointScatter:
+			default:
+				return std::make_shared<propagation::pointscatter::PointScatterModel>(world);
+			}
 		}
 
 		[[nodiscard]] Vita49StreamMetadata streamStatsToMetadata(const ReceiverStreamStats& stats)
@@ -95,7 +111,7 @@ namespace core
 			return count.has_value() ? std::format("{}", *count) : std::string("unbounded");
 		}
 
-		void logUnscheduledFmcwChirpSummary(const Transmitter& transmitter, const fers_signal::FmcwChirpSignal& fmcw,
+		void logUnscheduledFmcwChirpSummary(const Transmitter& transmitter, const fers_signal::FmcwChirpWaveform& fmcw,
 											const std::string& direction, const std::string& configured_count,
 											const RealType duty_cycle, const RealType average_power)
 		{
@@ -110,7 +126,7 @@ namespace core
 				configured_count, total_chirp_count, average_power);
 		}
 
-		void logScheduledFmcwChirpSummary(const Transmitter& transmitter, const fers_signal::FmcwChirpSignal& fmcw,
+		void logScheduledFmcwChirpSummary(const Transmitter& transmitter, const fers_signal::FmcwChirpWaveform& fmcw,
 										  const std::string& direction, const std::string& configured_count,
 										  const RealType duty_cycle, const RealType average_power)
 		{
@@ -133,7 +149,7 @@ namespace core
 		}
 
 		void logFmcwChirpSummary(const Transmitter& transmitter, const fers_signal::RadarSignal& waveform,
-								 const fers_signal::FmcwChirpSignal& fmcw)
+								 const fers_signal::FmcwChirpWaveform& fmcw)
 		{
 			const RealType duty_cycle = fmcw.getChirpDuration() / fmcw.getChirpPeriod();
 			const RealType average_power = waveform.getPower() * duty_cycle;
@@ -149,7 +165,7 @@ namespace core
 		}
 
 		void logUnscheduledFmcwTriangleSummary(const Transmitter& transmitter,
-											   const fers_signal::FmcwTriangleSignal& triangle,
+											   const fers_signal::FmcwTriangleWaveform& triangle,
 											   const std::string& configured_count, const RealType average_power)
 		{
 			const RealType active_start = params::startTime();
@@ -164,7 +180,7 @@ namespace core
 		}
 
 		void logScheduledFmcwTriangleSummary(const Transmitter& transmitter,
-											 const fers_signal::FmcwTriangleSignal& triangle,
+											 const fers_signal::FmcwTriangleWaveform& triangle,
 											 const std::string& configured_count, const RealType average_power)
 		{
 			std::uint64_t total_triangle_count = 0;
@@ -187,7 +203,7 @@ namespace core
 		}
 
 		void logFmcwTriangleSummary(const Transmitter& transmitter, const fers_signal::RadarSignal& waveform,
-									const fers_signal::FmcwTriangleSignal& triangle)
+									const fers_signal::FmcwTriangleWaveform& triangle)
 		{
 			const RealType average_power = waveform.getPower();
 			const auto configured_count = fmcwCountToken(triangle.getTriangleCount());
@@ -200,9 +216,8 @@ namespace core
 		}
 
 		void logUnscheduledSfcwSummary(const Transmitter& transmitter, const fers_signal::RadarSignal& waveform,
-									   const fers_signal::SteppedFrequencySignal& sfcw,
-									   const std::string& configured_count, const RealType duty_cycle,
-									   const RealType average_power)
+									   const fers_signal::SfcwWaveform& sfcw, const std::string& configured_count,
+									   const RealType duty_cycle, const RealType average_power)
 		{
 			const RealType active_start = params::startTime();
 			const auto source = makeActiveSource(&transmitter, active_start, params::endTime());
@@ -219,9 +234,8 @@ namespace core
 		}
 
 		void logScheduledSfcwSummary(const Transmitter& transmitter, const fers_signal::RadarSignal& waveform,
-									 const fers_signal::SteppedFrequencySignal& sfcw,
-									 const std::string& configured_count, const RealType duty_cycle,
-									 const RealType average_power)
+									 const fers_signal::SfcwWaveform& sfcw, const std::string& configured_count,
+									 const RealType duty_cycle, const RealType average_power)
 		{
 			std::uint64_t total_step_count = 0;
 			for (const auto& period : transmitter.getSchedule())
@@ -246,7 +260,7 @@ namespace core
 		}
 
 		void logSfcwSummary(const Transmitter& transmitter, const fers_signal::RadarSignal& waveform,
-							const fers_signal::SteppedFrequencySignal& sfcw)
+							const fers_signal::SfcwWaveform& sfcw)
 		{
 			const RealType duty_cycle = sfcw.getDwellTime() / sfcw.getStepPeriod();
 			const RealType average_power = waveform.getPower() * duty_cycle;
@@ -324,19 +338,6 @@ namespace core
 			bounds.max.z = std::max(bounds.max.z, point.z);
 		}
 
-		[[nodiscard]] RealType axisValue(const math::Vec3& point, const std::size_t axis) noexcept
-		{
-			switch (axis)
-			{
-			case 0:
-				return point.x;
-			case 1:
-				return point.y;
-			default:
-				return point.z;
-			}
-		}
-
 		[[nodiscard]] RealType axisValue(const std::array<RealType, 3>& values, const std::size_t axis) noexcept
 		{
 			switch (axis)
@@ -348,41 +349,6 @@ namespace core
 			default:
 				return values[2];
 			}
-		}
-
-		[[nodiscard]] RealType& axisValue(std::array<RealType, 3>& values, const std::size_t axis) noexcept
-		{
-			switch (axis)
-			{
-			case 0:
-				return values[0];
-			case 1:
-				return values[1];
-			default:
-				return values[2];
-			}
-		}
-
-		[[nodiscard]] RealType axisDistanceBound(const PositionBounds& lhs, const PositionBounds& rhs,
-												 const std::size_t axis) noexcept
-		{
-			const RealType lhs_min = axisValue(lhs.min, axis);
-			const RealType lhs_max = axisValue(lhs.max, axis);
-			const RealType rhs_min = axisValue(rhs.min, axis);
-			const RealType rhs_max = axisValue(rhs.max, axis);
-			return std::max(std::abs(lhs_max - rhs_min), std::abs(rhs_max - lhs_min));
-		}
-
-		[[nodiscard]] RealType maxDistanceBetweenBounds(const PositionBounds& lhs, const PositionBounds& rhs) noexcept
-		{
-			if (lhs.unbounded || rhs.unbounded || !lhs.valid || !rhs.valid)
-			{
-				return std::numeric_limits<RealType>::infinity();
-			}
-			const RealType dx = axisDistanceBound(lhs, rhs, 0);
-			const RealType dy = axisDistanceBound(lhs, rhs, 1);
-			const RealType dz = axisDistanceBound(lhs, rhs, 2);
-			return std::sqrt(dx * dx + dy * dy + dz * dz);
 		}
 
 		[[nodiscard]] std::array<RealType, 3> coordinateAxes(const math::Coord& coord) noexcept
@@ -521,260 +487,6 @@ namespace core
 			return bounds;
 		}
 
-		struct QuadraticVelocityExtremum
-		{
-			RealType a;
-			RealType b;
-			RealType c;
-			RealType segment_length;
-			RealType root_u;
-			RealType lower_u;
-			RealType upper_u;
-		};
-
-		void includeQuadraticVelocityExtremum(std::array<RealType, 3>& max_abs_velocity, const std::size_t axis,
-											  const QuadraticVelocityExtremum& extremum) noexcept
-		{
-			if (extremum.root_u < extremum.lower_u || extremum.root_u > extremum.upper_u ||
-				extremum.segment_length <= EPSILON)
-			{
-				return;
-			}
-			const RealType velocity =
-				(extremum.a * extremum.root_u * extremum.root_u + extremum.b * extremum.root_u + extremum.c) /
-				extremum.segment_length;
-			if (std::isfinite(velocity))
-			{
-				RealType& axis_max_velocity = axisValue(max_abs_velocity, axis);
-				axis_max_velocity = std::max(axis_max_velocity, std::abs(velocity));
-			}
-			else
-			{
-				axisValue(max_abs_velocity, axis) = std::numeric_limits<RealType>::infinity();
-			}
-		}
-
-		void includeCubicVelocityBounds(std::array<RealType, 3>& max_abs_velocity,
-										const std::vector<math::Coord>& coords,
-										const std::vector<math::Coord>& second_derivatives, const std::size_t index,
-										const RealType lower_u, const RealType upper_u)
-		{
-			const RealType segment_length = coords[index + 1].t - coords[index].t;
-			if (segment_length <= EPSILON)
-			{
-				return;
-			}
-			const auto left = coordinateAxes(coords[index]);
-			const auto right = coordinateAxes(coords[index + 1]);
-			const auto dd_left = coordinateAxes(second_derivatives[index]);
-			const auto dd_right = coordinateAxes(second_derivatives[index + 1]);
-			const RealType h2 = segment_length * segment_length;
-
-			for (std::size_t axis = 0; axis < 3; ++axis)
-			{
-				const RealType dd_right_axis = axisValue(dd_right, axis);
-				const RealType dd_left_axis = axisValue(dd_left, axis);
-				const RealType a = 0.5 * h2 * (dd_right_axis - dd_left_axis);
-				const RealType b = h2 * dd_left_axis;
-				const RealType c = (axisValue(right, axis) - axisValue(left, axis)) +
-					(h2 / 6.0) * (-2.0 * dd_left_axis - dd_right_axis);
-				includeQuadraticVelocityExtremum(max_abs_velocity, axis,
-												 QuadraticVelocityExtremum{.a = a,
-																		   .b = b,
-																		   .c = c,
-																		   .segment_length = segment_length,
-																		   .root_u = lower_u,
-																		   .lower_u = lower_u,
-																		   .upper_u = upper_u});
-				includeQuadraticVelocityExtremum(max_abs_velocity, axis,
-												 QuadraticVelocityExtremum{.a = a,
-																		   .b = b,
-																		   .c = c,
-																		   .segment_length = segment_length,
-																		   .root_u = upper_u,
-																		   .lower_u = lower_u,
-																		   .upper_u = upper_u});
-
-				if (std::abs(a) > EPSILON)
-				{
-					includeQuadraticVelocityExtremum(max_abs_velocity, axis,
-													 QuadraticVelocityExtremum{.a = a,
-																			   .b = b,
-																			   .c = c,
-																			   .segment_length = segment_length,
-																			   .root_u = -b / (2.0 * a),
-																			   .lower_u = lower_u,
-																			   .upper_u = upper_u});
-				}
-			}
-		}
-
-		[[nodiscard]] RealType pathSpeedBound(const math::Path& path, const RealType start, const RealType end)
-		{
-			if (start >= end)
-			{
-				return 0.0;
-			}
-
-			const auto& coords = path.getCoords();
-			if (coords.empty() || path.getType() == math::Path::InterpType::INTERP_STATIC || coords.size() < 2)
-			{
-				return 0.0;
-			}
-
-			if (path.getType() == math::Path::InterpType::INTERP_LINEAR)
-			{
-				RealType max_speed = 0.0;
-				for (std::size_t index = 0; index + 1 < coords.size(); ++index)
-				{
-					const RealType segment_start = coords[index].t;
-					const RealType segment_end = coords[index + 1].t;
-					const RealType segment_length = segment_end - segment_start;
-					if (segment_length <= EPSILON || end < segment_start || start > segment_end)
-					{
-						continue;
-					}
-					max_speed =
-						std::max(max_speed, (coords[index + 1].pos - coords[index].pos).length() / segment_length);
-				}
-				return max_speed;
-			}
-
-			std::vector<math::Coord> second_derivatives;
-			try
-			{
-				finalizeCubic<math::Coord>(coords, second_derivatives);
-			}
-			catch (const math::PathException&)
-			{
-				return std::numeric_limits<RealType>::infinity();
-			}
-
-			std::array<RealType, 3> max_abs_velocity{0.0, 0.0, 0.0};
-			for (std::size_t index = 0; index + 1 < coords.size(); ++index)
-			{
-				const RealType segment_start = coords[index].t;
-				const RealType segment_end = coords[index + 1].t;
-				const RealType segment_length = segment_end - segment_start;
-				if (segment_length <= EPSILON || end < segment_start || start > segment_end)
-				{
-					continue;
-				}
-				const RealType lower_u =
-					std::clamp((std::max(start, segment_start) - segment_start) / segment_length, 0.0, 1.0);
-				const RealType upper_u =
-					std::clamp((std::min(end, segment_end) - segment_start) / segment_length, 0.0, 1.0);
-				if (lower_u <= upper_u)
-				{
-					includeCubicVelocityBounds(max_abs_velocity, coords, second_derivatives, index, lower_u, upper_u);
-				}
-			}
-			return std::sqrt(max_abs_velocity[0] * max_abs_velocity[0] + max_abs_velocity[1] * max_abs_velocity[1] +
-							 max_abs_velocity[2] * max_abs_velocity[2]);
-		}
-
-		[[nodiscard]] std::optional<RealType>
-		deadlineFromTailKinematics(const RealType tail_end, const RealType interval_start, const RealType interval_end,
-								   const RealType delay_at_start, const RealType distance_rate_bound,
-								   const RealType max_delay_bound)
-		{
-			const RealType propagation_speed = params::c();
-			if (propagation_speed <= 0.0 || interval_start >= interval_end)
-			{
-				return std::nullopt;
-			}
-
-			if (std::isfinite(distance_rate_bound) && distance_rate_bound < propagation_speed)
-			{
-				const RealType retarded_start = interval_start - delay_at_start;
-				if (retarded_start >= tail_end)
-				{
-					return std::nullopt;
-				}
-
-				const RealType min_retarded_slope = 1.0 - distance_rate_bound / propagation_speed;
-				const RealType deadline = interval_start + (tail_end - retarded_start) / min_retarded_slope;
-				if (deadline <= interval_start)
-				{
-					return std::nullopt;
-				}
-				return std::min(interval_end, deadline);
-			}
-
-			if (!std::isfinite(max_delay_bound))
-			{
-				return interval_end;
-			}
-			const RealType deadline = std::min(interval_end, tail_end + max_delay_bound);
-			if (deadline <= interval_start)
-			{
-				return std::nullopt;
-			}
-			return deadline;
-		}
-
-		[[nodiscard]] std::optional<RealType> directPathCleanupDeadline(const ActiveStreamingSource& source,
-																		const Receiver* const rx,
-																		const RealType interval_start,
-																		const RealType interval_end)
-		{
-			const auto* const tx = source.transmitter;
-			if (tx == nullptr || rx == nullptr || tx->getPlatform() == rx->getPlatform() || params::c() <= 0.0)
-			{
-				return std::nullopt;
-			}
-
-			const auto* const tx_path = tx->getPlatform()->getMotionPath();
-			const auto* const rx_path = rx->getPlatform()->getMotionPath();
-			const RealType distance_at_start =
-				(rx_path->getPosition(interval_start) - tx_path->getPosition(interval_start)).length();
-			const RealType max_delay_bound =
-				maxDistanceBetweenBounds(pathPositionBounds(*tx_path, interval_start, interval_end),
-										 pathPositionBounds(*rx_path, interval_start, interval_end)) /
-				params::c();
-			const RealType distance_rate_bound = pathSpeedBound(*tx_path, interval_start, interval_end) +
-				pathSpeedBound(*rx_path, interval_start, interval_end);
-			return deadlineFromTailKinematics(source.segment_end, interval_start, interval_end,
-											  distance_at_start / params::c(), distance_rate_bound, max_delay_bound);
-		}
-
-		[[nodiscard]] std::optional<RealType> reflectedPathCleanupDeadline(const ActiveStreamingSource& source,
-																		   const Receiver* const rx,
-																		   const radar::Target* const target,
-																		   const RealType interval_start,
-																		   const RealType interval_end)
-		{
-			const auto* const tx = source.transmitter;
-			if (tx == nullptr || rx == nullptr || target == nullptr || params::c() <= 0.0 ||
-				tx->getPlatform() == target->getPlatform() || rx->getPlatform() == target->getPlatform())
-			{
-				return std::nullopt;
-			}
-
-			const auto* const tx_path = tx->getPlatform()->getMotionPath();
-			const auto* const rx_path = rx->getPlatform()->getMotionPath();
-			const auto* const target_path = target->getPlatform()->getMotionPath();
-			const auto tx_position = tx_path->getPosition(interval_start);
-			const auto rx_position = rx_path->getPosition(interval_start);
-			const auto target_position = target_path->getPosition(interval_start);
-			const RealType distance_at_start =
-				(target_position - tx_position).length() + (rx_position - target_position).length();
-
-			const PositionBounds tx_bounds = pathPositionBounds(*tx_path, interval_start, interval_end);
-			const PositionBounds rx_bounds = pathPositionBounds(*rx_path, interval_start, interval_end);
-			const PositionBounds target_bounds = pathPositionBounds(*target_path, interval_start, interval_end);
-			const RealType max_delay_bound = (maxDistanceBetweenBounds(tx_bounds, target_bounds) +
-											  maxDistanceBetweenBounds(target_bounds, rx_bounds)) /
-				params::c();
-			const RealType tx_speed = pathSpeedBound(*tx_path, interval_start, interval_end);
-			const RealType rx_speed = pathSpeedBound(*rx_path, interval_start, interval_end);
-			const RealType target_speed = pathSpeedBound(*target_path, interval_start, interval_end);
-			const RealType distance_rate_bound = tx_speed + rx_speed + 2.0 * target_speed;
-
-			return deadlineFromTailKinematics(source.segment_end, interval_start, interval_end,
-											  distance_at_start / params::c(), distance_rate_bound, max_delay_bound);
-		}
-
 		/// Builds an active streaming source for a transmitter at an event timestamp.
 		std::optional<ActiveStreamingSource> streamingSourceAtEvent(const Transmitter* const transmitter,
 																	const RealType timestamp,
@@ -818,12 +530,15 @@ namespace core
 									   std::shared_ptr<OutputMetadataCollector> metadata_collector,
 									   ReceiverOutputSink* output_sink, std::function<bool()> cancel_callback,
 									   const bool eager_context_stream_open) :
-		_world(world), _pool(pool), _reporter(std::move(reporter)), _metadata_collector(std::move(metadata_collector)),
-		_output_sink(output_sink), _cancel_callback(std::move(cancel_callback)),
-		_eager_context_stream_open(eager_context_stream_open), _last_report_time(std::chrono::steady_clock::now()),
-		_next_context_heartbeat_time(params::startTime() + 1.0), _output_dir(std::move(output_dir)),
-		_internal_stop_time(params::endTime())
+		_world(world), _pool(pool), _propagation(makePropagationModel(world, pool)), _reporter(std::move(reporter)),
+		_metadata_collector(std::move(metadata_collector)), _output_sink(output_sink),
+		_cancel_callback(std::move(cancel_callback)), _eager_context_stream_open(eager_context_stream_open),
+		_last_report_time(std::chrono::steady_clock::now()), _next_context_heartbeat_time(params::startTime() + 1.0),
+		_output_dir(std::move(output_dir)), _internal_stop_time(params::endTime()),
+		_world_bounding_diameter(computeWorldBoundingDiameter())
 	{
+		_main_prop_ctx = _propagation->makeThreadContext();
+
 		_streaming_tracker_caches.resize(_world->getReceivers().size());
 		_if_pulse_tracker_caches.resize(_world->getReceivers().size());
 		_fmcw_if_block_buffers.resize(_world->getReceivers().size());
@@ -915,15 +630,15 @@ namespace core
 				continue;
 			}
 
-			if (const auto* fmcw = waveform->getFmcwChirpSignal(); fmcw != nullptr)
+			if (const auto* fmcw = waveform->getFmcwChirpWaveform(); fmcw != nullptr)
 			{
 				logFmcwChirpSummary(*transmitter_ptr, *waveform, *fmcw);
 			}
-			else if (const auto* triangle = waveform->getFmcwTriangleSignal(); triangle != nullptr)
+			else if (const auto* triangle = waveform->getFmcwTriangleWaveform(); triangle != nullptr)
 			{
 				logFmcwTriangleSummary(*transmitter_ptr, *waveform, *triangle);
 			}
-			else if (const auto* sfcw = waveform->getSteppedFrequencySignal(); sfcw != nullptr)
+			else if (const auto* sfcw = waveform->getSfcwWaveform(); sfcw != nullptr)
 			{
 				logSfcwSummary(*transmitter_ptr, *waveform, *sfcw);
 			}
@@ -940,9 +655,8 @@ namespace core
 		{
 			if (receiver_ptr->getMode() == OperationMode::PULSED_MODE)
 			{
-				_finalizer_threads.emplace_back(processing::runPulsedFinalizer, receiver_ptr.get(),
-												&_world->getTargets(), _reporter, _output_dir, _metadata_collector,
-												_output_sink);
+				_finalizer_threads.emplace_back(processing::runPulsedFinalizer, receiver_ptr.get(), _propagation,
+												_reporter, _output_dir, _metadata_collector, _output_sink);
 			}
 		}
 	}
@@ -1077,63 +791,31 @@ namespace core
 		const auto sample_count = final_index - first_index;
 		const auto progress_report_stride = std::max<std::size_t>(1, sample_count / 1000);
 
+		// CW coarse sampling's lookahead queries must never cross this chunk's own end: the
+		// active source/receiver set is only guaranteed stable up to `t_event` (the next unprocessed
+		// event may change it), so a query at or past `t_event` would risk using stale state.
+		_coarse_chunk_end_time = t_event;
+
 		ensureCwPhaseNoiseLookup();
 
-		while (t_current < t_event && !isCancellationRequested())
+		if (!isCancellationRequested())
 		{
 			cleanupInactiveStreamingSources(t_current);
 
-			const RealType chunk_end = streamingChunkEnd(t_current, t_event);
-			if (chunk_end <= t_current)
+			for (std::size_t sample_index = first_index; sample_index < final_index; ++sample_index)
 			{
-				break;
-			}
-
-			const auto start_index = streamingSampleIndexAtOrAfter(t_current, dt_sim);
-			const auto end_index = streamingSampleIndexAtOrAfter(chunk_end, dt_sim);
-			for (size_t sample_index = start_index; sample_index < end_index; ++sample_index)
-			{
-				if (shouldStopStreamingChunk(sample_index, start_index))
+				if (shouldStopStreamingChunk(sample_index, first_index))
 				{
 					break;
 				}
 				processStreamingSample(sample_index, first_index, final_index, progress_report_stride, dt_sim);
 			}
 
-			t_current = chunk_end;
+			t_current = t_event;
 			emitContextHeartbeatsThrough(t_current);
 		}
+
 		cleanupInactiveStreamingSources(t_current);
-	}
-
-	std::optional<RealType> SimulationEngine::nextStreamingCleanupDeadline(const RealType from_time)
-	{
-		const auto& active_streaming_transmitters = _world->getSimulationState().active_streaming_transmitters;
-		std::optional<RealType> next_deadline;
-		for (const auto& source : active_streaming_transmitters)
-		{
-			if (source.segment_end > from_time)
-			{
-				continue;
-			}
-			const auto cleanup_deadline = streamingSourceCleanupDeadline(source, from_time);
-			if (cleanup_deadline.has_value() && *cleanup_deadline > from_time &&
-				(!next_deadline.has_value() || *cleanup_deadline < *next_deadline))
-			{
-				next_deadline = cleanup_deadline;
-			}
-		}
-		return next_deadline;
-	}
-
-	RealType SimulationEngine::streamingChunkEnd(const RealType from_time, const RealType event_time)
-	{
-		if (const auto cleanup_deadline = nextStreamingCleanupDeadline(from_time);
-			cleanup_deadline.has_value() && *cleanup_deadline < event_time)
-		{
-			return *cleanup_deadline;
-		}
-		return event_time;
 	}
 
 	bool SimulationEngine::shouldStopStreamingChunk(const std::size_t sample_index, const std::size_t chunk_start_index)
@@ -1158,12 +840,122 @@ namespace core
 		}
 	}
 
+	std::unordered_map<radar::Receiver*, std::vector<propagation::PropagationPath>>
+	SimulationEngine::tracePathsByReceiver(const std::vector<radar::Receiver*>& live_receivers,
+										   const std::vector<std::size_t>& live_receiver_indices,
+										   const std::vector<ActiveStreamingSource>& sources, const RealType t_step)
+	{
+		const auto coarse_rate = params::cwSimSamplingRate();
+		if (!coarse_rate.has_value())
+		{
+			return _propagation->traceFromReceivers(_main_prop_ctx.get(), live_receivers, sources, t_step);
+		}
+
+		// Coarse CW sampling: only re-query the scene once per coarse tick (shared across every
+		// live receiver), then linearly interpolate each receiver's cached paths between the two
+		// bracketing coarse samples for every full-rate sample in between. The bracket's "hi" end
+		// must already be queried before any sample within it is rendered, so this looks one tick
+		// ahead rather than reacting once `t_step` reaches it.
+		const RealType coarse_dt = 1.0 / *coarse_rate;
+		const auto floorTickTime = [coarse_dt](const RealType time)
+		{ return params::startTime() + std::floor((time - params::startTime()) / coarse_dt) * coarse_dt; };
+
+		const auto queryAndUpdate = [&](const RealType interval_start_time, const RealType sample_time)
+		{
+			const auto fresh_paths_by_receiver =
+				_propagation->traceFromReceivers(_main_prop_ctx.get(), live_receivers, sources, sample_time);
+
+			const std::vector<propagation::PropagationPath> no_fresh_paths;
+			for (std::size_t i = 0; i < live_receivers.size(); ++i)
+			{
+				const auto it = fresh_paths_by_receiver.find(live_receivers[i]);
+				simulation::updateCoarseStreamingCache(_streaming_tracker_caches[live_receiver_indices[i]],
+													   it != fresh_paths_by_receiver.end() ? it->second
+																						   : no_fresh_paths,
+													   interval_start_time, sample_time);
+			}
+		};
+
+		if (!_coarse_hi_time.has_value())
+		{
+			// Bootstrap: the first bracket is a degenerate zero-width one (lo == hi); the loop
+			// below immediately extends it.
+			const RealType lo_time = floorTickTime(t_step);
+			queryAndUpdate(lo_time, lo_time);
+			_coarse_hi_time = lo_time;
+		}
+
+		while (t_step >= *_coarse_hi_time && *_coarse_hi_time < _coarse_chunk_end_time)
+		{
+			// Jump straight to the tick covering t_step if there's a backlog (e.g. every receiver
+			// was inactive for a stretch), rather than stepping through every intervening tick.
+			const RealType next_time = std::min(
+				std::max(*_coarse_hi_time + coarse_dt, floorTickTime(t_step) + coarse_dt), _coarse_chunk_end_time);
+
+			// The bracket being created here starts where the previous one ended: *_coarse_hi_time.
+			queryAndUpdate(*_coarse_hi_time, next_time);
+			_coarse_hi_time = next_time;
+		}
+
+		std::unordered_map<radar::Receiver*, std::vector<propagation::PropagationPath>> paths_by_receiver;
+		for (std::size_t i = 0; i < live_receivers.size(); ++i)
+		{
+			paths_by_receiver[live_receivers[i]] = simulation::interpolateCoarseStreamingPaths(
+				_streaming_tracker_caches[live_receiver_indices[i]], *live_receivers[i], t_step);
+		}
+		return paths_by_receiver;
+	}
+
 	void SimulationEngine::appendActiveReceiverStreamingSamples(const std::size_t sample_index, const RealType t_step)
 	{
+		const auto& sources = _world->getSimulationState().active_streaming_transmitters;
+		_streaming_source_live_this_sample.assign(sources.size(), false);
+
+		std::vector<radar::Receiver*> live_receivers;
+		std::vector<std::size_t> live_receiver_indices;
+		bool all_streaming_receivers_active = true;
 		for (std::size_t receiver_index = 0; receiver_index < _world->getReceivers().size(); ++receiver_index)
 		{
-			appendReceiverStreamingSample(receiver_index, sample_index, t_step);
+			const auto& receiver_ptr = _world->getReceivers()[receiver_index];
+			if (!isStreamingReceiver(receiver_ptr.get()))
+			{
+				continue;
+			}
+			if (!receiver_ptr->isActive())
+			{
+				all_streaming_receivers_active = false;
+				continue;
+			}
+			live_receivers.push_back(receiver_ptr.get());
+			live_receiver_indices.push_back(receiver_index);
 		}
+
+		// Every receiver live this sample is traced together in a batch against the same scene.
+		std::unordered_map<radar::Receiver*, std::vector<propagation::PropagationPath>> paths_by_receiver;
+		if (!live_receivers.empty())
+		{
+			paths_by_receiver = tracePathsByReceiver(live_receivers, live_receiver_indices, sources, t_step);
+		}
+
+		const std::vector<propagation::PropagationPath> no_paths;
+		for (std::size_t receiver_index = 0; receiver_index < _world->getReceivers().size(); ++receiver_index)
+		{
+			auto* receiver_ptr = _world->getReceivers()[receiver_index].get();
+			const auto it = paths_by_receiver.find(receiver_ptr);
+			appendReceiverStreamingSample(receiver_index, sample_index, t_step,
+										  it != paths_by_receiver.end() ? it->second : no_paths);
+		}
+
+		// Only Tier 2 (exact, per-sample) cleanup when every streaming-mode receiver was actually
+		// queried this sample: if one was inactive (a schedule gap), the absence of a live path this
+		// sample is not evidence the source is dead, since it might have been observed via that
+		// receiver instead. See cleanupInactiveStreamingSources for the coarse fast-path that covers
+		// gaps where no sample is ever processed at all.
+		if (all_streaming_receivers_active)
+		{
+			pruneConfirmedDeadStreamingSources(t_step);
+		}
+
 		if (std::ranges::any_of(_streaming_output_block_buffers,
 								[](const auto& block) { return block.size() >= streaming_output_block_size; }))
 		{
@@ -1172,7 +964,8 @@ namespace core
 	}
 
 	void SimulationEngine::appendReceiverStreamingSample(const std::size_t receiver_index,
-														 const std::size_t sample_index, const RealType t_step)
+														 const std::size_t sample_index, const RealType t_step,
+														 const std::vector<propagation::PropagationPath>& paths)
 	{
 		const auto& receiver_ptr = _world->getReceivers()[receiver_index];
 		if (!isStreamingReceiver(receiver_ptr.get()) || !receiver_ptr->isActive())
@@ -1181,8 +974,9 @@ namespace core
 		}
 
 		const auto& active_streaming_transmitters = _world->getSimulationState().active_streaming_transmitters;
-		ComplexType const sample = calculateStreamingSample(receiver_ptr.get(), t_step, active_streaming_transmitters,
-															_streaming_tracker_caches[receiver_index]);
+		ComplexType const sample =
+			calculateStreamingSample(receiver_ptr.get(), t_step, active_streaming_transmitters, paths,
+									 _streaming_tracker_caches[receiver_index], _streaming_source_live_this_sample);
 		if (receiver_ptr->hasFmcwIfResamplingSink())
 		{
 			appendFmcwIfSample(receiver_index, t_step, sample);
@@ -1538,7 +1332,7 @@ namespace core
 		for (const auto& response : receiver->getPulsedInterferenceLog())
 		{
 			const RealType pulse_rate = response->sampleRate();
-			const unsigned pulse_size = response->sampleCount();
+			const size_t pulse_size = response->sampleCount();
 			if (pulse_rate <= 0.0 || pulse_size == 0)
 			{
 				continue;
@@ -1574,7 +1368,7 @@ namespace core
 		}
 	}
 
-	std::optional<ComplexType> SimulationEngine::calculateDechirpMixer(Receiver* rx, const RealType t_step,
+	std::optional<ComplexType> SimulationEngine::calculateDechirpMixer(Receiver* rx, const RealType rx_time,
 																	   ReceiverTrackerCache& tracker_cache) const
 	{
 		ComplexType reference_sample{0.0, 0.0};
@@ -1584,25 +1378,25 @@ namespace core
 			tracker_cache.dechirp_reference.resize(dechirp_sources.size());
 		}
 
-		if (!tracker_cache.last_dechirp_time.has_value() || t_step < *tracker_cache.last_dechirp_time)
+		if (!tracker_cache.last_dechirp_time.has_value() || rx_time < *tracker_cache.last_dechirp_time)
 		{
 			tracker_cache.active_dechirp_source_index = 0;
 			std::ranges::fill(tracker_cache.dechirp_reference, FmcwChirpBoundaryTracker{});
 		}
-		tracker_cache.last_dechirp_time = t_step;
+		tracker_cache.last_dechirp_time = rx_time;
 
 		bool reference_active = false;
 		auto& source_index = tracker_cache.active_dechirp_source_index;
-		while (source_index < dechirp_sources.size() && t_step >= dechirp_sources[source_index].segment_end)
+		while (source_index < dechirp_sources.size() && rx_time >= dechirp_sources[source_index].segment_end)
 		{
 			++source_index;
 		}
 		if (source_index < dechirp_sources.size())
 		{
 			const auto& reference_source = dechirp_sources[source_index];
-			if (t_step >= reference_source.segment_start && t_step < reference_source.segment_end &&
+			if (rx_time >= reference_source.segment_start && rx_time < reference_source.segment_end &&
 				simulation::calculateStreamingReferenceSample(
-					reference_source, t_step, &tracker_cache.dechirp_reference[source_index], reference_sample))
+					reference_source, rx_time, &tracker_cache.dechirp_reference[source_index], reference_sample))
 			{
 				reference_active = true;
 			}
@@ -1616,20 +1410,22 @@ namespace core
 		RealType receiver_phase = 0.0;
 		if (rx->getDechirpMode() == Receiver::DechirpMode::Physical && _cw_phase_noise_lookup)
 		{
-			receiver_phase = _cw_phase_noise_lookup->sample(rx->getTiming().get(), t_step);
+			receiver_phase = _cw_phase_noise_lookup->sample(rx->getTiming().get(), rx_time);
 		}
 		return reference_sample * std::polar(1.0, receiver_phase);
 	}
 
-	ComplexType SimulationEngine::calculateStreamingSample(Receiver* rx, const RealType t_step,
+	ComplexType SimulationEngine::calculateStreamingSample(Receiver* rx, const RealType rx_time,
 														   const std::vector<ActiveStreamingSource>& streaming_sources,
-														   ReceiverTrackerCache& tracker_cache) const
+														   const std::vector<propagation::PropagationPath>& paths,
+														   ReceiverTrackerCache& tracker_cache,
+														   std::vector<bool>& source_live_this_sample) const
 	{
 		const bool dechirping = rx->isDechirpEnabled();
 		std::optional<ComplexType> dechirp_mixer;
 		if (dechirping)
 		{
-			dechirp_mixer = calculateDechirpMixer(rx, t_step, tracker_cache);
+			dechirp_mixer = calculateDechirpMixer(rx, rx_time, tracker_cache);
 			if (!dechirp_mixer.has_value())
 			{
 				return {0.0, 0.0};
@@ -1642,21 +1438,25 @@ namespace core
 														  : simulation::StreamingTimingPhaseMode::TransmitterOnly);
 
 		ComplexType total_sample{0.0, 0.0};
-		for (std::size_t source_index = 0; source_index < streaming_sources.size(); ++source_index)
+		for (const auto& path : paths)
 		{
-			const auto& streaming_source = streaming_sources[source_index];
-			if (!rx->checkFlag(Receiver::RecvFlag::FLAG_NODIRECT))
+			// Default-initializes the tracker with `initialized=false` if it doesn't already-exist.
+			auto* cache = &tracker_cache.path_trackers[path.source_index][path.path_id];
+
+			total_sample +=
+				simulation::calculateStreamingPathContribution(streaming_sources[path.source_index], rx, path, rx_time,
+															   _cw_phase_noise_lookup.get(), cache, timing_phase_mode);
+
+			// Don't clean up this source. This path's retarded time has not yet moved past the source's
+			// transmit segment end, so it may still be delivering signal now or in the future.
+			if (path.source_index < source_live_this_sample.size())
 			{
-				total_sample += simulation::calculateStreamingDirectPathContribution(
-					streaming_source, rx, t_step, _cw_phase_noise_lookup.get(), &tracker_cache.direct[source_index],
-					timing_phase_mode);
-			}
-			for (std::size_t target_index = 0; target_index < _world->getTargets().size(); ++target_index)
-			{
-				const auto& target_ptr = _world->getTargets()[target_index];
-				total_sample += simulation::calculateStreamingReflectedPathContribution(
-					streaming_source, rx, target_ptr.get(), t_step, _cw_phase_noise_lookup.get(),
-					&tracker_cache.reflected[source_index][target_index], timing_phase_mode);
+				const auto& source = streaming_sources[path.source_index];
+				const RealType t_ret = rx_time - path.delay;
+				if (t_ret < source.segment_end)
+				{
+					source_live_this_sample[path.source_index] = true;
+				}
 			}
 		}
 
@@ -1677,12 +1477,10 @@ namespace core
 
 	void SimulationEngine::appendStreamingTrackerSource()
 	{
-		const std::size_t target_count = _world->getTargets().size();
-
 		for (auto& cache : _streaming_tracker_caches)
 		{
-			cache.direct.emplace_back();
-			cache.reflected.emplace_back(target_count);
+			cache.path_trackers.emplace_back();
+			cache.coarse_path_samples.emplace_back();
 		}
 	}
 
@@ -1690,15 +1488,80 @@ namespace core
 	{
 		for (auto& cache : _streaming_tracker_caches)
 		{
-			if (source_index < cache.direct.size())
+			if (source_index < cache.path_trackers.size())
 			{
-				cache.direct.erase(cache.direct.begin() + static_cast<std::ptrdiff_t>(source_index));
+				cache.path_trackers.erase(cache.path_trackers.begin() + static_cast<std::ptrdiff_t>(source_index));
 			}
-			if (source_index < cache.reflected.size())
+			if (source_index < cache.coarse_path_samples.size())
 			{
-				cache.reflected.erase(cache.reflected.begin() + static_cast<std::ptrdiff_t>(source_index));
+				cache.coarse_path_samples.erase(cache.coarse_path_samples.begin() +
+												static_cast<std::ptrdiff_t>(source_index));
 			}
 		}
+	}
+
+	RealType SimulationEngine::computeWorldBoundingDiameter() const
+	{
+		PositionBounds combined;
+		for (const auto& platform_ptr : _world->getPlatforms())
+		{
+			const auto* path = platform_ptr->getMotionPath();
+			if (path == nullptr)
+			{
+				return std::numeric_limits<RealType>::infinity();
+			}
+			const PositionBounds bounds = pathPositionBounds(*path, params::startTime(), params::endTime());
+			if (bounds.unbounded)
+			{
+				return std::numeric_limits<RealType>::infinity();
+			}
+			if (!bounds.valid)
+			{
+				continue;
+			}
+			includePoint(combined, bounds.min);
+			includePoint(combined, bounds.max);
+		}
+		if (!combined.valid || combined.unbounded)
+		{
+			return std::numeric_limits<RealType>::infinity();
+		}
+		return (combined.max - combined.min).length();
+	}
+
+	RealType SimulationEngine::streamingSourceCoarseCleanupDeadline(const ActiveStreamingSource& source) const
+	{
+		if (params::c() <= 0.0 || !std::isfinite(_world_bounding_diameter))
+		{
+			return std::numeric_limits<RealType>::infinity();
+		}
+		return source.segment_end +
+			(_world_bounding_diameter / params::c()) * static_cast<RealType>(_propagation->maxPropagationLegs());
+	}
+
+	bool SimulationEngine::mightAnyReceiverStillObserve(const RealType from_time, const RealType coarse_deadline) const
+	{
+		for (const auto& receiver_ptr : _world->getReceivers())
+		{
+			const auto* rx = receiver_ptr.get();
+			if (!isStreamingReceiver(rx))
+			{
+				continue;
+			}
+			const auto& schedule = rx->getSchedule();
+			if (schedule.empty())
+			{
+				return true;
+			}
+			for (const auto& period : schedule)
+			{
+				if (period.end > from_time && period.start < coarse_deadline)
+				{
+					return true;
+				}
+			}
+		}
+		return false;
 	}
 
 	void SimulationEngine::cleanupInactiveStreamingSources(const RealType from_time)
@@ -1711,8 +1574,8 @@ namespace core
 			{
 				continue;
 			}
-			const auto cleanup_deadline = streamingSourceCleanupDeadline(sources[index], from_time);
-			if (cleanup_deadline.has_value() && from_time < *cleanup_deadline)
+			const RealType coarse_deadline = streamingSourceCoarseCleanupDeadline(sources[index]);
+			if (from_time < coarse_deadline && mightAnyReceiverStillObserve(from_time, coarse_deadline))
 			{
 				continue;
 			}
@@ -1722,79 +1585,24 @@ namespace core
 		}
 	}
 
-	std::optional<RealType> SimulationEngine::streamingSourceCleanupDeadline(const ActiveStreamingSource& source,
-																			 const RealType from_time) const
+	void SimulationEngine::pruneConfirmedDeadStreamingSources(const RealType t_step)
 	{
-		if (source.transmitter == nullptr || source.carrier_freq <= 0.0)
+		auto& sources = _world->getSimulationState().active_streaming_transmitters;
+		for (std::size_t source_index = sources.size(); source_index > 0; --source_index)
 		{
-			return std::nullopt;
-		}
-
-		std::optional<RealType> latest_deadline;
-		for (const auto& receiver_ptr : _world->getReceivers())
-		{
-			const auto receiver_deadline = receiverCleanupDeadline(source, receiver_ptr.get(), from_time);
-			if (receiver_deadline.has_value() &&
-				(!latest_deadline.has_value() || *receiver_deadline > *latest_deadline))
+			const std::size_t index = source_index - 1;
+			if (sources[index].segment_end > t_step)
 			{
-				latest_deadline = receiver_deadline;
+				continue;
 			}
-		}
-		return latest_deadline;
-	}
-
-	std::optional<RealType> SimulationEngine::receiverCleanupDeadline(const ActiveStreamingSource& source,
-																	  const Receiver* const rx,
-																	  const RealType from_time) const
-	{
-		if (!isStreamingReceiver(rx))
-		{
-			return std::nullopt;
-		}
-
-		const auto update_latest = [](std::optional<RealType>& latest, const std::optional<RealType> candidate)
-		{
-			if (candidate.has_value() && (!latest.has_value() || *candidate > *latest))
+			if (index < _streaming_source_live_this_sample.size() && _streaming_source_live_this_sample[index])
 			{
-				latest = candidate;
-			}
-		};
-
-		const auto interval_deadline = [&](const RealType interval_start,
-										   const RealType interval_end) -> std::optional<RealType>
-		{
-			const RealType start = std::max({params::startTime(), from_time, interval_start});
-			const RealType end = std::min(params::endTime(), interval_end);
-			if (start >= end)
-			{
-				return std::nullopt;
+				continue;
 			}
 
-			std::optional<RealType> latest;
-			if (!rx->checkFlag(Receiver::RecvFlag::FLAG_NODIRECT))
-			{
-				update_latest(latest, directPathCleanupDeadline(source, rx, start, end));
-			}
-			for (const auto& target_ptr : _world->getTargets())
-			{
-				update_latest(latest, reflectedPathCleanupDeadline(source, rx, target_ptr.get(), start, end));
-			}
-			return latest;
-		};
-
-		std::optional<RealType> latest_deadline;
-		const auto& schedule = rx->getSchedule();
-		if (schedule.empty())
-		{
-			update_latest(latest_deadline, interval_deadline(params::startTime(), params::endTime()));
-			return latest_deadline;
+			sources.erase(sources.begin() + static_cast<std::ptrdiff_t>(index));
+			eraseStreamingTrackerSource(index);
 		}
-
-		for (const auto& period : schedule)
-		{
-			update_latest(latest_deadline, interval_deadline(period.start, period.end));
-		}
-		return latest_deadline;
 	}
 
 	void SimulationEngine::processEvent(const Event& event)
@@ -1832,37 +1640,9 @@ namespace core
 		// NOLINTEND(cppcoreguidelines-pro-type-static-cast-downcast)
 	}
 
-	void SimulationEngine::routeResponse(Receiver* rx, std::unique_ptr<serial::Response> response) const
-	{
-		if (!response)
-		{
-			return;
-		}
-		if (rx->getMode() == OperationMode::PULSED_MODE)
-		{
-			rx->addResponseToInbox(std::move(response));
-		}
-		else
-		{
-			rx->addInterferenceToLog(std::move(response));
-		}
-	}
-
 	void SimulationEngine::handleTxPulsedStart(Transmitter* tx, const RealType t_event)
 	{
-		for (const auto& rx_ptr : _world->getReceivers())
-		{
-			if (!rx_ptr->checkFlag(Receiver::RecvFlag::FLAG_NODIRECT))
-			{
-				routeResponse(rx_ptr.get(), simulation::calculateResponse(tx, rx_ptr.get(), tx->getSignal(), t_event));
-			}
-			for (const auto& target_ptr : _world->getTargets())
-			{
-				routeResponse(
-					rx_ptr.get(),
-					simulation::calculateResponse(tx, rx_ptr.get(), tx->getSignal(), t_event, target_ptr.get()));
-			}
-		}
+		simulation::calculateResponses(*tx, t_event, *_propagation, _main_prop_ctx.get());
 
 		const RealType next_theoretical_time = t_event + 1.0 / tx->getPrf();
 		if (const auto next_pulse_opt = tx->getNextPulseTime(next_theoretical_time);

@@ -24,6 +24,7 @@
 #include "core/sim_threading.h"
 #include "processing/finalizer_pipeline.h"
 #include "processing/signal_processor.h"
+#include "propagation/propagation_model.h"
 #include "radar/receiver.h"
 #include "radar/transmitter.h"
 #include "signal/radar_signal.h"
@@ -729,13 +730,20 @@ namespace processing
 			{
 				return;
 			}
+
+			const auto* sampled = signal->getPulseWaveform();
+			if (signal == nullptr)
+			{
+				throw std::logic_error("Passed non-sampled signal to populateWaveformIdentity.");
+			}
+
 			context.waveform_id = signal->getId();
 			context.waveform_name = signal->getName();
 			context.carrier_frequency = signal->getCarrier();
 			context.power = signal->getPower();
-			context.pulse_width = signal->getLength();
-			context.native_sample_rate = signal->getRate();
-			context.native_sample_count = signal->getSampleCount();
+			context.pulse_width = sampled->getDuration();
+			context.native_sample_rate = sampled->getRate();
+			context.native_sample_count = sampled->getSampleCount();
 		}
 
 		void populateWaveformIdentity(core::ReceiverStreamDescriptor::CwContext& context,
@@ -762,7 +770,7 @@ namespace processing
 			context.waveform_name = signal->getName();
 			context.carrier_frequency = signal->getCarrier();
 			context.power = signal->getPower();
-			const auto* sfcw = signal->getSteppedFrequencySignal();
+			const auto* sfcw = signal->getSfcwWaveform();
 			if (sfcw == nullptr)
 			{
 				return;
@@ -908,6 +916,8 @@ namespace processing
 			context.triangle_period = waveform.triangle_period;
 			context.chirp_count = waveform.chirp_count;
 			context.triangle_count = waveform.triangle_count;
+			context.sampled_duration = waveform.sampled_duration;
+			context.sampled_count = waveform.sampled_count;
 			return context;
 		}
 
@@ -1015,7 +1025,8 @@ namespace processing
 										 .file_metadata = std::move(file_metadata)};
 	}
 
-	void runPulsedFinalizer(radar::Receiver* receiver, const std::vector<std::unique_ptr<radar::Target>>* targets,
+	void runPulsedFinalizer(radar::Receiver* receiver,
+							const std::shared_ptr<const propagation::PropagationModel>& prop,
 							const std::shared_ptr<core::ProgressReporter>& reporter, const std::string& output_dir,
 							const std::shared_ptr<core::OutputMetadataCollector>& metadata_collector,
 							core::ReceiverOutputSink* output_sink)
@@ -1043,6 +1054,10 @@ namespace processing
 
 		LOG(logging::Level::INFO, "Finalizer thread started for receiver '{}'. Routing to output sink.",
 			receiver->getName());
+
+		// Create this finaliser thread's propagation model thread context.
+		// This manages its resources with RAII; all we need to do is hold ownership in this thread.
+		auto prop_ctx = prop->makeThreadContext();
 
 		auto last_report_time = std::chrono::steady_clock::now();
 		const auto report_interval = std::chrono::milliseconds(100);
@@ -1074,8 +1089,8 @@ namespace processing
 
 			std::vector<ComplexType> window_buffer(window_samples);
 
-			pipeline::applyStreamingInterference(window_buffer, actual_start, dt, receiver,
-												 job.active_streaming_sources, targets, streaming_tracker_cache);
+			pipeline::applyStreamingInterference(window_buffer, actual_start, dt, *prop, prop_ctx.get(), receiver,
+												 job.active_streaming_sources, streaming_tracker_cache);
 
 			renderWindow(window_buffer, job.duration, actual_start, frac_delay, job.responses);
 

@@ -63,6 +63,9 @@ namespace core
 			std::optional<RealType> triangle_period = std::nullopt;
 			std::optional<std::uint64_t> chirp_count = std::nullopt;
 			std::optional<std::uint64_t> triangle_count = std::nullopt;
+			std::optional<RealType> sampled_duration =
+				std::nullopt; ///< Finite file-backed waveform duration in seconds.
+			std::optional<std::uint64_t> sampled_count = std::nullopt; ///< Native samples in a file-backed waveform.
 			std::string dechirp_mode = "none";
 			std::string dechirp_reference_source = "none";
 			SimId dechirp_reference_transmitter_id = 0;

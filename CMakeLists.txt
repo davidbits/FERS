@@ -27,6 +27,13 @@ list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 include(FersOptions)
 
 if (NOT FERS_DOCS_ONLY)
+	# Embree is an optional vcpkg manifest feature (see vcpkg.json) so it is only
+	# fetched/built when actually requested. This must be set before the vcpkg
+	# toolchain file runs, i.e. before project() below.
+	if (FERS_ENABLE_EMBREE)
+		list(APPEND VCPKG_MANIFEST_FEATURES "embree")
+	endif ()
+
 	# Auto-detect vcpkg toolchain before project() so dependency resolution works in CLion and CLI.
 	# Note: when building via `cargo build` (the Tauri path), CMAKE_TOOLCHAIN_FILE is always passed
 	# explicitly by build.rs, so this block is effectively dead in that path. It is retained here

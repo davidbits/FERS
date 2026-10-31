@@ -21,11 +21,11 @@
 #include <optional>
 #include <stdexcept>
 
+#include "antenna/antenna_gain.h"
 #include "antenna_pattern_dtd.h"
 #include "antenna_pattern_xsd.h"
 #include "core/config.h"
 #include "core/logging.h"
-#include "core/portable_utils.h"
 #include "math/geometry_ops.h"
 #include "serial/libxml_wrapper.h"
 
@@ -197,29 +197,6 @@ namespace
 		return metadata;
 	}
 
-	/**
-	 * @brief Compute the sinc function.
-	 *
-	 * @param theta The angle for which to compute the sinc function.
-	 * @return The value of the sinc function at the given angle theta.
-	 */
-	RealType sinc(const RealType theta) noexcept
-	{
-		if (std::abs(theta) < EPSILON)
-		{
-			return 1.0;
-		}
-		return std::sin(theta) / theta;
-	}
-
-	/**
-	 * @brief Compute the Bessel function of the first kind.
-	 *
-	 * @param x The value for which to compute the Bessel function.
-	 * @return The value of the Bessel function of the first kind at the given value x.
-	 */
-	RealType j1C(const RealType x) noexcept { return x == 0 ? 1.0 : core::besselJ1(x) / x; }
-
 	void loadAntennaGainSample(const interp::InterpSet* set, const AxisMetadata& metadata, const std::string& axis_name,
 							   const XmlElement& sample, AxisSampleStats& stats)
 	{
@@ -363,29 +340,25 @@ namespace antenna
 	RealType Gaussian::getGain(const SVec3& angle, const SVec3& refangle, RealType /*wavelength*/) const noexcept
 	{
 		const SVec3 a = angle - refangle;
-		return std::exp(-a.azimuth * a.azimuth * _azscale) * std::exp(-a.elevation * a.elevation * _elscale);
+		return gain::gaussianGain(a.azimuth, a.elevation, _azscale, _elscale) * getEfficiencyFactor();
 	}
 
 	RealType Sinc::getGain(const SVec3& angle, const SVec3& refangle, RealType /*wavelength*/) const noexcept
 	{
 		const RealType theta = getAngle(angle, refangle);
-		const RealType sinc_val = sinc(_beta * theta);
-		const RealType gain_pattern = std::pow(std::abs(sinc_val), _gamma);
-		return _alpha * gain_pattern * getEfficiencyFactor();
+		return gain::sincGain(theta, _alpha, _beta, _gamma) * getEfficiencyFactor();
 	}
 
 	RealType SquareHorn::getGain(const SVec3& angle, const SVec3& refangle, const RealType wavelength) const noexcept
 	{
-		const RealType ge = 4 * PI * std::pow(_dimension, 2) / std::pow(wavelength, 2);
-		const RealType x = PI * _dimension * std::sin(getAngle(angle, refangle)) / wavelength;
-		return ge * std::pow(sinc(x), 2) * getEfficiencyFactor();
+		const RealType theta = getAngle(angle, refangle);
+		return gain::squareHornGain(theta, _dimension, wavelength) * getEfficiencyFactor();
 	}
 
 	RealType Parabolic::getGain(const SVec3& angle, const SVec3& refangle, const RealType wavelength) const noexcept
 	{
-		const RealType ge = std::pow(PI * _diameter / wavelength, 2);
-		const RealType x = PI * _diameter * std::sin(getAngle(angle, refangle)) / wavelength;
-		return ge * std::pow(2 * j1C(x), 2) * getEfficiencyFactor();
+		const RealType theta = getAngle(angle, refangle);
+		return gain::parabolicGain(theta, _diameter, wavelength) * getEfficiencyFactor();
 	}
 
 	std::optional<RealType> XmlAntenna::lookupAxisGain(const interp::InterpSet* set, const RealType angle,

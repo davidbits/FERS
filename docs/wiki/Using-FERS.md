@@ -146,6 +146,7 @@ The most important rates are:
 | --- | --- |
 | `<rate>` | Base output sample rate in Hz. Raw CW/FMCW/SFCW streaming output is written at this rate. |
 | `<simSamplingRate>` | Rate used for geometry interpolation in pulsed response generation. |
+| `<cwSimSamplingRate>` | Rate used for geometry interpolation in CW-family sampling. Disabled by default; propagation modelled at `<rate> * <oversample>`. |
 | `<oversample>` | Internal oversampling multiplier. FMCW aliasing checks and legacy full-rate dechirped IF output use `<rate> * <oversample>`. |
 | `<if_sample_rate>` | Optional receiver-local FMCW IF output rate after dechirping and resampling. |
 

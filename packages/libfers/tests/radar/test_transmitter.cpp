@@ -36,8 +36,7 @@ TEST_CASE("Transmitter basic accessors and signal setters", "[radar][transmitter
 	tx.setMode(radar::OperationMode::CW_MODE);
 	REQUIRE(tx.getMode() == radar::OperationMode::CW_MODE);
 
-	auto signal = std::make_unique<fers_signal::CwSignal>();
-	fers_signal::RadarSignal radar_signal("Sig", 10.0, 1.0e9, 1.0, std::move(signal));
+	fers_signal::RadarSignal radar_signal("Sig", 10.0, 1.0e9, fers_signal::CwWaveform{});
 
 	tx.setSignal(&radar_signal);
 	REQUIRE(tx.getSignal() == &radar_signal);

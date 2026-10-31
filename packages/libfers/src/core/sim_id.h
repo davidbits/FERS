@@ -31,6 +31,8 @@ enum class ObjectType : uint16_t
 	Antenna = 5,
 	Waveform = 6,
 	Timing = 7,
+	Mesh = 8,
+	Material = 9,
 	Debug = 0xFFFF
 };
 

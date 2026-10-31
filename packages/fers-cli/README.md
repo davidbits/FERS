@@ -59,6 +59,7 @@ Run the simulator from the command line, providing the path to a scenario XML fi
 | `--vita49-queue-depth <packets>`     | Set the paced sender's steady-state backpressure watermark. Must be greater than zero; default: `1024`.                              |
 | `--log-level=<level>`                | Set the logging level (`TRACE`, `DEBUG`, `INFO`, `WARNING`, `ERROR`, `FATAL`).                                                       |
 | `--log-file=<file>`                  | Log output to the specified `.log` or `.txt` file in addition to the console.                                                        |
+| `--rt-engine=<engine>`               | Force the ray-tracing engine for the SBR propagation model (`auto`, `optix`, `embree`; case-insensitive). Defaults to `auto`.         |
 | `-n=<threads>`                       | Set the number of threads to use for the simulation.                                                                                 |
 
 ### Example
@@ -74,6 +75,13 @@ Stream receiver output as VITA 49.2 UDP:
   --vita49 127.0.0.1:4991 --vita49-fullscale 1.0
 ```
 
-VITA transport selection is a runtime option and is not stored in `.fersxml`. See the
+Force the Embree ray-tracing engine for an SBR scenario:
+
+```bash
+./build/release/packages/fers-cli/fers-cli scenario.fersxml --rt-engine=embree
+```
+
+VITA transport selection and ray-tracing engine selection are runtime options and are not stored in
+`.fersxml`. See the
 [VITA 49.2 streaming implementation guide](../../docs/wiki/VITA49-Streaming-Implementation.md) for packet layout,
 pacing, metadata, and counter semantics.

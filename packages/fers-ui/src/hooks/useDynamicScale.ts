@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0-only
 // Copyright (c) 2025-present FERS Contributors (see AUTHORS.md).
 
-import { useMemo } from 'react';
 import { useFrame, useThree } from '@react-three/fiber';
+import { useMemo } from 'react';
 import * as THREE from 'three';
 
 interface DynamicScaleOptions {

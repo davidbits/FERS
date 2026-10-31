@@ -18,9 +18,7 @@
 
 #pragma once
 
-#include <chrono>
 #include <cstdint>
-#include <exception>
 #include <memory>
 #include <span>
 #include <unordered_map>
@@ -29,8 +27,13 @@
 #include "core/config.h"
 #include "core/sim_id.h"
 #include "core/simulation_state.h"
-#include "math/geometry_ops.h"
+#include "propagation/propagation_model.h"
 
+namespace propagation
+{
+	class PropagationPath;
+	class PropagationModel;
+}
 namespace core
 {
 	class World;
@@ -91,6 +94,50 @@ namespace simulation
 											   const timing::Timing* tx_timing, RealType tx_time) const noexcept;
 	};
 
+	/**
+	 * @brief Ingests the next coarse sample of propagation paths for one receiver into
+	 *        its per-path interpolation cache (CW coarse-rate sampling), establishing the bracket
+	 *        `[interval_start_time, sample_time]` that samples in between will be interpolated
+	 *        across.
+	 *
+	 * Mirrors `serial::Response`'s lead/trail tapering:
+	 * - A path present now and previously: `hi` replaces `lo`, the new sample replaces `hi`.
+	 * - A path present before but missing now (about to disappear): a synthetic zero-gain "hi" is
+	 *   built at `sample_time` by linearly extrapolating delay/phase from the entry's own existing
+	 *   `lo`/`hi` (the two most recent real samples), like `extrapolateTaperPoint` in response.cpp.
+	 * - A path seen for the first time (just appeared): "lo" is a zero-gain copy of the next "hi"
+	 *   value, placed at `interval_start_time`. The appearance-edge counterpart of the above, matching
+	 *   `simpleTaperPoint`'s behavior, since there is no additional sample to estimate a rate from.
+	 *
+	 * @param cache The receiver's tracker cache; `coarse_path_samples` is updated in place.
+	 * @param next_paths This receiver's paths from the coarse scene query just taken.
+	 * @param interval_start_time The start time of the bracket a brand-new path's synthetic "lo"
+	 *                            should be placed at (ignored for paths that already existed).
+	 * @param sample_time The absolute simulation time `next_paths` was sampled at (the new "hi").
+	 */
+	void updateCoarseStreamingCache(core::ReceiverTrackerCache& cache,
+									const std::vector<propagation::PropagationPath>& next_paths,
+									RealType interval_start_time, RealType sample_time);
+
+	/**
+	 * @brief Produces a receiver's propagation paths at `rx_time` by linearly interpolating each
+	 *        cached path's delay and gain between its bracketing `lo`/`hi` coarse samples (CW
+	 *        coarse-rate sampling).
+	 *
+	 * Interpolating delay linearly is physically equivalent to a constant-velocity (linear
+	 * Doppler) approximation of range over the coarse interval. Gain's phase here is the path's
+	 * own slowly-varying antenna/polarization/scattered phase, not the fast carrier term, so linear
+	 * interpolation approximates well.
+	 *
+	 * @param cache The receiver's tracker cache, populated by `updateCoarseStreamingCache`; the
+	 *              caller is responsible for ensuring it already brackets `rx_time`.
+	 * @param receiver The receiver these paths are for.
+	 * @param rx_time The time to interpolate each cached path to.
+	 */
+	[[nodiscard]] std::vector<propagation::PropagationPath>
+	interpolateCoarseStreamingPaths(const core::ReceiverTrackerCache& cache, radar::Receiver& receiver,
+									RealType rx_time);
+
 	/// Selects how timing phase noise is applied to streaming channel contributions.
 	enum class StreamingTimingPhaseMode : std::uint8_t
 	{
@@ -98,97 +145,6 @@ namespace simulation
 		TransmitterOnly, ///< Incoming RF/baseband signal before receiver LO subtraction.
 		None ///< Ignore timing phase noise entirely.
 	};
-
-	/**
-	 * @struct ReResults
-	 * @brief Stores the intermediate results of a radar equation calculation for a single time point.
-	 */
-	struct ReResults
-	{
-		RealType power; /**< Power scaling factor (dimensionless, relative to transmitted power). */
-		RealType delay; /**< Signal propagation delay in seconds. */
-		RealType phase; /**< Phase shift in radians due to propagation delay. */
-	};
-
-	/**
-	 * @class RangeError
-	 * @brief Exception thrown when a range calculation fails, typically due to objects being too close.
-	 */
-	class RangeError final : public std::exception
-	{
-	public:
-		/**
-		 * @brief Provides the error message for the exception.
-		 * @return A C-style string describing the error.
-		 */
-		[[nodiscard]] const char* what() const noexcept override
-		{
-			return "Range error in radar equation calculations";
-		}
-	};
-
-	/**
-	 * @brief Solves the bistatic radar equation for a reflected path (Tx -> Tgt -> Rx).
-	 *
-	 * This function calculates the signal properties (power, delay, phase)
-	 * for a signal traveling from a transmitter, reflecting off a target, and arriving at a receiver.
-	 * It accounts for antenna gains, target RCS, and propagation loss.
-	 *
-	 * @param trans Pointer to the transmitter.
-	 * @param recv Pointer to the receiver.
-	 * @param targ Pointer to the target.
-	 * @param time The time at which the pulse is transmitted.
-	 * @param wave Pointer to the transmitted radar signal.
-	 * @param results Output struct to store the calculation results.
-	 * @throws RangeError If the target is too close to the transmitter or receiver.
-	 */
-	void solveRe(const radar::Transmitter* trans, const radar::Receiver* recv, const radar::Target* targ,
-				 const std::chrono::duration<RealType>& time, const fers_signal::RadarSignal* wave, ReResults& results);
-
-	/**
-	 * @brief Solves the radar equation for a direct path (Tx -> Rx).
-	 *
-	 * This function calculates the signal properties for a direct line-of-sight signal
-	 * traveling from a transmitter to a receiver.
-	 *
-	 * @param trans Pointer to the transmitter.
-	 * @param recv Pointer to the receiver.
-	 * @param time The time at which the pulse is transmitted.
-	 * @param wave Pointer to the transmitted radar signal.
-	 * @param results Output struct to store the calculation results.
-	 * @throws RangeError If the transmitter and receiver are too close.
-	 */
-	void solveReDirect(const radar::Transmitter* trans, const radar::Receiver* recv,
-					   const std::chrono::duration<RealType>& time, const fers_signal::RadarSignal* wave,
-					   ReResults& results);
-
-	/**
-	 * @brief Calculates the complex envelope contribution for a direct propagation path (Tx -> Rx) at a specific time.
-	 * This function is used for Continuous Wave (CW) simulations.
-	 *
-	 * @param trans The transmitter.
-	 * @param recv The receiver.
-	 * @param timeK The current simulation time.
-	 * @return The complex I/Q sample contribution for this path.
-	 */
-	ComplexType calculateDirectPathContribution(const radar::Transmitter* trans, const radar::Receiver* recv,
-												RealType timeK, const CwPhaseNoiseLookup* phase_noise_lookup = nullptr);
-
-	/**
-	 * @brief Calculates a direct-path contribution from a cached streaming source.
-	 *
-	 * @param source Cached active streaming source to evaluate.
-	 * @param recv Receiver observing the source.
-	 * @param timeK Current receiver time in seconds.
-	 * @param phase_noise_lookup Optional lookup for timing phase noise samples.
-	 * @param chirp_tracker Optional caller-owned FMCW boundary tracker for this path.
-	 * @param timing_phase_mode Selects how timing phase noise is applied.
-	 * @return The complex I/Q sample contribution for this path.
-	 */
-	ComplexType calculateStreamingDirectPathContribution(
-		const core::ActiveStreamingSource& source, const radar::Receiver* recv, RealType timeK,
-		const CwPhaseNoiseLookup* phase_noise_lookup = nullptr, core::FmcwChirpBoundaryTracker* chirp_tracker = nullptr,
-		StreamingTimingPhaseMode timing_phase_mode = StreamingTimingPhaseMode::ReceiverRelative);
 
 	/**
 	 * @brief Evaluates a receive-time streaming waveform phase for receiver LO/dechirp references.
@@ -209,57 +165,39 @@ namespace simulation
 														 ComplexType& sample_out);
 
 	/**
-	 * @brief Calculates the complex envelope contribution for a reflected path (Tx -> Tgt -> Rx) at a specific time.
-	 * This function is used for Continuous Wave (CW) simulations.
-	 *
-	 * @param trans The transmitter.
-	 * @param recv The receiver.
-	 * @param targ The target.
-	 * @param timeK The current simulation time.
-	 * @return The complex I/Q sample contribution for this path.
-	 */
-	ComplexType calculateReflectedPathContribution(const radar::Transmitter* trans, const radar::Receiver* recv,
-												   const radar::Target* targ, RealType timeK,
-												   const CwPhaseNoiseLookup* phase_noise_lookup = nullptr);
-
-	/**
-	 * @brief Calculates a reflected-path contribution from a cached streaming source.
+	 * @brief Calculates a contribution from a cached streaming source.
 	 *
 	 * @param source Cached active streaming source to evaluate.
 	 * @param recv Receiver observing the reflected signal.
-	 * @param targ Reflecting target.
+	 * @param path Propagation path of the contributing radar signal.
 	 * @param timeK Current receiver time in seconds.
 	 * @param phase_noise_lookup Optional lookup for timing phase noise samples.
 	 * @param chirp_tracker Optional caller-owned FMCW boundary tracker for this path.
 	 * @param timing_phase_mode Selects how timing phase noise is applied.
-	 * @return The complex I/Q sample contribution for this reflected path.
+	 * @return The complex I/Q sample contribution for this path.
 	 */
-	ComplexType calculateStreamingReflectedPathContribution(
-		const core::ActiveStreamingSource& source, const radar::Receiver* recv, const radar::Target* targ,
-		RealType timeK, const CwPhaseNoiseLookup* phase_noise_lookup = nullptr,
-		core::FmcwChirpBoundaryTracker* chirp_tracker = nullptr,
+	ComplexType calculateStreamingPathContribution(
+		const core::ActiveStreamingSource& source, const radar::Receiver* recv,
+		const propagation::PropagationPath& path, RealType timeK,
+		const CwPhaseNoiseLookup* phase_noise_lookup = nullptr, core::FmcwChirpBoundaryTracker* chirp_tracker = nullptr,
 		StreamingTimingPhaseMode timing_phase_mode = StreamingTimingPhaseMode::ReceiverRelative);
 
 	/**
-	 * @brief Creates a Response object by simulating a signal's interaction over its duration.
+	 * @brief Creates Response objects by simulating possible radar paths/channels from
+	 *        the given transmitter to all receivers.
 	 *
-	 * This function iterates over the duration of a transmitted pulse, calling the
-	 * appropriate channel model function (`solveRe` or `solveReDirect`) at discrete
-	 * time steps to generate a series of `InterpPoint`s. These points capture the
-	 * time-varying properties of the received signal and are collected into a `Response` object.
+	 * This function generates Responses: series of `InterpPoint`s describing the channel
+	 * properties (gain, delay, phase delay) in a time series for each radar path
+	 * across the duration of the pulse signal. This function does not sample the signal itself.
+	 * These points capture the time-varying properties of the radar propagation channel.
+	 * These Responses are places into the Receivers for later rendering.
 	 *
-	 * @param trans Pointer to the transmitter.
-	 * @param recv Pointer to the receiver.
-	 * @param signal Pointer to the transmitted pulse signal.
-	 * @param startTime The absolute simulation time when the pulse transmission starts.
-	 * @param targ Optional pointer to a target. If null, a direct path is simulated.
-	 * @return A unique pointer to the generated Response object.
-	 * @throws RangeError If the channel model reports an invalid geometry.
-	 * @throws std::runtime_error If the simulation parameters result in zero time steps.
+	 * @param tx The transmitter of the pulse.
+	 * @param prop The propagation model to determine pulse signal propagation.
+	 * @param start_tx_time The absolute simulation time when the pulse transmission starts.
 	 */
-	std::unique_ptr<serial::Response> calculateResponse(const radar::Transmitter* trans, const radar::Receiver* recv,
-														const fers_signal::RadarSignal* signal, RealType startTime,
-														const radar::Target* targ = nullptr);
+	void calculateResponses(const radar::Transmitter& tx, const RealType start_tx_time,
+							const propagation::PropagationModel& prop, propagation::ThreadContext* ctx);
 
 	/**
 	 * @enum LinkType

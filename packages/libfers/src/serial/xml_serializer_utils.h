@@ -35,6 +35,8 @@ namespace antenna
 namespace core
 {
 	class World;
+	struct MeshAsset;
+	struct MaterialAsset;
 }
 namespace fers_signal
 {
@@ -69,6 +71,39 @@ namespace serial::xml_serializer_utils
 	void addChildWithText(const XmlElement& parent, const std::string& name, const std::string& text);
 
 	/**
+	 * @brief Formats a numeric value for XML text/attribute content, round-trip-safe for
+	 * floating-point types (unlike `std::to_string`, which fixes 6 decimal places and silently
+	 * truncates small magnitudes like `1e-7` to `"0.000000"`).
+	 * @tparam T The numeric type (automatically deduced).
+	 * @param value The numeric value to format.
+	 * @return The formatted value as a string.
+	 */
+	template <typename T>
+	std::string numberToString(T value)
+	{
+		if constexpr (std::is_floating_point_v<T>)
+		{
+			std::array<char, 64> buffer{};
+			if (auto [ptr, ec] = std::to_chars(buffer.data(), buffer.data() + buffer.size(), value); ec == std::errc())
+			{
+				const auto length = static_cast<std::string::size_type>(ptr - buffer.data());
+				return std::string(buffer.data(), length);
+			}
+			// This only executes if std::to_chars(...) returns ec != std::errc()
+			// which will practically never happen unless the output buffer is too small
+			// to hold the formatted value, or the standard library implementation fails
+			// to support/format the given floating-point value.
+			std::stringstream ss;
+			ss << std::setprecision(std::numeric_limits<T>::max_digits10) << value;
+			return ss.str();
+		}
+		else
+		{
+			return std::to_string(value);
+		}
+	}
+
+	/**
 	 * @brief Adds a child element with the specified numeric content.
 	 * @tparam T The numeric type (automatically deduced).
 	 * @param parent The parent XML element.
@@ -78,29 +113,29 @@ namespace serial::xml_serializer_utils
 	template <typename T>
 	void addChildWithNumber(const XmlElement& parent, const std::string& name, T value)
 	{
-		if constexpr (std::is_floating_point_v<T>)
-		{
-			std::array<char, 64> buffer{};
-			if (auto [ptr, ec] = std::to_chars(buffer.data(), buffer.data() + buffer.size(), value); ec == std::errc())
-			{
-				const auto length = static_cast<std::string::size_type>(ptr - buffer.data());
-				addChildWithText(parent, name, std::string(buffer.data(), length));
-			}
-			else
-			{
-				// This only executes if std::to_chars(...) returns ec != std::errc()
-				// which will practically never happen unless the output buffer is too small
-				// to hold the formatted value, or the standard library implementation fails
-				// to support/format the given floating-point value.
-				std::stringstream ss;
-				ss << std::setprecision(std::numeric_limits<T>::max_digits10) << value;
-				addChildWithText(parent, name, ss.str());
-			}
-		}
-		else
-		{
-			addChildWithText(parent, name, std::to_string(value));
-		}
+		addChildWithText(parent, name, numberToString(value));
+	}
+
+	/**
+	 * @brief Sets an attribute with the specified numeric content, round-trip-safe for
+	 * floating-point values (see `numberToString`).
+	 * @tparam T The numeric type (automatically deduced).
+	 * @param element The XML element to modify.
+	 * @param name The name of the attribute to set.
+	 * @param value The numeric value to set for the attribute.
+	 */
+	/**
+	 * @brief Formats a complex number as a literal, e.g. "1+0i" or "0.5-2i" (see
+	 * `serial::parseComplexLiteral` for the grammar this is a subset of).
+	 * @param value The complex value to format.
+	 * @return The formatted literal.
+	 */
+	std::string formatComplexLiteral(ComplexType value);
+
+	template <typename T>
+	void setAttributeFromNumber(const XmlElement& element, const std::string& name, T value)
+	{
+		element.setAttribute(name, numberToString(value));
 	}
 
 	/**
@@ -145,6 +180,20 @@ namespace serial::xml_serializer_utils
 	 * @param parent The parent XML element.
 	 */
 	void serializeAntenna(const antenna::Antenna& antenna, const XmlElement& parent);
+
+	/**
+	 * @brief Serializes a mesh asset into a parent XML element.
+	 * @param mesh The mesh asset to serialize.
+	 * @param parent The parent XML element.
+	 */
+	void serializeMesh(const core::MeshAsset& mesh, const XmlElement& parent);
+
+	/**
+	 * @brief Serializes a material asset into a parent XML element.
+	 * @param material The material asset to serialize.
+	 * @param parent The parent XML element.
+	 */
+	void serializeMaterial(const core::MaterialAsset& material, const XmlElement& parent);
 
 	/**
 	 * @brief Serializes a motion path into a parent XML element.
@@ -196,4 +245,16 @@ namespace serial::xml_serializer_utils
 	 * @param parent The parent XML element.
 	 */
 	void serializePlatform(const radar::Platform& platform, const core::World& world, const XmlElement& parent);
+
+	namespace
+	{
+
+		template <class... Ts>
+		struct overloaded : Ts...
+		{
+			using Ts::operator()...;
+		};
+		template <class... Ts>
+		overloaded(Ts...) -> overloaded<Ts...>;
+	}
 }

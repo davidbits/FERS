@@ -14,10 +14,10 @@ namespace interp
 {
 	struct InterpPoint
 	{
-		RealType power{};
-		RealType time{};
+		RealType gain{};
+		RealType rx_time{};
 		RealType delay{};
-		RealType phase{};
+		RealType phase_delay{};
 	};
 }
 

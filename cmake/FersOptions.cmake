@@ -21,6 +21,8 @@ option(FERS_BUILD_DOCS "Enable building Doxygen documentation" OFF)
 option(FERS_DOCS_ONLY "Configure only for documentation generation" OFF)
 option(FERS_BUILD_TESTS "Build unit tests" OFF)
 option(FERS_ENABLE_COVERAGE "Enable code coverage generation" OFF)
+option(FERS_ENABLE_OPTIX "Enable the OptiX GPU ray tracing backend (requires the OptiX SDK and CUDA)" OFF)
+option(FERS_ENABLE_EMBREE "Enable the Embree CPU ray tracing backend (sourced via vcpkg)" OFF)
 
 # Ensure at least one library type is selected.
 if (NOT FERS_BUILD_SHARED_LIBS AND NOT FERS_BUILD_STATIC_LIBS)

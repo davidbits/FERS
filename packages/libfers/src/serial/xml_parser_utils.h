@@ -38,8 +38,11 @@ namespace antenna
 }
 namespace fers_signal
 {
-	enum class FileWaveformKind : std::uint8_t;
 	class RadarSignal;
+}
+namespace serial
+{
+	enum class FileWaveformRequestKind : std::uint8_t;
 }
 namespace timing
 {
@@ -72,6 +75,8 @@ namespace serial::xml_parser_utils
 		const std::unordered_map<std::string, SimId>* waveforms; ///< Map of waveform names to IDs.
 		const std::unordered_map<std::string, SimId>* antennas; ///< Map of antenna names to IDs.
 		const std::unordered_map<std::string, SimId>* timings; ///< Map of timing object names to IDs.
+		const std::unordered_map<std::string, SimId>* meshes; ///< Map of mesh asset names to IDs.
+		const std::unordered_map<std::string, SimId>* materials; ///< Map of material asset names to IDs.
 	};
 
 	/**
@@ -87,7 +92,7 @@ namespace serial::xml_parser_utils
 		/// Hook to load a mode-tagged waveform from an external file.
 		std::function<std::unique_ptr<fers_signal::RadarSignal>(
 			const std::string& name, const std::filesystem::path& waveform_path, RealType power, RealType carrierFreq,
-			SimId id, fers_signal::FileWaveformKind kind)>
+			SimId id, serial::FileWaveformRequestKind kind)>
 			loadWaveform;
 
 		/// Hook to load an antenna pattern defined in a legacy XML format.
@@ -141,6 +146,19 @@ namespace serial::xml_parser_utils
 	 * @return The parsed boolean value, or the default if the attribute is missing or invalid.
 	 */
 	bool get_attribute_bool(const XmlElement& element, const std::string& attributeName, bool defaultVal);
+
+	/**
+	 * @brief Parses a complex number literal, e.g. "1.0+0.0i", "0.5j", "-0.5 - i2", "1e-3+2e-4i".
+	 *
+	 * Accepts a bare real term, a bare imaginary term, or both (real first). An imaginary
+	 * term's unit marker ('i' or 'j', case-insensitive) may precede or follow its magnitude.
+	 * Surrounding and internal whitespace is ignored.
+	 *
+	 * @param literal The complex number literal to parse.
+	 * @return The parsed complex value.
+	 * @throws XmlException if the literal does not match the grammar above.
+	 */
+	ComplexType parseComplexLiteral(const std::string& literal);
 
 	/**
 	 * @brief Generates a unique SimId based on the requested object type.
@@ -202,6 +220,20 @@ namespace serial::xml_parser_utils
 	void parseAntenna(const XmlElement& antenna, ParserContext& ctx);
 
 	/**
+	 * @brief Parses a `<mesh>` block and adds it to the World.
+	 * @param mesh The `<mesh>` XML element.
+	 * @param ctx The current parser context.
+	 */
+	void parseMesh(const XmlElement& mesh, ParserContext& ctx);
+
+	/**
+	 * @brief Parses a `<material>` block and adds it to the World.
+	 * @param material The `<material>` XML element.
+	 * @param ctx The current parser context.
+	 */
+	void parseMaterial(const XmlElement& material, ParserContext& ctx);
+
+	/**
 	 * @brief Parses a `<motionpath>` block and attaches it to a Platform.
 	 * @param motionPath The `<motionpath>` XML element.
 	 * @param platform The platform to modify.
@@ -259,8 +291,10 @@ namespace serial::xml_parser_utils
 	 * @param target The `<target>` XML element.
 	 * @param platform The platform this target belongs to.
 	 * @param ctx The current parser context.
+	 * @param refs Lookup tables for resolving the optional `<geometry>` mesh/material references.
 	 */
-	void parseTarget(const XmlElement& target, radar::Platform* platform, ParserContext& ctx);
+	void parseTarget(const XmlElement& target, radar::Platform* platform, ParserContext& ctx,
+					 const ReferenceLookup& refs);
 
 	/**
 	 * @brief Iterates and parses all children elements (radars, targets) of a platform.

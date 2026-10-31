@@ -8,19 +8,21 @@
 -->
         <!-- Note: DTD cannot enforce the XSD's implicit requirement of "at least one of each" of waveform, timing, etc. in any order. -->
         <!-- This model enforces that parameters is present, followed by at least one of the other main elements, preserving flexible ordering. -->
-        <!ELEMENT simulation (parameters, (waveform | timing | antenna | platform | include)+)>
+        <!ELEMENT simulation (parameters, (waveform | timing | antenna | mesh | material | platform | include)+)>
         <!ATTLIST simulation name CDATA #REQUIRED>
 
         <!-- Simulation Parameters -->
-        <!ELEMENT parameters (starttime,endtime,rate,c?,simSamplingRate?,randomseed?,adc_bits?,oversample?,rotationangleunit?,origin?,coordinatesystem?)>
+        <!ELEMENT parameters (starttime,endtime,rate,c?,simSamplingRate?,cwSimSamplingRate?,randomseed?,adc_bits?,oversample?,rotationangleunit?,origin?,coordinatesystem?,propagation?)>
         <!-- Start time of simulation -->
         <!ELEMENT starttime (#PCDATA)>
         <!-- End time of simulation -->
         <!ELEMENT endtime (#PCDATA)>
         <!-- Propagation speed -->
         <!ELEMENT c (#PCDATA)>
-        <!-- Fidelity of the underlying physics simulation (Hz) -->
+        <!-- Fidelity of the underlying physics simulation for pulsed waveforms (Hz) -->
         <!ELEMENT simSamplingRate (#PCDATA)>
+        <!-- Fidelity of the underlying physics simulation for CW waveforms (Hz) -->
+        <!ELEMENT cwSimSamplingRate (#PCDATA)>
         <!-- Override the rendering sample rate with the specified one (Hz) -->
         <!ELEMENT rate (#PCDATA)>
         <!-- Random seed for noise -->
@@ -43,7 +45,21 @@
         <!ATTLIST coordinatesystem
                 frame      (ENU|UTM|ECEF) #REQUIRED
                 zone       CDATA          #IMPLIED
-                hemisphere (N|S)           #IMPLIED
+                hemisphere (N|S)          #IMPLIED
+                >
+        <!-- Selects the propagation model and sets model-specific parameters. -->
+        <!ELEMENT propagation (pointscatter|raytracing)>
+        <!ELEMENT pointscatter EMPTY>
+        <!ATTLIST pointscatter
+                polarimetric (true|false) "false"
+                >
+        <!ELEMENT raytracing EMPTY>
+        <!ATTLIST raytracing
+                scatter_limit                  CDATA #IMPLIED
+                boresight_width                CDATA #IMPLIED
+                boresight_tube_solid_angle     CDATA #IMPLIED
+                off_boresight_tube_solid_angle CDATA #IMPLIED
+                prune_below_max_db             CDATA #IMPLIED
                 >
 
         <!-- Waveform definition -->
@@ -109,7 +125,8 @@
         <!ELEMENT random_phase_offset_stdev (#PCDATA)>
 
         <!-- Antenna -->
-        <!ELEMENT antenna (alpha?,beta?,gamma?,diameter?,azscale?,elscale?,efficiency?)>
+        <!ELEMENT antenna (alpha?,beta?,gamma?,diameter?,azscale?,elscale?,efficiency?,
+                          boresight_polarisation?)>
         <!ATTLIST antenna
                 name CDATA #REQUIRED
                 pattern CDATA #REQUIRED
@@ -128,6 +145,27 @@
         <!ELEMENT elscale (#PCDATA)>
         <!-- The antenna efficiency factor -->
         <!ELEMENT efficiency (#PCDATA)>
+        <!-- Boresight polarisation Jones vector (Ludwig-3). h/v each hold a complex number as
+             text, e.g. "1.0+0.0i" (also accepts a leading unit marker, a bare real or imaginary
+             term, and "j" as well as "i"). Defaults to purely horizontal if omitted. -->
+        <!ELEMENT boresight_polarisation EMPTY>
+        <!ATTLIST boresight_polarisation
+                h CDATA #IMPLIED
+                v CDATA #IMPLIED>
+
+        <!-- Mesh Asset: a reusable mesh, loaded from a file within the "meshes" directory next to the scenario file -->
+        <!ELEMENT mesh EMPTY>
+        <!ATTLIST mesh
+                name CDATA #REQUIRED
+                filename CDATA #REQUIRED>
+
+        <!-- Material Asset: a reusable surface material for ray-tracing propagation. Conductivity
+             may be "inf" to specify a perfect electric conductor. -->
+        <!ELEMENT material (relative_permittivity,conductivity)>
+        <!ATTLIST material
+                name CDATA #REQUIRED>
+        <!ELEMENT relative_permittivity (#PCDATA)>
+        <!ELEMENT conductivity (#PCDATA)>
 
         <!-- Platform -->
         <!ELEMENT platform (motionpath,(rotationpath|fixedrotation),(monostatic|transmitter|receiver|target)*)>
@@ -224,9 +262,15 @@
         <!ELEMENT window_length (#PCDATA)>
 
         <!-- Target -->
-        <!ELEMENT target (rcs,model?)>
+        <!ELEMENT target (rcs?,model?,geometry?)>
         <!ATTLIST target
                 name CDATA #REQUIRED>
+
+        <!-- Target Geometry: references a mesh/material pair for ray-tracing propagation -->
+        <!ELEMENT geometry EMPTY>
+        <!ATTLIST geometry
+                mesh CDATA #REQUIRED
+                material CDATA #REQUIRED>
 
         <!-- RCS can either have a 'value' element or a 'filename' attribute -->
         <!-- Target RCS -->

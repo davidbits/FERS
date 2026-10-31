@@ -3,8 +3,8 @@
 
 import { useMemo, useRef } from 'react';
 import * as THREE from 'three';
-import { fersColors } from '@/theme';
 import { useDynamicScale } from '@/hooks/useDynamicScale';
+import { fersColors } from '@/theme';
 
 const BORESIGHT_LENGTH = 7; // Length of the arrow in world units.
 

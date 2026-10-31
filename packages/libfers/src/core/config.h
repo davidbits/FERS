@@ -40,7 +40,7 @@ using ComplexType = std::complex<RealType>;
  * This constant holds the value of π (pi) using the RealType, ensuring precision
  * for calculations involving this constant throughout the project.
  */
-constexpr RealType PI = std::numbers::pi_v<RealType>;
+constexpr RealType PI = RealType(3.1415926535897932384626433832795028841971693993751);
 
 /**
  * @brief Machine epsilon for real numbers.

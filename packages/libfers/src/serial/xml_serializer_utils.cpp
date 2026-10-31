@@ -9,6 +9,7 @@
 #include <cmath>
 
 #include "antenna/antenna_factory.h"
+#include "core/assets.h"
 #include "core/world.h"
 #include "math/coord.h"
 #include "math/path.h"
@@ -24,6 +25,7 @@
 
 namespace serial::xml_serializer_utils
 {
+
 	void addChildWithText(const XmlElement& parent, const std::string& name, const std::string& text)
 	{
 		parent.addChild(name).setText(text);
@@ -32,6 +34,12 @@ namespace serial::xml_serializer_utils
 	void setAttributeFromBool(const XmlElement& element, const std::string& name, const bool value)
 	{
 		element.setAttribute(name, value ? "true" : "false");
+	}
+
+	std::string formatComplexLiteral(const ComplexType value)
+	{
+		const std::string imag_sign = value.imag() < 0 ? "-" : "+";
+		return numberToString(value.real()) + imag_sign + numberToString(std::abs(value.imag())) + "i";
 	}
 
 	void serializeSchedule(const std::vector<radar::SchedulePeriod>& schedule, const XmlElement& parent)
@@ -62,6 +70,10 @@ namespace serial::xml_serializer_utils
 		if (p.sim_sampling_rate != 1000.0)
 		{
 			addChildWithNumber(parent, "simSamplingRate", p.sim_sampling_rate);
+		}
+		if (p.cw_coarse_sample_rate)
+		{
+			addChildWithNumber(parent, "cwSimSamplingRate", *p.cw_coarse_sample_rate);
 		}
 		if (p.random_seed)
 		{
@@ -101,6 +113,56 @@ namespace serial::xml_serializer_utils
 			cs.setAttribute("frame", "ECEF");
 			break;
 		}
+
+		if (p.propagation_model == params::PropagationModelKind::SbrRayTracing)
+		{
+			const XmlElement prop_elem = parent.addChild("propagation");
+			const XmlElement rt_elem = prop_elem.addChild("raytracing");
+			const auto& rt = p.ray_tracing_params;
+			const params::RayTracingParameters defaults;
+
+			if (rt.scatter_limit != defaults.scatter_limit)
+			{
+				setAttributeFromNumber(rt_elem, "scatter_limit", rt.scatter_limit);
+			}
+			if (rt.boresight_width != defaults.boresight_width)
+			{
+				setAttributeFromNumber(
+					rt_elem, "boresight_width",
+					rotation_angle_utils::radians_to_unit(rt.boresight_width, p.rotation_angle_unit));
+			}
+			if (rt.boresight_tube_solid_angle != defaults.boresight_tube_solid_angle)
+			{
+				setAttributeFromNumber(rt_elem, "boresight_tube_solid_angle", rt.boresight_tube_solid_angle);
+			}
+			if (rt.off_boresight_tube_solid_angle != defaults.off_boresight_tube_solid_angle)
+			{
+				setAttributeFromNumber(rt_elem, "off_boresight_tube_solid_angle", rt.off_boresight_tube_solid_angle);
+			}
+			if (rt.prune_below_max_db.has_value())
+			{
+				setAttributeFromNumber(rt_elem, "prune_below_max_db", *rt.prune_below_max_db);
+			}
+		}
+		else if (p.point_scatterer_params.polarimetric != params::PointScatterParameters{}.polarimetric)
+		{
+			const XmlElement prop_elem = parent.addChild("propagation");
+			const XmlElement ps_elem = prop_elem.addChild("pointscatter");
+			setAttributeFromBool(ps_elem, "polarimetric", p.point_scatterer_params.polarimetric);
+		}
+	}
+
+	void serializeMesh(const core::MeshAsset& mesh, const XmlElement& parent)
+	{
+		parent.setAttribute("name", mesh.name);
+		parent.setAttribute("filename", mesh.filename);
+	}
+
+	void serializeMaterial(const core::MaterialAsset& material, const XmlElement& parent)
+	{
+		parent.setAttribute("name", material.name);
+		addChildWithNumber(parent, "relative_permittivity", material.relative_permittivity);
+		addChildWithNumber(parent, "conductivity", material.conductivity);
 	}
 
 	void serializeWaveform(const fers_signal::RadarSignal& waveform, const XmlElement& parent)
@@ -110,73 +172,67 @@ namespace serial::xml_serializer_utils
 		addChildWithNumber(parent, "power", waveform.getPower());
 		addChildWithNumber(parent, "carrier_frequency", waveform.getCarrier());
 
-		if (const auto* file = waveform.getFileSignal(); file != nullptr)
-		{
-			std::string_view element_name = "pulsed_from_file";
-			if (file->getKind() == fers_signal::FileWaveformKind::Cw)
-			{
-				element_name = "cw_from_file";
-			}
-			else if (file->getKind() == fers_signal::FileWaveformKind::Fmcw)
-			{
-				element_name = "fmcw_from_file";
-			}
-			const XmlElement file_element = parent.addChild(element_name);
-			file_element.setAttribute("filename", waveform.getFilename().value_or(""));
-		}
-		else if (dynamic_cast<const fers_signal::CwSignal*>(waveform.getSignal()) != nullptr)
-		{
-			(void)parent.addChild("cw"); // Empty element
-		}
-		else if (const auto* fmcw = waveform.getFmcwChirpSignal(); fmcw != nullptr)
-		{
-			const XmlElement fmcw_elem = parent.addChild("fmcw_linear_chirp");
-			fmcw_elem.setAttribute("direction",
-								   std::string(fers_signal::fmcwChirpDirectionToken(fmcw->getDirection())));
-			addChildWithNumber(fmcw_elem, "chirp_bandwidth", fmcw->getChirpBandwidth());
-			addChildWithNumber(fmcw_elem, "chirp_duration", fmcw->getChirpDuration());
-			addChildWithNumber(fmcw_elem, "chirp_period", fmcw->getChirpPeriod());
-			if (std::abs(fmcw->getStartFrequencyOffset()) > EPSILON)
-			{
-				addChildWithNumber(fmcw_elem, "start_frequency_offset", fmcw->getStartFrequencyOffset());
-			}
-			if (fmcw->getChirpCount().has_value())
-			{
-				addChildWithNumber(fmcw_elem, "chirp_count", static_cast<RealType>(*fmcw->getChirpCount()));
-			}
-		}
-		else if (const auto* sfcw = waveform.getSteppedFrequencySignal(); sfcw != nullptr)
-		{
-			const XmlElement sfcw_elem = parent.addChild("stepped_frequency");
-			addChildWithNumber(sfcw_elem, "start_frequency_offset", sfcw->getStartFrequencyOffset());
-			addChildWithNumber(sfcw_elem, "step_size", sfcw->getStepSize());
-			addChildWithNumber(sfcw_elem, "step_count", static_cast<RealType>(sfcw->getStepCount()));
-			addChildWithNumber(sfcw_elem, "dwell_time", sfcw->getDwellTime());
-			addChildWithNumber(sfcw_elem, "step_period", sfcw->getStepPeriod());
-			if (sfcw->getSweepCount().has_value())
-			{
-				addChildWithNumber(sfcw_elem, "sweep_count", static_cast<RealType>(*sfcw->getSweepCount()));
-			}
-		}
-		else if (const auto* triangle = waveform.getFmcwTriangleSignal(); triangle != nullptr)
-		{
-			const XmlElement fmcw_elem = parent.addChild("fmcw_triangle");
-			addChildWithNumber(fmcw_elem, "chirp_bandwidth", triangle->getChirpBandwidth());
-			addChildWithNumber(fmcw_elem, "chirp_duration", triangle->getChirpDuration());
-			if (std::abs(triangle->getStartFrequencyOffset()) > EPSILON)
-			{
-				addChildWithNumber(fmcw_elem, "start_frequency_offset", triangle->getStartFrequencyOffset());
-			}
-			if (triangle->getTriangleCount().has_value())
-			{
-				addChildWithNumber(fmcw_elem, "triangle_count", static_cast<RealType>(*triangle->getTriangleCount()));
-			}
-		}
-		else
-		{
-			const XmlElement pulsed_file = parent.addChild("pulsed_from_file");
-			pulsed_file.setAttribute("filename", waveform.getFilename().value_or(""));
-		}
+		std::visit(
+			fers_signal::util::Overloaded{
+				[&](const fers_signal::CwWaveform&) { (void)parent.addChild("cw"); },
+				[&](const fers_signal::FmcwChirpWaveform& fmcw)
+				{
+					const XmlElement fmcw_elem = parent.addChild("fmcw_linear_chirp");
+					fmcw_elem.setAttribute("direction",
+										   std::string(fers_signal::fmcwChirpDirectionToken(fmcw.getDirection())));
+					addChildWithNumber(fmcw_elem, "chirp_bandwidth", fmcw.getChirpBandwidth());
+					addChildWithNumber(fmcw_elem, "chirp_duration", fmcw.getChirpDuration());
+					addChildWithNumber(fmcw_elem, "chirp_period", fmcw.getChirpPeriod());
+					if (std::abs(fmcw.getStartFrequencyOffset()) > EPSILON)
+					{
+						addChildWithNumber(fmcw_elem, "start_frequency_offset", fmcw.getStartFrequencyOffset());
+					}
+					if (fmcw.getChirpCount().has_value())
+					{
+						addChildWithNumber(fmcw_elem, "chirp_count", static_cast<RealType>(*fmcw.getChirpCount()));
+					}
+				},
+				[&](const fers_signal::SfcwWaveform& sfcw)
+				{
+					const XmlElement sfcw_elem = parent.addChild("stepped_frequency");
+					addChildWithNumber(sfcw_elem, "start_frequency_offset", sfcw.getStartFrequencyOffset());
+					addChildWithNumber(sfcw_elem, "step_size", sfcw.getStepSize());
+					addChildWithNumber(sfcw_elem, "step_count", static_cast<RealType>(sfcw.getStepCount()));
+					addChildWithNumber(sfcw_elem, "dwell_time", sfcw.getDwellTime());
+					addChildWithNumber(sfcw_elem, "step_period", sfcw.getStepPeriod());
+					if (sfcw.getSweepCount().has_value())
+					{
+						addChildWithNumber(sfcw_elem, "sweep_count", static_cast<RealType>(*sfcw.getSweepCount()));
+					}
+				},
+				[&](const fers_signal::FmcwTriangleWaveform& triangle)
+				{
+					const XmlElement fmcw_elem = parent.addChild("fmcw_triangle");
+					addChildWithNumber(fmcw_elem, "chirp_bandwidth", triangle.getChirpBandwidth());
+					addChildWithNumber(fmcw_elem, "chirp_duration", triangle.getChirpDuration());
+					if (std::abs(triangle.getStartFrequencyOffset()) > EPSILON)
+					{
+						addChildWithNumber(fmcw_elem, "start_frequency_offset", triangle.getStartFrequencyOffset());
+					}
+					if (triangle.getTriangleCount().has_value())
+					{
+						addChildWithNumber(fmcw_elem, "triangle_count",
+										   static_cast<RealType>(*triangle.getTriangleCount()));
+					}
+				},
+				[&](const fers_signal::PulseWaveform& sampled)
+				{
+					const XmlElement pulsed_file = parent.addChild("pulsed_from_file");
+					const auto& filename = sampled.getFilename();
+					pulsed_file.setAttribute("filename", filename.value_or(""));
+				},
+				[&](const fers_signal::FileWaveform& file)
+				{
+					const XmlElement file_element = parent.addChild(file.isCw() ? "cw_from_file" : "fmcw_from_file");
+					file_element.setAttribute("filename", file.getFilename().value_or(""));
+				},
+			},
+			waveform.getWaveform());
 	}
 
 	void serializeTiming(const timing::PrototypeTiming& timing, const XmlElement& parent)
@@ -257,6 +313,14 @@ namespace serial::xml_serializer_utils
 		if (antenna.getEfficiencyFactor() != 1.0)
 		{
 			addChildWithNumber(parent, "efficiency", antenna.getEfficiencyFactor());
+		}
+
+		const auto pol = antenna.getPolarisation();
+		if (pol.horizontal != ComplexType(1.0, 0.0) || pol.vertical != ComplexType(0.0, 0.0))
+		{
+			const auto pol_element = parent.addChild("boresight_polarisation");
+			pol_element.setAttribute("h", formatComplexLiteral(pol.horizontal));
+			pol_element.setAttribute("v", formatComplexLiteral(pol.vertical));
 		}
 	}
 
@@ -487,27 +551,38 @@ namespace serial::xml_serializer_utils
 		const XmlElement target_elem = parent.addChild("target");
 		target_elem.setAttribute("name", target.getName());
 
-		const XmlElement rcs_elem = target_elem.addChild("rcs");
-		if (const auto* iso = dynamic_cast<const radar::IsoTarget*>(&target))
+		if (const auto* rcs = target.getRcsSpec())
 		{
-			rcs_elem.setAttribute("type", "isotropic");
-			addChildWithNumber(rcs_elem, "value", iso->getConstRcs());
-		}
-		else if (const auto* file_target = dynamic_cast<const radar::FileTarget*>(&target))
-		{
-			rcs_elem.setAttribute("type", "file");
-			rcs_elem.setAttribute("filename", file_target->getFilename());
+			if (const auto* iso = dynamic_cast<const radar::IsoTargetRcs*>(rcs))
+			{
+				const XmlElement rcs_elem = target_elem.addChild("rcs");
+				rcs_elem.setAttribute("type", "isotropic");
+				addChildWithNumber(rcs_elem, "value", iso->getConstRcs());
+			}
+			else if (const auto* file_rcs = dynamic_cast<const radar::FileTargetRcs*>(rcs))
+			{
+				const XmlElement rcs_elem = target_elem.addChild("rcs");
+				rcs_elem.setAttribute("type", "file");
+				rcs_elem.setAttribute("filename", file_rcs->getFilename());
+			}
+
+			// Serialize fluctuation model if present
+			if (const auto* model = rcs->getFluctuationModel())
+			{
+				if (const auto* chi = dynamic_cast<const radar::RcsChiSquare*>(model))
+				{
+					XmlElement const model_elem = target_elem.addChild("model");
+					model_elem.setAttribute("type", "chisquare");
+					addChildWithNumber(model_elem, "k", chi->getK());
+				}
+			}
 		}
 
-		// Serialize fluctuation model if present
-		if (const auto* model = target.getFluctuationModel())
+		if (const auto& geometry = target.getGeometry())
 		{
-			if (const auto* chi = dynamic_cast<const radar::RcsChiSquare*>(model))
-			{
-				XmlElement const model_elem = target_elem.addChild("model");
-				model_elem.setAttribute("type", "chisquare");
-				addChildWithNumber(model_elem, "k", chi->getK());
-			}
+			const XmlElement geometry_elem = target_elem.addChild("geometry");
+			geometry_elem.setAttribute("mesh", geometry->mesh->name);
+			geometry_elem.setAttribute("material", geometry->material->name);
 		}
 	}
 

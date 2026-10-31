@@ -10,7 +10,7 @@ using Catch::Matchers::WithinRel;
 
 namespace
 {
-	RealType expectedBesselJ1(const RealType x) noexcept
+	double expectedBesselJ1(const double x) noexcept
 	{
 #ifdef _MSC_VER
 		return _j1(x);
@@ -22,9 +22,9 @@ namespace
 
 TEST_CASE("besselJ1 matches standard library j1", "[core][portable]")
 {
-	const RealType x1 = 0.0;
-	const RealType x2 = 1.0;
-	const RealType x3 = -2.5;
+	const double x1 = 0.0;
+	const double x2 = 1.0;
+	const double x3 = -2.5;
 
 	REQUIRE_THAT(core::besselJ1(x1), WithinRel(expectedBesselJ1(x1), 1e-12));
 	REQUIRE_THAT(core::besselJ1(x2), WithinRel(expectedBesselJ1(x2), 1e-12));

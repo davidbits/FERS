@@ -108,6 +108,8 @@ namespace serial::vita49
 					{"triangle_period_s", packet.fmcw.triangle_period},
 					{"chirp_count", packet.fmcw.chirp_count},
 					{"triangle_count", packet.fmcw.triangle_count},
+					{"sampled_duration_s", packet.fmcw.sampled_duration},
+					{"sampled_count", packet.fmcw.sampled_count},
 					{"dechirp_mode", packet.fmcw.dechirp_mode},
 					{"dechirp_reference_source", packet.fmcw.dechirp_reference_source},
 					{"dechirp_reference_transmitter_id", packet.fmcw.dechirp_reference_transmitter_id},

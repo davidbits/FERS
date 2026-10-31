@@ -4,6 +4,7 @@
 #include <complex>
 #include <cstdint>
 #include <iostream>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <sstream>
@@ -23,6 +24,8 @@
 #include "math/geometry_ops.h"
 #include "math/path.h"
 #include "math/rotation_path.h"
+#include "propagation/pointscatter/pointscatter.h"
+#include "propagation/propagation_model.h"
 #include "radar/platform.h"
 #include "radar/receiver.h"
 #include "radar/target.h"
@@ -84,7 +87,7 @@ namespace
 		std::uint32_t registerStream(const core::ReceiverStreamDescriptor& stream) override
 		{
 			descriptor = stream;
-			return stream_id;
+			return stream_id++;
 		}
 		void openStream(std::uint32_t id, RealType first_sample_time) override
 		{
@@ -97,6 +100,7 @@ namespace
 			sample_starts.push_back(block.sample_start);
 			sample_rates.push_back(block.sample_rate);
 			blocks.emplace_back(block.samples.begin(), block.samples.end());
+			block_receiver_ids.push_back(block.stream.receiver_id);
 		}
 		void submitBlocks(const std::span<const core::ReceiverSampleBlock> submitted_blocks) override
 		{
@@ -120,6 +124,7 @@ namespace
 		std::vector<RealType> sample_rates;
 		std::vector<RealType> heartbeat_times;
 		std::vector<std::vector<ComplexType>> blocks;
+		std::vector<SimId> block_receiver_ids;
 		std::vector<std::size_t> batch_sizes;
 	};
 
@@ -127,6 +132,29 @@ namespace
 	{
 		for (std::size_t block_index = 0; block_index < sink.blocks.size(); ++block_index)
 		{
+			const auto start = sink.sample_starts[block_index];
+			const auto& block = sink.blocks[block_index];
+			const auto end = start + static_cast<std::uint64_t>(block.size());
+			if (sample_index >= start && sample_index < end)
+			{
+				return block[static_cast<std::size_t>(sample_index - start)];
+			}
+		}
+		return {};
+	}
+
+	// Like `sampleAt`, but restricted to blocks submitted for one specific receiver - needed once
+	// more than one receiver shares a sink, since `sample_start` indices aren't unique across
+	// receivers (each receiver's stream is indexed from its own 0).
+	ComplexType sampleAtForReceiver(const RecordingOutputSink& sink, const SimId receiver_id,
+									const std::uint64_t sample_index)
+	{
+		for (std::size_t block_index = 0; block_index < sink.blocks.size(); ++block_index)
+		{
+			if (sink.block_receiver_ids[block_index] != receiver_id)
+			{
+				continue;
+			}
 			const auto start = sink.sample_starts[block_index];
 			const auto& block = sink.blocks[block_index];
 			const auto end = start + static_cast<std::uint64_t>(block.size());
@@ -157,36 +185,29 @@ namespace
 		return timeline;
 	}
 
-	struct FixedSignal final : public fers_signal::Signal
-	{
-		std::vector<ComplexType> data;
-
-		std::vector<ComplexType> render(const std::vector<interp::InterpPoint>&, unsigned& size,
-										RealType) const override
-		{
-			size = static_cast<unsigned>(data.size());
-			return data;
-		}
-	};
-
 	std::unique_ptr<serial::Response>
-	makeFixedResponse(const radar::Transmitter* transmitter,
-					  std::vector<std::unique_ptr<fers_signal::RadarSignal>>& wave_store,
+	makeFixedResponse(std::vector<std::unique_ptr<fers_signal::RadarSignal>>& wave_store,
 					  const std::vector<ComplexType>& samples, const RealType sample_rate, const RealType start_time)
 	{
-		auto signal = std::make_unique<FixedSignal>();
-		signal->data = samples;
-		signal->load(samples, static_cast<unsigned>(samples.size()), sample_rate);
+		fers_signal::PulseWaveform sampled;
+		sampled.load(samples, static_cast<unsigned>(samples.size()), sample_rate);
 
-		auto wave = std::make_unique<fers_signal::RadarSignal>(
-			"fixed_wave", 1.0, 1.0e9, static_cast<RealType>(samples.size()) / sample_rate, std::move(signal));
+		auto wave = std::make_unique<fers_signal::RadarSignal>("fixed_wave", 1.0, 1.0e9, std::move(sampled));
 		const auto* wave_ptr = wave.get();
 		wave_store.push_back(std::move(wave));
 
-		auto response = std::make_unique<serial::Response>(wave_ptr, transmitter);
-		response->addInterpPoint({1.0, start_time, 0.0, 0.0});
-		response->addInterpPoint({1.0, start_time + static_cast<RealType>(samples.size() - 1) / sample_rate, 0.0, 0.0});
-		return response;
+		const RealType edge = 1.0 / sample_rate;
+		const interp::InterpPoint first{.gain = 1.0, .rx_time = start_time, .delay = 0.0, .phase_delay = 0.0};
+		serial::ResponseBuilder builder(wave_ptr, first, edge, edge);
+		for (std::size_t i = 1; i < samples.size(); ++i)
+		{
+			builder.addInterpPoint({.gain = 1.0,
+									.rx_time = start_time + static_cast<RealType>(i) / sample_rate,
+									.delay = 0.0,
+									.phase_delay = 0.0},
+								   edge);
+		}
+		return std::make_unique<serial::Response>(std::move(builder));
 	}
 
 	/// Initializes a platform with constant position and zero rotation.
@@ -246,8 +267,7 @@ namespace
 		auto timing = std::make_shared<timing::Timing>("ClockInstance", 214);
 		timing->initializeModel(proto_timing.get());
 		auto antenna = std::make_unique<antenna::Isotropic>("IsoAnt", 215);
-		auto signal = std::make_unique<fers_signal::RadarSignal>("CWWave", 1.0, 1.0e6, 1.0,
-																 std::make_unique<fers_signal::CwSignal>(), 216);
+		auto signal = std::make_unique<fers_signal::RadarSignal>("CWWave", 1.0, 1.0e6, fers_signal::CwWaveform{}, 216);
 
 		auto tx = std::make_unique<radar::Transmitter>(tx_plat.get(), "Tx", radar::OperationMode::CW_MODE, 217);
 		tx->setTiming(timing);
@@ -302,11 +322,14 @@ namespace
 	 * @brief Helper to create a fully configured World with basic physics objects.
 	 * @return A unique pointer to a populated World.
 	 */
-	std::unique_ptr<core::World> createPhysicsWorld()
+	// tgt_y_offset moves the target off the Tx-Rx line (default: exactly on it). The bistatic
+	// reflection model has no specular bisector for a target exactly between Tx and Rx (forward
+	// scatter), so tests that need a reflected path must pass a nonzero offset.
+	std::unique_ptr<core::World> createPhysicsWorld(RealType tgt_y_offset = 0.0)
 	{
 		auto world = std::make_unique<core::World>();
 
-		// Setup Platforms: Tx at origin, Rx at (100, 0, 0), Target at (50, 0, 0)
+		// Setup Platforms: Tx at origin, Rx at (100, 0, 0), Target at (50, tgt_y_offset, 0)
 		auto tx_plat = std::make_unique<radar::Platform>("TxPlat", 10);
 		tx_plat->getMotionPath()->addCoord(math::Coord{math::Vec3(0.0, 0.0, 0.0), 0.0});
 		tx_plat->getMotionPath()->addCoord(math::Coord{math::Vec3(0.0, 0.0, 0.0), 100.0});
@@ -324,8 +347,8 @@ namespace
 		rx_plat->getRotationPath()->finalize();
 
 		auto tgt_plat = std::make_unique<radar::Platform>("TgtPlat", 12);
-		tgt_plat->getMotionPath()->addCoord(math::Coord{math::Vec3(50.0, 0.0, 0.0), 0.0});
-		tgt_plat->getMotionPath()->addCoord(math::Coord{math::Vec3(50.0, 0.0, 0.0), 100.0});
+		tgt_plat->getMotionPath()->addCoord(math::Coord{math::Vec3(50.0, tgt_y_offset, 0.0), 0.0});
+		tgt_plat->getMotionPath()->addCoord(math::Coord{math::Vec3(50.0, tgt_y_offset, 0.0), 100.0});
 		tgt_plat->getMotionPath()->finalize();
 		tgt_plat->getRotationPath()->addCoord(math::RotationCoord(0.0, 0.0, 0.0));
 		tgt_plat->getRotationPath()->addCoord(math::RotationCoord(0.0, 0.0, 100.0));
@@ -342,8 +365,7 @@ namespace
 		auto antenna = std::make_unique<antenna::Isotropic>("IsoAnt", 2);
 
 		// Setup Signal (1 Watt CW)
-		auto signal = std::make_unique<fers_signal::RadarSignal>("CWWave", 1.0, 1e9, 1.0,
-																 std::make_unique<fers_signal::CwSignal>(), 3);
+		auto signal = std::make_unique<fers_signal::RadarSignal>("CWWave", 1.0, 1e9, fers_signal::CwWaveform{}, 3);
 
 		// Setup Transmitter
 		auto tx = std::make_unique<radar::Transmitter>(tx_plat.get(), "Tx", radar::OperationMode::CW_MODE, 4);
@@ -359,7 +381,7 @@ namespace
 		rx->setWindowProperties(0.001, 1000.0, 0.0);
 
 		// Setup Target (RCS = 1.0 m^2)
-		auto target = std::make_unique<radar::IsoTarget>(tgt_plat.get(), "Tgt", 1.0, 42, 6);
+		auto target = radar::createIsoTarget(tgt_plat.get(), "Tgt", 1.0, 42, 6);
 
 		world->add(std::move(tx_plat));
 		world->add(std::move(rx_plat));
@@ -387,8 +409,8 @@ namespace
 		timing->initializeModel(timing_proto.get());
 		auto antenna = std::make_unique<antenna::Isotropic>("FmcwAntenna", 102);
 		auto* antenna_ptr = antenna.get();
-		auto fmcw = std::make_unique<fers_signal::FmcwChirpSignal>(1.0e6, 0.04, 0.1, 0.0, chirp_count);
-		auto wave = std::make_unique<fers_signal::RadarSignal>("FmcwWave", 10.0, 1.0e9, 0.04, std::move(fmcw), 103);
+		auto wave = std::make_unique<fers_signal::RadarSignal>(
+			"FmcwWave", 10.0, 1.0e9, fers_signal::FmcwChirpWaveform(1.0e6, 0.04, 0.1, 0.0, chirp_count), 103);
 		auto* wave_ptr = wave.get();
 		auto transmitter =
 			std::make_unique<radar::Transmitter>(platform_ptr, "FmcwTx", radar::OperationMode::FMCW_MODE, 104);
@@ -459,15 +481,15 @@ TEST_CASE("makeActiveSource caches streaming scalars and clips FMCW chirp count"
 	radar::Transmitter tx(&platform, "FmcwTx", radar::OperationMode::FMCW_MODE, 101);
 	tx.setAntenna(&antenna);
 	tx.setTiming(timing);
-	auto fmcw_signal = std::make_unique<fers_signal::FmcwChirpSignal>(20.0e6, 100.0e-6, 250.0e-6, 1.0e6, 1000);
-	fers_signal::RadarSignal wave("FmcwWave", 16.0, 10.0e9, 100.0e-6, std::move(fmcw_signal), 301);
+	fers_signal::RadarSignal wave("FmcwWave", 16.0, 10.0e9,
+								  fers_signal::FmcwChirpWaveform(20.0e6, 100.0e-6, 250.0e-6, 1.0e6, 1000), 301);
 	tx.setSignal(&wave);
 
 	const core::ActiveStreamingSource source = core::makeActiveSource(&tx, 5.0, 65.0);
 
 	REQUIRE(source.transmitter == &tx);
 	REQUIRE(source.is_fmcw);
-	REQUIRE(source.fmcw == wave.getFmcwChirpSignal());
+	REQUIRE(source.fmcw == wave.getFmcwChirpWaveform());
 	REQUIRE_THAT(source.segment_end, WithinAbs(5.25, 1.0e-12));
 	REQUIRE_THAT(source.carrier_freq, WithinAbs(10.0e9, 1.0e-6));
 	REQUIRE_THAT(source.amplitude, WithinAbs(4.0, 1.0e-12));
@@ -493,9 +515,10 @@ TEST_CASE("makeActiveSource caches signed FMCW down-chirp coefficient", "[core][
 	radar::Transmitter tx(&platform, "FmcwTx", radar::OperationMode::FMCW_MODE, 101);
 	tx.setAntenna(&antenna);
 	tx.setTiming(timing);
-	auto fmcw_signal = std::make_unique<fers_signal::FmcwChirpSignal>(20.0e6, 100.0e-6, 250.0e-6, 1.0e6, std::nullopt,
-																	  fers_signal::FmcwChirpDirection::Down);
-	fers_signal::RadarSignal wave("FmcwWave", 16.0, 10.0e9, 100.0e-6, std::move(fmcw_signal), 301);
+	fers_signal::RadarSignal wave("FmcwWave", 16.0, 10.0e9,
+								  fers_signal::FmcwChirpWaveform(20.0e6, 100.0e-6, 250.0e-6, 1.0e6, std::nullopt,
+																 fers_signal::FmcwChirpDirection::Down),
+								  301);
 	tx.setSignal(&wave);
 
 	const core::ActiveStreamingSource source = core::makeActiveSource(&tx, 5.0, 65.0);
@@ -618,12 +641,23 @@ TEST_CASE("SimulationEngine handles Tx Pulsed Start and routes responses", "[cor
 	params::setOversampleRatio(1);
 	params::setTime(0.0, 10.0);
 
-	auto world = createPhysicsWorld();
+	// Off the Tx-Rx line: a target exactly between Tx and Rx is forward scatter, which the
+	// bistatic reflection model doesn't cover (see createPhysicsWorld).
+	auto world = createPhysicsWorld(10.0);
 	pool::ThreadPool pool(1);
 	core::SimulationEngine engine(world.get(), pool, nullptr, ".");
 
 	auto* tx = world->getTransmitters().front().get();
 	auto* cw_rx = world->getReceivers().front().get();
+
+	// createPhysicsWorld()'s transmitter carries a CwWaveform, which calculateResponses
+	// deliberately refuses (Response requires an isPulsed() RadarSignal). Swap in a
+	// PulseWaveform for this test, to exercise pulsed response generation/routing.
+	fers_signal::PulseWaveform sampled_wave;
+	sampled_wave.load(std::vector<ComplexType>{ComplexType{1.0, 0.0}, ComplexType{1.0, 0.0}}, 2, 1000.0);
+	fers_signal::RadarSignal pulsed_signal("PulsedWave", 1.0, 1e9, std::move(sampled_wave), 7);
+	tx->setSignal(&pulsed_signal);
+	tx->setMode(radar::OperationMode::PULSED_MODE);
 
 	// Add a pulsed receiver to test routing to inbox
 	auto pulsed_rx_plat = std::make_unique<radar::Platform>("PulsedRxPlat", 30);
@@ -667,44 +701,95 @@ TEST_CASE("SimulationEngine calculates mathematically correct CW physics", "[cor
 	ParamGuard const guard;
 	params::setC(3e8); // Override c to 3e8 for clean math
 
-	auto world = createPhysicsWorld();
+	// Target offset off the Tx-Rx line: a target exactly between Tx and Rx is forward scatter,
+	// which the bistatic reflection model doesn't cover (see createPhysicsWorld).
+	constexpr RealType tgt_y_offset = 10.0;
+	auto world = createPhysicsWorld(tgt_y_offset);
 	pool::ThreadPool pool(1);
 	core::SimulationEngine const engine(world.get(), pool, nullptr, ".");
 
 	auto* tx = world->getTransmitters().front().get();
 	auto* rx = world->getReceivers().front().get();
-	SECTION("Calculates exact Direct and Reflected Path complex envelope")
+
+	// Math Verification (shared by both SECTIONs below):
+	// c = 3e8, f = 1e9 -> lambda = 0.3m
+	// Tx=(0,0,0), Rx=(100,0,0), Tgt=(50,10,0)
+	//
+	// DIRECT PATH:
+	// d = 100m.
+	// Pr/Pt = (Gt * Gr * lambda^2) / (16 * pi^2 * d^2)
+	// Amplitude = sqrt(Pr/Pt) = lambda / (4 * pi * d)
+	// Delay = d / c
+	// Phase = -2 * pi * f * delay
+	//
+	// REFLECTED PATH:
+	// Rtx = Rrx = sqrt(50^2 + 10^2) (Tgt is off-axis but still in the Tx-Rx plane, so the
+	// reflection stays fully co-polarised - see the pointscatter tests for the general case).
+	// RCS = 1.0
+	// Pr/Pt = (Gt * Gr * RCS * lambda^2) / (64 * pi^3 * Rtx^2 * Rrx^2)
+	// Amplitude = sqrt(Pr/Pt)
+	// Delay = (Rtx + Rrx) / c
+
+	const RealType lambda = 0.3;
+	const RealType d = 100.0;
+	const RealType r_tgt = std::sqrt(50.0 * 50.0 + tgt_y_offset * tgt_y_offset);
+
+	const RealType expected_direct_amp = lambda / (4.0 * PI * d);
+	const RealType expected_refl_amp =
+		std::sqrt((lambda * lambda) / (64.0 * PI * PI * PI * r_tgt * r_tgt * r_tgt * r_tgt));
+	const RealType expected_direct_phase = -2.0 * PI * (1e9 / 3e8) * d;
+	const RealType expected_refl_phase = -2.0 * PI * (1e9 / 3e8) * (2.0 * r_tgt);
+
+	SECTION("Calculates exact Direct and Reflected Path complex envelope (non-polarimetric)")
 	{
-		// Math Verification:
-		// c = 3e8, f = 1e9 -> lambda = 0.3m
-		// Tx=(0,0,0), Rx=(100,0,0), Tgt=(50,0,0)
-		//
-		// DIRECT PATH:
-		// d = 100m.
-		// Pr/Pt = (Gt * Gr * lambda^2) / (16 * pi^2 * d^2)
-		// Pr/Pt = (1 * 1 * 0.09) / (16 * pi^2 * 10000) = 0.09 / (160000 * pi^2)
-		// Amplitude = sqrt(Pr/Pt) = 0.3 / (400 * pi) = 0.0002387324146
-		// Delay = 100 / 3e8 = 3.33333333e-7 s
-		// Phase = -2 * pi * f * delay = -2 * pi * 1e9 * (100/3e8) = -2000*pi/3 rad
-		//
-		// REFLECTED PATH:
-		// Rtx = 50m, Rrx = 50m. RCS = 1.0
-		// Pr/Pt = (Gt * Gr * RCS * lambda^2) / (64 * pi^3 * Rtx^2 * Rrx^2)
-		// Pr/Pt = (1 * 1 * 1 * 0.09) / (64 * pi^3 * 2500 * 2500) = 0.09 / (400,000,000 * pi^3)
-		// Amplitude = sqrt(Pr/Pt) = 0.3 / (20000 * pi * sqrt(pi)) = 0.00000268689
-		// Delay = (50+50) / 3e8 = 100 / 3e8 = 3.33333333e-7 s
-		// Phase = -2000*pi/3 rad (Same as direct path since total distance is the same)
-
-		const RealType expected_direct_amp = 0.3 / (400.0 * PI);
-		const RealType expected_refl_amp = 0.3 / (20000.0 * PI * std::sqrt(PI));
-		const RealType expected_phase = -2000.0 * PI / 3.0;
-
-		ComplexType const expected_direct = std::polar(expected_direct_amp, expected_phase);
-		ComplexType const expected_refl = std::polar(expected_refl_amp, expected_phase);
+		// The default (non-polarimetric) model has no antenna-to-antenna coupling term at all, for
+		// either path, so both amplitudes apply directly with no sign/coupling factor.
+		ComplexType const expected_direct = std::polar(expected_direct_amp, expected_direct_phase);
+		ComplexType const expected_refl = std::polar(expected_refl_amp, expected_refl_phase);
 		ComplexType const expected_total = expected_direct + expected_refl;
 
-		ComplexType const actual_total = simulation::calculateDirectPathContribution(tx, rx, 0.0) +
-			simulation::calculateReflectedPathContribution(tx, rx, world->getTargets().front().get(), 0.0);
+		const propagation::pointscatter::PointScatterModel prop(world.get());
+		const std::vector<core::ActiveStreamingSource> sources = {
+			core::makeActiveSource(tx, 0.0, std::numeric_limits<RealType>::max())};
+
+		ComplexType actual_total{0.0, 0.0};
+		const auto paths = prop.traceFromReceivers(nullptr, {rx}, sources, 0.0);
+		for (const auto& path : paths.at(rx))
+		{
+			actual_total +=
+				path.gain * std::polar(RealType(1.0), -2.0 * PI * tx->getSignal()->getCarrier() * path.delay);
+		}
+
+		REQUIRE_THAT(actual_total.real(), WithinAbs(expected_total.real(), 1e-12));
+		REQUIRE_THAT(actual_total.imag(), WithinAbs(expected_total.imag(), 1e-12));
+	}
+
+	SECTION("Calculates exact Direct and Reflected Path complex envelope (polarimetric)")
+	{
+		params::params.point_scatterer_params.polarimetric = true;
+
+		// Polarisation sign: Tx and Rx are both boresight-aligned along the Tx-Rx axis (each sees
+		// the other, or the target, at its own antenna pole), and the target's incidence and scatter
+		// directions are also aligned with that same axis. Both the direct antenna-to-antenna
+		// coupling and the reflection's co-pol coupling come out to exactly -1 (not +1) for this
+		// alignment, so both contributions carry a sign flip.
+		constexpr RealType polarisation_sign = -1.0;
+
+		ComplexType const expected_direct = polarisation_sign * std::polar(expected_direct_amp, expected_direct_phase);
+		ComplexType const expected_refl = polarisation_sign * std::polar(expected_refl_amp, expected_refl_phase);
+		ComplexType const expected_total = expected_direct + expected_refl;
+
+		const propagation::pointscatter::PointScatterModel prop(world.get());
+		const std::vector<core::ActiveStreamingSource> sources = {
+			core::makeActiveSource(tx, 0.0, std::numeric_limits<RealType>::max())};
+
+		ComplexType actual_total{0.0, 0.0};
+		const auto paths = prop.traceFromReceivers(nullptr, {rx}, sources, 0.0);
+		for (const auto& path : paths.at(rx))
+		{
+			actual_total +=
+				path.gain * std::polar(RealType(1.0), -2.0 * PI * tx->getSignal()->getCarrier() * path.delay);
+		}
 
 		REQUIRE_THAT(actual_total.real(), WithinAbs(expected_total.real(), 1e-12));
 		REQUIRE_THAT(actual_total.imag(), WithinAbs(expected_total.imag(), 1e-12));
@@ -889,6 +974,7 @@ TEST_CASE("SimulationEngine streaming output applies logged pulsed interference 
 	ParamGuard const guard;
 	params::setRate(4.0);
 	params::setOversampleRatio(1);
+	params::setSimSamplingRate(4.0);
 	params::setTime(0.0, 1.0);
 
 	auto world = createPhysicsWorld();
@@ -896,14 +982,13 @@ TEST_CASE("SimulationEngine streaming output applies logged pulsed interference 
 	RecordingOutputSink sink;
 	core::SimulationEngine engine(world.get(), pool, nullptr, ".", nullptr, &sink);
 
-	auto* tx = world->getTransmitters().front().get();
 	auto* rx = world->getReceivers().front().get();
 	rx->setNoiseTemperature(0.0);
 	rx->setActive(true);
 
 	std::vector<std::unique_ptr<fers_signal::RadarSignal>> wave_store;
 	rx->addInterferenceToLog(
-		makeFixedResponse(tx, wave_store, {ComplexType{1.0, 0.0}, ComplexType{1.0, 0.0}}, params::rate(), 0.25));
+		makeFixedResponse(wave_store, {ComplexType{1.0, 0.0}, ComplexType{1.0, 0.0}}, params::rate(), 0.25));
 
 	world->getSimulationState().t_current = 0.0;
 	engine.processStreamingPhysics(1.0);
@@ -911,9 +996,12 @@ TEST_CASE("SimulationEngine streaming output applies logged pulsed interference 
 
 	const auto samples = outputTimeline(sink);
 	REQUIRE(samples.size() == 4u);
+	// The response (see makeFixedResponse) renders as [0, 1.0, 1.0] starting at
+	// response->startTime() == 0.25 - edge == 0.0 (edge == 1/rate == 0.25); its real
+	// content lands at timeline index 1.
 	REQUIRE_THAT(samples[0].real(), WithinAbs(0.0, 1e-12));
 	REQUIRE_THAT(samples[1].real(), WithinAbs(1.0, 1e-12));
-	REQUIRE_THAT(samples[2].real(), WithinAbs(1.0, 1e-12));
+	REQUIRE_THAT(samples[2].real(), WithinAbs(0.0, 1e-12));
 	REQUIRE_THAT(samples[3].real(), WithinAbs(0.0, 1e-12));
 }
 
@@ -987,15 +1075,23 @@ TEST_CASE("SimulationEngine cleanup preserves moving direct streaming tails", "[
 		REQUIRE(std::abs(sampleAt(sink, active_index)) > 0.0);
 		REQUIRE(fixture.world->getSimulationState().active_streaming_transmitters.size() == 1);
 
+		// Reactivate so cleanup can confirm the source is dead from real per-sample evidence rather
+		// than falling back to the coarse, deliberately loose safety net (which only guarantees
+		// cleanup by the time no receiver's schedule could possibly observe the source again).
+		engine.handleRxStreamingStart(fixture.rx);
 		fixture.world->getSimulationState().t_current = active_sample_time + 0.001;
 		engine.processStreamingPhysics(cleanup_time);
 		REQUIRE(fixture.world->getSimulationState().active_streaming_transmitters.empty());
 	};
 
+	// cleanup_time is chosen with margin past the true dead instant: cleanup now relies on a real
+	// sample landing strictly past that instant (exact-boundary timestamps are unreliable under
+	// floating point, and the receiver is deactivated between the two processStreamingPhysics calls
+	// above, so the exact per-sample check can only run once cleanup_time's own call processes one).
 	SECTION("linear receding transmitter")
 	{
 		run_case(math::Path::InterpType::INTERP_LINEAR,
-				 {{math::Vec3{-100.0, 0.0, 0.0}, 0.0}, {math::Vec3{-200.0, 0.0, 0.0}, 1.0}}, 0.325, 0.34);
+				 {{math::Vec3{-100.0, 0.0, 0.0}, 0.0}, {math::Vec3{-200.0, 0.0, 0.0}, 1.0}}, 0.325, 0.36);
 	}
 
 	SECTION("cubic nonmonotone transmitter")
@@ -1005,7 +1101,7 @@ TEST_CASE("SimulationEngine cleanup preserves moving direct streaming tails", "[
 				  {math::Vec3{-80.0, 0.0, 0.0}, 0.2},
 				  {math::Vec3{-200.0, 0.0, 0.0}, 0.4},
 				  {math::Vec3{-100.0, 0.0, 0.0}, 0.9}},
-				 0.35, 0.401);
+				 0.35, 0.421);
 	}
 }
 
@@ -1018,9 +1114,11 @@ TEST_CASE("SimulationEngine cleanup preserves reflected-only streaming tails", "
 	params::setTime(0.0, 0.8);
 	params::setC(1000.0);
 
+	// Target nudged off the Tx-Rx line (negligible at this scale): exactly between Tx and Rx is
+	// forward scatter, which the bistatic reflection model doesn't cover.
 	auto fixture = createStreamingPathWorld(math::Path::InterpType::INTERP_STATIC, {{math::Vec3{0.0, 0.0, 0.0}, 0.0}},
 											math::Path::InterpType::INTERP_STATIC, {{math::Vec3{500.0, 0.0, 0.0}, 0.0}},
-											std::vector<math::Coord>{{math::Vec3{250.0, 0.0, 0.0}, 0.0}});
+											std::vector<math::Coord>{{math::Vec3{250.0, 0.01, 0.0}, 0.0}});
 	fixture.rx->setFlag(radar::Receiver::RecvFlag::FLAG_NODIRECT);
 	fixture.rx->setActive(true);
 
@@ -1036,8 +1134,12 @@ TEST_CASE("SimulationEngine cleanup preserves reflected-only streaming tails", "
 	REQUIRE(std::abs(sampleAt(sink, 600)) > 0.0);
 	REQUIRE(fixture.world->getSimulationState().active_streaming_transmitters.size() == 1);
 
+	// Reactivate so cleanup can confirm the source is dead from real per-sample evidence (a small
+	// margin past the true dead instant, 0.7) rather than falling back to the coarse, deliberately
+	// loose safety net.
+	engine.handleRxStreamingStart(fixture.rx);
 	fixture.world->getSimulationState().t_current = 0.601;
-	engine.processStreamingPhysics(0.701);
+	engine.processStreamingPhysics(0.72);
 	REQUIRE(fixture.world->getSimulationState().active_streaming_transmitters.empty());
 }
 
@@ -1070,8 +1172,10 @@ TEST_CASE("SimulationEngine cleanup keeps sources through receiver gaps when tai
 	REQUIRE(fixture.world->getSimulationState().active_streaming_transmitters.size() == 1);
 	engine.handleRxStreamingStart(fixture.rx);
 
+	// A small margin past the true dead instant (0.3): cleanup needs a real sample landing strictly
+	// past it, not just an exact-boundary timestamp.
 	fixture.world->getSimulationState().t_current = 0.25;
-	engine.processStreamingPhysics(0.301);
+	engine.processStreamingPhysics(0.31);
 	engine.handleRxStreamingEnd(fixture.rx);
 	REQUIRE(std::abs(sampleAt(sink, 250)) > 0.0);
 	REQUIRE(fixture.world->getSimulationState().active_streaming_transmitters.empty());
@@ -1098,7 +1202,9 @@ TEST_CASE("SimulationEngine cleanup removes an old segment before a same-time ne
 	engine.handleTxStreamingEnd(fixture.tx);
 	REQUIRE(fixture.world->getSimulationState().active_streaming_transmitters.size() == 1);
 
-	engine.processStreamingPhysics(0.375);
+	// A small margin past the true dead instant (0.375): cleanup needs a real sample landing
+	// strictly past it, not just an exact-boundary timestamp.
+	engine.processStreamingPhysics(0.39);
 	REQUIRE(fixture.world->getSimulationState().active_streaming_transmitters.empty());
 
 	engine.handleTxStreamingStart(core::makeActiveSource(fixture.tx, 0.375, 0.625));
@@ -1191,8 +1297,7 @@ TEST_CASE("SimulationEngine processStreamingPhysics uses buffered shared timing 
 	const auto lookup = makeLookup(timing);
 
 	auto antenna = std::make_unique<antenna::Isotropic>("IsoAnt", 2);
-	auto signal = std::make_unique<fers_signal::RadarSignal>("CWWave", 1.0, 1.0, 1.0,
-															 std::make_unique<fers_signal::CwSignal>(), 3);
+	auto signal = std::make_unique<fers_signal::RadarSignal>("CWWave", 1.0, 1.0, fers_signal::CwWaveform{}, 3);
 
 	auto tx = std::make_unique<radar::Transmitter>(tx_plat.get(), "Tx", radar::OperationMode::CW_MODE, 4);
 	tx->setTiming(timing);
@@ -1224,11 +1329,297 @@ TEST_CASE("SimulationEngine processStreamingPhysics uses buffered shared timing 
 	engine.processStreamingPhysics(0.6);
 	engine.handleRxStreamingEnd(rx_ptr);
 
-	const ComplexType expected = simulation::calculateDirectPathContribution(tx_ptr, rx_ptr, 0.5, &lookup);
+	const propagation::pointscatter::PointScatterModel prop(world.get());
+	const std::vector<core::ActiveStreamingSource> sources = {
+		core::makeActiveSource(tx_ptr, params::startTime(), params::endTime())};
+	ComplexType expected{0.0, 0.0};
+	const auto paths = prop.traceFromReceivers(nullptr, {rx_ptr}, sources, 0.5);
+	for (const auto& path : paths.at(rx_ptr))
+	{
+		const auto& source = sources[path.source_index];
+		expected += simulation::calculateStreamingPathContribution(source, rx_ptr, path, 0.5, &lookup);
+	}
 	const ComplexType actual = sampleAt(sink, 5);
 
 	REQUIRE_THAT(actual.real(), WithinAbs(expected.real(), 1e-6));
 	REQUIRE_THAT(actual.imag(), WithinAbs(expected.imag(), 1e-6));
+}
+
+TEST_CASE("SimulationEngine traces multiple active streaming receivers independently", "[core][threading][streaming]")
+{
+	// Test for batching `traceFromReceivers` across every active receiver in one call
+	// (appendActiveReceiverStreamingSamples): with two receivers at different ranges from the same
+	// transmitter, each receiver's rendered sample must still match that receiver's own
+	// independently-computed path, not get mixed up with the other receiver's.
+	ParamGuard const guard;
+	params::setRate(10.0);
+	params::setOversampleRatio(1);
+	params::setTime(0.0, 1.0);
+	params::setC(10.0);
+
+	auto world = std::make_unique<core::World>();
+
+	auto tx_plat = std::make_unique<radar::Platform>("TxPlat", 10);
+	setupStaticPlatform(*tx_plat, math::Vec3{0.0, 0.0, 0.0});
+	auto rx1_plat = std::make_unique<radar::Platform>("RxPlat1", 11);
+	setupStaticPlatform(*rx1_plat, math::Vec3{1.5, 0.0, 0.0});
+	auto rx2_plat = std::make_unique<radar::Platform>("RxPlat2", 12);
+	setupStaticPlatform(*rx2_plat, math::Vec3{0.0, 2.5, 0.0});
+
+	auto proto_timing = std::make_unique<timing::PrototypeTiming>("Clock", 1);
+	proto_timing->setFrequency(1.0);
+	auto timing = std::make_shared<timing::Timing>("ClockInstance", 42, 1);
+	timing->initializeModel(proto_timing.get());
+	const auto lookup = makeLookup(timing);
+
+	auto antenna = std::make_unique<antenna::Isotropic>("IsoAnt", 2);
+	auto signal = std::make_unique<fers_signal::RadarSignal>("CWWave", 1.0, 1.0, fers_signal::CwWaveform{}, 3);
+
+	auto tx = std::make_unique<radar::Transmitter>(tx_plat.get(), "Tx", radar::OperationMode::CW_MODE, 4);
+	tx->setTiming(timing);
+	tx->setAntenna(antenna.get());
+	tx->setSignal(signal.get());
+
+	auto rx1 = std::make_unique<radar::Receiver>(rx1_plat.get(), "Rx1", 42, radar::OperationMode::CW_MODE, 5);
+	rx1->setTiming(timing);
+	rx1->setAntenna(antenna.get());
+	rx1->setActive(true);
+
+	auto rx2 = std::make_unique<radar::Receiver>(rx2_plat.get(), "Rx2", 42, radar::OperationMode::CW_MODE, 6);
+	rx2->setTiming(timing);
+	rx2->setAntenna(antenna.get());
+	rx2->setActive(true);
+
+	auto* tx_ptr = tx.get();
+	auto* rx1_ptr = rx1.get();
+	auto* rx2_ptr = rx2.get();
+
+	world->add(std::move(tx_plat));
+	world->add(std::move(rx1_plat));
+	world->add(std::move(rx2_plat));
+	world->add(std::move(proto_timing));
+	world->add(std::move(antenna));
+	world->add(std::move(signal));
+	world->add(std::move(tx));
+	world->add(std::move(rx1));
+	world->add(std::move(rx2));
+
+	world->getSimulationState().t_current = 0.0;
+
+	pool::ThreadPool pool(1);
+	RecordingOutputSink sink;
+	core::SimulationEngine engine(world.get(), pool, nullptr, ".", nullptr, &sink);
+	engine.handleTxStreamingStart(core::makeActiveSource(tx_ptr, params::startTime(), params::endTime()));
+	engine.processStreamingPhysics(0.6);
+	engine.handleRxStreamingEnd(rx1_ptr);
+	engine.handleRxStreamingEnd(rx2_ptr);
+
+	const propagation::pointscatter::PointScatterModel prop(world.get());
+	const std::vector<core::ActiveStreamingSource> sources = {
+		core::makeActiveSource(tx_ptr, params::startTime(), params::endTime())};
+
+	ComplexType expected1{0.0, 0.0};
+	const auto paths1 = prop.traceFromReceivers(nullptr, {rx1_ptr}, sources, 0.5);
+	for (const auto& path : paths1.at(rx1_ptr))
+	{
+		expected1 +=
+			simulation::calculateStreamingPathContribution(sources[path.source_index], rx1_ptr, path, 0.5, &lookup);
+	}
+	ComplexType expected2{0.0, 0.0};
+	const auto paths2 = prop.traceFromReceivers(nullptr, {rx2_ptr}, sources, 0.5);
+	for (const auto& path : paths2.at(rx2_ptr))
+	{
+		expected2 +=
+			simulation::calculateStreamingPathContribution(sources[path.source_index], rx2_ptr, path, 0.5, &lookup);
+	}
+
+	// Different ranges (1.5 vs 2.5) must give genuinely different delay/gain - otherwise this test
+	// couldn't actually distinguish a batching mix-up from a coincidence.
+	REQUIRE(std::abs(expected1 - expected2) > 1e-6);
+
+	const ComplexType actual1 = sampleAtForReceiver(sink, rx1_ptr->getId(), 5);
+	const ComplexType actual2 = sampleAtForReceiver(sink, rx2_ptr->getId(), 5);
+
+	REQUIRE_THAT(actual1.real(), WithinAbs(expected1.real(), 1e-6));
+	REQUIRE_THAT(actual1.imag(), WithinAbs(expected1.imag(), 1e-6));
+	REQUIRE_THAT(actual2.real(), WithinAbs(expected2.real(), 1e-6));
+	REQUIRE_THAT(actual2.imag(), WithinAbs(expected2.imag(), 1e-6));
+}
+
+TEST_CASE("CW coarse sampling is disabled by default and leaves streaming output unchanged",
+		  "[core][threading][streaming][coarse]")
+{
+	// cwSimSamplingRate defaults to unset; confirm the engine still produces the exact per-sample
+	// result (sanity check that enabling the feature elsewhere in this file can't have changed the
+	// default path, since every other streaming test in this file relies on that).
+	ParamGuard const guard;
+	params::params.reset();
+	params::setRate(1000.0);
+	params::setOversampleRatio(1);
+	params::setTime(0.0, 0.5);
+	params::setC(1000.0);
+	REQUIRE_FALSE(params::cwSimSamplingRate().has_value());
+
+	auto fixture =
+		createStreamingPathWorld(math::Path::InterpType::INTERP_STATIC, {{math::Vec3{0.0, 0.0, 0.0}, 0.0}},
+								 math::Path::InterpType::INTERP_STATIC, {{math::Vec3{100.0, 0.0, 0.0}, 0.0}});
+	pool::ThreadPool pool(1);
+	RecordingOutputSink sink;
+	core::SimulationEngine engine(fixture.world.get(), pool, nullptr, ".", nullptr, &sink);
+
+	fixture.rx->setActive(true);
+	engine.handleTxStreamingStart(core::makeActiveSource(fixture.tx, 0.0, 0.5));
+	engine.processStreamingPhysics(0.401);
+	engine.handleRxStreamingEnd(fixture.rx);
+
+	const propagation::pointscatter::PointScatterModel prop(fixture.world.get());
+	const std::vector<core::ActiveStreamingSource> sources = {core::makeActiveSource(fixture.tx, 0.0, 0.5)};
+	ComplexType expected{0.0, 0.0};
+	const auto paths = prop.traceFromReceivers(nullptr, {fixture.rx}, sources, 0.4);
+	for (const auto& path : paths.at(fixture.rx))
+	{
+		expected += simulation::calculateStreamingPathContribution(sources[path.source_index], fixture.rx, path, 0.4);
+	}
+
+	const ComplexType actual = sampleAt(sink, 400);
+	REQUIRE_THAT(actual.real(), WithinAbs(expected.real(), 1e-6));
+	REQUIRE_THAT(actual.imag(), WithinAbs(expected.imag(), 1e-6));
+}
+
+TEST_CASE("CW coarse sampling interpolation converges toward exact output as coarse rate increases",
+		  "[core][threading][streaming][coarse]")
+{
+	// A receiver moving at constant velocity away from a static transmitter. Delay varies linearly
+	// with time, so coarse-sample interpolation of delay (and hence the carrier/Doppler phase it
+	// drives) is exact regardless of coarse rate - any error here comes purely from interpolating
+	// gain magnitude (1/R path loss, nonlinear in time) across each coarse interval, which should
+	// shrink as the coarse rate increases toward the full output rate.
+	ParamGuard const guard;
+
+	const auto sample_at_coarse_rate = [](const std::optional<RealType> coarse_rate) -> ComplexType
+	{
+		params::params.reset();
+		params::setRate(1000.0);
+		params::setOversampleRatio(1);
+		params::setTime(0.0, 1.0);
+		params::setC(1000.0);
+		params::params.cw_coarse_sample_rate = coarse_rate;
+
+		auto fixture =
+			createStreamingPathWorld(math::Path::InterpType::INTERP_STATIC, {{math::Vec3{0.0, 0.0, 0.0}, 0.0}},
+									 math::Path::InterpType::INTERP_LINEAR,
+									 {{math::Vec3{100.0, 0.0, 0.0}, 0.0}, {math::Vec3{200.0, 0.0, 0.0}, 1.0}});
+		pool::ThreadPool pool(1);
+		RecordingOutputSink sink;
+		core::SimulationEngine engine(fixture.world.get(), pool, nullptr, ".", nullptr, &sink);
+
+		fixture.rx->setActive(true);
+		engine.handleTxStreamingStart(core::makeActiveSource(fixture.tx, 0.0, 1.0));
+		engine.processStreamingPhysics(0.778);
+		engine.handleRxStreamingEnd(fixture.rx);
+
+		// 0.777s deliberately doesn't land on any of this test's coarse-tick grids (1/20, 1/100,
+		// 1/400 s), so each case is genuinely mid-interval and must interpolate rather than
+		// happening to read back a freshly-queried exact value.
+		return sampleAt(sink, 777);
+	};
+
+	const ComplexType exact = sample_at_coarse_rate(std::nullopt);
+
+	const auto error_at = [&](const RealType coarse_rate)
+	{ return std::abs(sample_at_coarse_rate(coarse_rate) - exact); };
+
+	const RealType error_coarse = error_at(20.0);
+	const RealType error_medium = error_at(100.0);
+	const RealType error_fine = error_at(400.0);
+
+	REQUIRE(error_coarse > 0.0); // Coarse enough that interpolation error must actually be visible.
+	REQUIRE(error_medium < error_coarse);
+	REQUIRE(error_fine < error_medium);
+}
+
+TEST_CASE("CW coarse sampling fades a path back in from zero after it reappears mid-simulation",
+		  "[core][threading][streaming][coarse]")
+{
+	// Regression test for a bug where SimulationEngine::tracePathsByReceiver passed a
+	// one-tick-stale interval_start_time to updateCoarseStreamingCache (it read _coarse_lo_time
+	// before updating it, so every call saw the value from the iteration before last rather than
+	// the immediately preceding tick). A newly-reappeared path's backdated zero-gain anchor was
+	// therefore placed two ticks before its real sample instead of one, so by the time its
+	// bracket actually became active for interpolation, the computed fraction was already ~0.5
+	// instead of ~0 - the signal snapped to roughly half its settled value in a single sample
+	// instead of fading in from zero. This only shows up for a path that appears or disappears
+	// mid-run under coarse sampling; a continuously-present path (as in the convergence test
+	// above) never exercises the insertion/fade-out branches, which is why that test alone
+	// couldn't have caught this.
+	// Tx/Rx on a fixed baseline, target crossing the Tx-Rx line (forward scatter, y=0) at t=1.0s:
+	// the reflected path exists for y notably off that line, and is skipped near it (see
+	// pointscatter.cpp's forward-scatter guard), giving a clean disappear/reappear pair to
+	// observe. Its true magnitude is NOT constant near the crossing (it grows quickly with
+	// distance off the forward-scatter line), so this test compares the coarse-sampled run
+	// against an exact (coarse sampling off) reference at the same sample index, rather than
+	// against a later "settled" sample of its own - that isolates the interpolation error from
+	// the genuine physical variation instead of conflating the two.
+	const auto run = [](const std::optional<RealType> coarse_rate) -> std::vector<ComplexType>
+	{
+		params::params.reset();
+		params::setRate(200.0);
+		params::setOversampleRatio(1);
+		params::setTime(0.0, 1.9);
+		params::setC(1000.0);
+		params::params.cw_coarse_sample_rate = coarse_rate;
+		// The forward-scatter skip that makes the reflected path disappear/reappear only applies
+		// in the polarimetric branch of pointscatter.cpp's reflectedPath() - the default
+		// (non-polarimetric) gain has no angle-dependent cutoff at all, so without this the path
+		// never actually appears/disappears and the test exercises nothing.
+		params::params.point_scatterer_params.polarimetric = true;
+
+		auto fixture = createStreamingPathWorld(
+			math::Path::InterpType::INTERP_STATIC, {{math::Vec3{0.0, 0.0, 0.0}, 0.0}},
+			math::Path::InterpType::INTERP_STATIC, {{math::Vec3{100.0, 0.0, 0.0}, 0.0}},
+			std::vector<math::Coord>{{math::Vec3{50.0, -5.0, 0.0}, 0.0}, {math::Vec3{50.0, 5.0, 0.0}, 2.0}},
+			math::Path::InterpType::INTERP_LINEAR);
+		fixture.rx->setFlag(radar::Receiver::RecvFlag::FLAG_NODIRECT); // isolate the reflected path
+		fixture.rx->setActive(true);
+
+		pool::ThreadPool pool(1);
+		RecordingOutputSink sink;
+		core::SimulationEngine engine(fixture.world.get(), pool, nullptr, ".", nullptr, &sink);
+		engine.handleTxStreamingStart(core::makeActiveSource(fixture.tx, 0.0, 1.9));
+		engine.processStreamingPhysics(1.9);
+		engine.handleRxStreamingEnd(fixture.rx);
+
+		return outputTimeline(sink);
+	};
+
+	ParamGuard const guard;
+	const auto exact_timeline = run(std::nullopt);
+	const auto coarse_timeline = run(10.0); // 100ms coarse ticks
+
+	// Find the reappearance in the coarse run: the last zero-to-nonzero transition (the first
+	// one, near t=0, is just simulation start-up, not what this test is about).
+	std::optional<std::size_t> reappear_index;
+	for (std::size_t i = 1; i < coarse_timeline.size(); ++i)
+	{
+		if (std::abs(coarse_timeline[i - 1]) == 0.0 && std::abs(coarse_timeline[i]) > 0.0)
+		{
+			reappear_index = i;
+		}
+	}
+	REQUIRE(reappear_index.has_value());
+	REQUIRE(reappear_index.value() < exact_timeline.size());
+
+	const RealType coarse_mag = std::abs(coarse_timeline[reappear_index.value()]);
+	const RealType exact_mag = std::abs(exact_timeline[reappear_index.value()]);
+
+	REQUIRE(exact_mag > 0.0);
+	// Fixed behaviour measures ~0.05x here (the sample genuinely close to where the path just
+	// started existing). The bug measured ~0.52x - it snapped close to half the bracket's final
+	// value regardless of how small the true value was this early into the ramp, matching the
+	// ~0.5 fraction the off-by-one-tick staleness predicts exactly. 0.3x comfortably separates
+	// the two without being so tight that unrelated changes to the geometry/physics make this
+	// flaky.
+	REQUIRE(coarse_mag < 0.3 * exact_mag);
 }
 
 TEST_CASE("SimulationEngine phase-noise lookup covers pre-start retarded streaming emissions", "[core][threading]")
@@ -1254,8 +1645,7 @@ TEST_CASE("SimulationEngine phase-noise lookup covers pre-start retarded streami
 	const auto expected_lookup = simulation::CwPhaseNoiseLookup::build(timings, -0.2, params::endTime());
 
 	auto antenna = std::make_unique<antenna::Isotropic>("IsoAnt", 2);
-	auto signal = std::make_unique<fers_signal::RadarSignal>("CWWave", 1.0, 1.0, 1.0,
-															 std::make_unique<fers_signal::CwSignal>(), 3);
+	auto signal = std::make_unique<fers_signal::RadarSignal>("CWWave", 1.0, 1.0, fers_signal::CwWaveform{}, 3);
 	auto tx = std::make_unique<radar::Transmitter>(tx_plat.get(), "Tx", radar::OperationMode::CW_MODE, 4);
 	tx->setTiming(timing);
 	tx->setAntenna(antenna.get());
@@ -1283,7 +1673,15 @@ TEST_CASE("SimulationEngine phase-noise lookup covers pre-start retarded streami
 	engine.processStreamingPhysics(0.2);
 	engine.handleRxStreamingEnd(rx_ptr);
 
-	const ComplexType expected = simulation::calculateDirectPathContribution(tx_ptr, rx_ptr, 0.1, &expected_lookup);
+	const propagation::pointscatter::PointScatterModel prop(world.get());
+	const std::vector<core::ActiveStreamingSource> sources = {core::makeActiveSource(tx_ptr, -0.2, params::endTime())};
+	ComplexType expected{0.0, 0.0};
+	const auto paths = prop.traceFromReceivers(nullptr, {rx_ptr}, sources, 0.1);
+	for (const auto& path : paths.at(rx_ptr))
+	{
+		const auto& source = sources[path.source_index];
+		expected += simulation::calculateStreamingPathContribution(source, rx_ptr, path, 0.1, &expected_lookup);
+	}
 	const ComplexType actual = sampleAt(sink, 1);
 	REQUIRE_THAT(actual.real(), WithinAbs(expected.real(), 1.0e-6));
 	REQUIRE_THAT(actual.imag(), WithinAbs(expected.imag(), 1.0e-6));
@@ -1315,9 +1713,8 @@ TEST_CASE("SimulationEngine native FMCW dechirp produces positive stationary-tar
 	auto timing = std::make_shared<timing::Timing>("ClockInstance", 42, 1);
 	timing->initializeModel(timing_proto.get());
 	auto antenna = std::make_unique<antenna::Isotropic>("IsoAnt", 2);
-	auto fmcw = std::make_unique<fers_signal::FmcwChirpSignal>(chirp_bandwidth, chirp_duration, chirp_duration);
-	auto signal =
-		std::make_unique<fers_signal::RadarSignal>("FmcwWave", 1.0, 10.0e6, chirp_duration, std::move(fmcw), 3);
+	auto signal = std::make_unique<fers_signal::RadarSignal>(
+		"FmcwWave", 1.0, 10.0e6, fers_signal::FmcwChirpWaveform(chirp_bandwidth, chirp_duration, chirp_duration), 3);
 
 	auto tx = std::make_unique<radar::Transmitter>(radar_platform.get(), "Tx", radar::OperationMode::FMCW_MODE, 4);
 	tx->setTiming(timing);
@@ -1407,9 +1804,8 @@ TEST_CASE("SimulationEngine physical FMCW dechirp keeps timing decorrelation abs
 		auto timing = std::make_shared<timing::Timing>("ClockInstance", 42, 1);
 		timing->initializeModel(timing_proto.get());
 		auto antenna = std::make_unique<antenna::Isotropic>("IsoAnt", 2);
-		auto fmcw = std::make_unique<fers_signal::FmcwChirpSignal>(1.0e6, chirp_duration, chirp_duration);
-		auto signal =
-			std::make_unique<fers_signal::RadarSignal>("FmcwWave", 1.0, 10.0e6, chirp_duration, std::move(fmcw), 3);
+		auto signal = std::make_unique<fers_signal::RadarSignal>(
+			"FmcwWave", 1.0, 10.0e6, fers_signal::FmcwChirpWaveform(1.0e6, chirp_duration, chirp_duration), 3);
 
 		auto tx = std::make_unique<radar::Transmitter>(radar_platform.get(), "Tx", radar::OperationMode::FMCW_MODE, 4);
 		tx->setTiming(timing);
@@ -1693,7 +2089,7 @@ TEST_CASE("SimulationEngine routeResponse handles null responses safely", "[core
 	ParamGuard const guard;
 	auto world = std::make_unique<core::World>();
 
-	// Put Tx and Rx on the EXACT SAME platform to force calculateResponse to return nullptr
+	// Put Tx and Rx on the EXACT SAME platform to force calculateResponses to return nullptr
 	// (Simulation skips direct path calculations for co-located far-field antennas).
 	auto plat = std::make_unique<radar::Platform>("SharedPlat", 200);
 	plat->getMotionPath()->addCoord(math::Coord{math::Vec3(0, 0, 0), 0});
@@ -1706,8 +2102,7 @@ TEST_CASE("SimulationEngine routeResponse handles null responses safely", "[core
 	timing->initializeModel(proto_timing.get());
 
 	auto antenna = std::make_unique<antenna::Isotropic>("IsoAnt", 202);
-	auto signal = std::make_unique<fers_signal::RadarSignal>("CWWave", 1.0, 1e9, 1.0,
-															 std::make_unique<fers_signal::CwSignal>(), 203);
+	auto signal = std::make_unique<fers_signal::RadarSignal>("CWWave", 1.0, 1e9, fers_signal::CwWaveform{}, 203);
 
 	auto tx = std::make_unique<radar::Transmitter>(plat.get(), "Tx", radar::OperationMode::PULSED_MODE, 204);
 	tx->setTiming(timing);
@@ -1732,7 +2127,7 @@ TEST_CASE("SimulationEngine routeResponse handles null responses safely", "[core
 	pool::ThreadPool pool(1);
 	core::SimulationEngine engine(world.get(), pool, nullptr, ".");
 
-	// This will call calculateResponse, which returns nullptr because they share a platform,
+	// This will call calculateResponses, which returns nullptr because they share a platform,
 	// and then pass it to routeResponse. It should return early without crashing.
 	REQUIRE_NOTHROW(engine.handleTxPulsedStart(tx_ptr, 0.0));
 

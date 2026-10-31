@@ -89,8 +89,7 @@ namespace
 		auto antenna = std::make_unique<antenna::Isotropic>("Iso", 300);
 		auto* antenna_ptr = antenna.get();
 
-		auto wave = std::make_unique<fers_signal::RadarSignal>("Wave", 1.0, 1.0e9, 1.0,
-															   std::make_unique<fers_signal::CwSignal>(), 400);
+		auto wave = std::make_unique<fers_signal::RadarSignal>("Wave", 1.0, 1.0e9, fers_signal::CwWaveform{}, 400);
 		auto* wave_ptr = wave.get();
 
 		auto tx = std::make_unique<radar::Transmitter>(platform_ptr, "Tx", radar::OperationMode::CW_MODE, 500);

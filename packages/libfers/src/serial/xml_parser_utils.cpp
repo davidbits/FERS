@@ -7,16 +7,18 @@
 #include "xml_parser_utils.h"
 
 #include <GeographicLib/UTMUPS.hpp>
-#include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <exception>
 #include <filesystem>
 #include <format>
 #include <limits>
 #include <optional>
+#include <regex>
 #include <string_view>
 
 #include "antenna/antenna_factory.h"
+#include "core/assets.h"
 #include "core/config.h"
 #include "core/logging.h"
 #include "core/world.h"
@@ -251,7 +253,7 @@ namespace serial::xml_parser_utils
 			}
 
 			const XmlElement ref_element = fmcw_mode.childElement("dechirp_reference", 0);
-			radar::Receiver::FmcwIfChainRequest if_chain{
+			const radar::Receiver::FmcwIfChainRequest if_chain{
 				.sample_rate_hz = parse_optional_fmcw_if_child(fmcw_mode, "if_sample_rate", owner),
 				.filter_bandwidth_hz = parse_optional_fmcw_if_child(fmcw_mode, "if_filter_bandwidth", owner),
 				.filter_transition_width_hz =
@@ -323,6 +325,36 @@ namespace serial::xml_parser_utils
 			ctx.timing_instances.emplace(timing_id, timing_obj);
 			return timing_obj;
 		}
+
+		/// One real or imaginary term of a complex number literal, as matched by `complex_term_re`.
+		struct ComplexTerm
+		{
+			RealType value;
+			bool is_imaginary;
+		};
+
+		/// Pattern for one term of a complex literal: an optionally-signed number with an optional
+		/// 'i'/'j' unit marker before or after it (see `parseComplexLiteral`).
+		const std::regex complex_term_re(R"(([+-])?([ij])?(\d+(?:\.\d+)?(?:e[+-]?\d+)?)([ij])?)", std::regex::icase);
+
+		/// Matches a single term of a complex literal starting exactly at `pos`, advances `pos`
+		/// past it, and returns its value. Throws `std::invalid_argument` on any mismatch,
+		/// including a term carrying both a leading and a trailing unit marker.
+		ComplexTerm matchComplexTerm(std::string::const_iterator& pos, const std::string::const_iterator end)
+		{
+			std::smatch match;
+			if (!std::regex_search(pos, end, match, complex_term_re) || match.position() != 0 || match.length() == 0 ||
+				(match[2].matched && match[4].matched))
+			{
+				throw std::invalid_argument("malformed complex number term");
+			}
+
+			const bool negative = match[1].matched && match[1].str() == "-";
+			const RealType magnitude = std::stod(match[3].str());
+			const bool is_imaginary = match[2].matched || match[4].matched;
+			pos += match.length();
+			return ComplexTerm{.value = negative ? -magnitude : magnitude, .is_imaginary = is_imaginary};
+		}
 	}
 
 	RealType get_child_real_type(const XmlElement& element, const std::string& elementName)
@@ -333,6 +365,50 @@ namespace serial::xml_parser_utils
 			throw XmlException("Element " + elementName + " is empty!");
 		}
 		return std::stod(text);
+	}
+
+	ComplexType parseComplexLiteral(const std::string& literal)
+	{
+		std::string cleaned;
+		cleaned.reserve(literal.size());
+		for (const char c : literal)
+		{
+			if (std::isspace(static_cast<unsigned char>(c)) == 0)
+			{
+				cleaned.push_back(c);
+			}
+		}
+
+		std::optional<RealType> real_part;
+		std::optional<RealType> imag_part;
+
+		try
+		{
+			auto pos = cleaned.cbegin();
+			const auto end = cleaned.cend();
+			while (pos != end)
+			{
+				const bool is_first_term = !real_part.has_value() && !imag_part.has_value();
+				const auto term = matchComplexTerm(pos, end);
+
+				if (term.is_imaginary ? imag_part.has_value() : (!is_first_term || real_part.has_value()))
+				{
+					throw std::invalid_argument("duplicate or misplaced complex number term");
+				}
+				(term.is_imaginary ? imag_part : real_part) = term.value;
+			}
+
+			if (!real_part.has_value() && !imag_part.has_value())
+			{
+				throw std::invalid_argument("empty complex number literal");
+			}
+		}
+		catch (const std::invalid_argument&)
+		{
+			throw XmlException("Invalid complex number literal: '" + literal + "'");
+		}
+
+		return ComplexType{real_part.value_or(0.0), imag_part.value_or(0.0)};
 	}
 
 	bool get_attribute_bool(const XmlElement& element, const std::string& attributeName, const bool defaultVal)
@@ -429,6 +505,19 @@ namespace serial::xml_parser_utils
 		return static_cast<unsigned>(floored_value);
 	}
 
+	static RealType parsePositiveRealParameter(const std::string_view param_name, const RealType raw_value)
+	{
+		if (!std::isfinite(raw_value))
+		{
+			throw XmlException(std::format("Parameter '{}' must be finite.", param_name));
+		}
+		if (raw_value <= 0.0)
+		{
+			throw XmlException(std::format("Parameter '{}' must be positive.", param_name));
+		}
+		return raw_value;
+	}
+
 	template <typename Setter>
 	void setOptionalRealParameter(const XmlElement& parameters, const std::string& param_name,
 								  const RealType default_value, Setter setter)
@@ -472,6 +561,15 @@ namespace serial::xml_parser_utils
 									 params_out.sim_sampling_rate = value;
 									 LOG(logging::Level::DEBUG, "Simulation sampling rate set to: {:.5f} Hz", value);
 								 });
+
+		// Absent means disabled (every CW/streaming output sample propagated exactly).
+		if (parameters.childElement("cwSimSamplingRate", 0).isValid())
+		{
+			const auto value =
+				parsePositiveRealParameter("cwSimSamplingRate", get_child_real_type(parameters, "cwSimSamplingRate"));
+			params_out.cw_coarse_sample_rate = value;
+			LOG(logging::Level::DEBUG, "CW coarse propagation sampling rate set to: {:.5f} Hz", value);
+		}
 
 		if (parameters.childElement("randomseed", 0).isValid())
 		{
@@ -620,6 +718,85 @@ namespace serial::xml_parser_utils
 		}
 	}
 
+	static void parsePropagationParameter(const XmlElement& parameters, params::Parameters& params_out)
+	{
+		const XmlElement prop_element = parameters.childElement("propagation", 0);
+		if (!prop_element.isValid())
+		{
+			return;
+		}
+
+		const XmlElement pointscatter_element = prop_element.childElement("pointscatter", 0);
+		const XmlElement raytracing_element = prop_element.childElement("raytracing", 0);
+		if (pointscatter_element.isValid() == raytracing_element.isValid())
+		{
+			throw XmlException("<propagation> must specify exactly one of <pointscatter> or <raytracing>.");
+		}
+
+		if (!raytracing_element.isValid())
+		{
+			params_out.propagation_model = params::PropagationModelKind::RcsPointScatter;
+			params_out.point_scatterer_params.polarimetric =
+				get_attribute_bool(pointscatter_element, "polarimetric", false);
+			LOG(logging::Level::INFO, "Propagation model set to: pointscatter (polarimetric={})",
+				params_out.point_scatterer_params.polarimetric);
+			return;
+		}
+
+		params_out.propagation_model = params::PropagationModelKind::SbrRayTracing;
+		LOG(logging::Level::INFO, "Propagation model set to: raytracing");
+
+		auto& rt = params_out.ray_tracing_params;
+
+		if (const auto scatter_limit = XmlElement::getOptionalAttribute(raytracing_element, "scatter_limit"))
+		{
+			rt.scatter_limit = parseUnsignedParameter("scatter_limit", std::stod(*scatter_limit));
+		}
+		if (const auto boresight_width = XmlElement::getOptionalAttribute(raytracing_element, "boresight_width"))
+		{
+			const RealType width = rotation_angle_utils::unit_to_radians(
+				parsePositiveRealParameter("boresight_width", std::stod(*boresight_width)),
+				params_out.rotation_angle_unit);
+			if (width >= 2.0 * PI)
+			{
+				throw XmlException("Parameter 'boresight_width' must be less than a full turn (360 degrees).");
+			}
+			rt.boresight_width = width;
+		}
+		if (const auto boresight_tube_solid_angle =
+				XmlElement::getOptionalAttribute(raytracing_element, "boresight_tube_solid_angle"))
+		{
+			rt.boresight_tube_solid_angle =
+				parsePositiveRealParameter("boresight_tube_solid_angle", std::stod(*boresight_tube_solid_angle));
+		}
+		if (const auto off_boresight_tube_solid_angle =
+				XmlElement::getOptionalAttribute(raytracing_element, "off_boresight_tube_solid_angle"))
+		{
+			rt.off_boresight_tube_solid_angle = parsePositiveRealParameter("off_boresight_tube_solid_angle",
+																		   std::stod(*off_boresight_tube_solid_angle));
+		}
+		if (const auto prune_below_max_db =
+				XmlElement::getOptionalAttribute(raytracing_element, "prune_below_max_db"))
+		{
+			rt.prune_below_max_db =
+				parsePositiveRealParameter("prune_below_max_db", std::stod(*prune_below_max_db));
+		}
+
+		LOG(logging::Level::INFO,
+			"Ray-tracing model: scatter_limit={}, boresight_width={:.4f} rad ({:.2f} deg), "
+			"boresight_tube_solid_angle={:.6g} sr, off_boresight_tube_solid_angle={:.6g} sr, "
+			"prune_below_max_db={}",
+			rt.scatter_limit, rt.boresight_width,
+			rotation_angle_utils::radians_to_unit(rt.boresight_width, params::RotationAngleUnit::Degrees),
+			rt.boresight_tube_solid_angle, rt.off_boresight_tube_solid_angle,
+			rt.prune_below_max_db.has_value() ? std::to_string(*rt.prune_below_max_db) : "disabled");
+		LOG(logging::Level::INFO,
+			"Ray-tracing derived sampling: boresight cone={:.6g} sr ({} rays), off-boresight={:.6g} sr ({} "
+			"rays), total rays per source={}",
+			rt.boresightSolidAngle(), rt.boresightDirections(), 4.0 * PI - rt.boresightSolidAngle(),
+			rt.offBoresightDirections(), rt.directionsPerSource());
+	}
+
 	void parseParameters(const XmlElement& parameters, params::Parameters& params_out)
 	{
 		params_out.start = get_child_real_type(parameters, "starttime");
@@ -638,6 +815,7 @@ namespace serial::xml_parser_utils
 		parseRotationAngleUnit(parameters, params_out);
 		const bool origin_set = parseOriginParameter(parameters, params_out);
 		parseCoordinateSystemParameter(parameters, params_out, origin_set);
+		parsePropagationParameter(parameters, params_out);
 	}
 
 	void parseWaveform(const XmlElement& waveform, ParserContext& ctx)
@@ -648,7 +826,7 @@ namespace serial::xml_parser_utils
 		const auto power = get_child_real_type(waveform, "power");
 		const auto carrier = get_child_real_type(waveform, "carrier_frequency");
 
-		auto load_file_waveform = [&](const XmlElement& file_element, const fers_signal::FileWaveformKind kind)
+		auto load_file_waveform = [&](const XmlElement& file_element, const serial::FileWaveformRequestKind kind)
 		{
 			const std::string filename_str = XmlElement::getSafeAttribute(file_element, "filename");
 			fs::path waveform_path(filename_str);
@@ -664,21 +842,19 @@ namespace serial::xml_parser_utils
 
 		if (const XmlElement pulsed_file = waveform.childElement("pulsed_from_file", 0); pulsed_file.isValid())
 		{
-			load_file_waveform(pulsed_file, fers_signal::FileWaveformKind::Pulsed);
+			load_file_waveform(pulsed_file, serial::FileWaveformRequestKind::Pulsed);
 		}
 		else if (const XmlElement cw_file = waveform.childElement("cw_from_file", 0); cw_file.isValid())
 		{
-			load_file_waveform(cw_file, fers_signal::FileWaveformKind::Cw);
+			load_file_waveform(cw_file, serial::FileWaveformRequestKind::Cw);
 		}
 		else if (const XmlElement fmcw_file = waveform.childElement("fmcw_from_file", 0); fmcw_file.isValid())
 		{
-			load_file_waveform(fmcw_file, fers_signal::FileWaveformKind::Fmcw);
+			load_file_waveform(fmcw_file, serial::FileWaveformRequestKind::Fmcw);
 		}
 		else if (waveform.childElement("cw", 0).isValid())
 		{
-			auto cw_signal = std::make_unique<fers_signal::CwSignal>();
-			auto wave = std::make_unique<fers_signal::RadarSignal>(
-				name, power, carrier, ctx.parameters.end - ctx.parameters.start, std::move(cw_signal), id);
+			auto wave = std::make_unique<fers_signal::RadarSignal>(name, power, carrier, fers_signal::CwWaveform(), id);
 			ctx.world->add(std::move(wave));
 		}
 		else if (const XmlElement sfcw_element = waveform.childElement("stepped_frequency", 0); sfcw_element.isValid())
@@ -705,11 +881,10 @@ namespace serial::xml_parser_utils
 				sweep_count = static_cast<std::size_t>(raw_count);
 			}
 
-			auto sfcw_signal = std::make_unique<fers_signal::SteppedFrequencySignal>(
-				start_frequency_offset, step_size, static_cast<std::size_t>(raw_step_count), dwell_time, step_period,
-				sweep_count);
-			auto wave = std::make_unique<fers_signal::RadarSignal>(name, power, carrier, sfcw_signal->getDwellTime(),
-																   std::move(sfcw_signal), id);
+			auto sfcw_signal =
+				fers_signal::SfcwWaveform(start_frequency_offset, step_size, static_cast<std::size_t>(raw_step_count),
+										  dwell_time, step_period, sweep_count);
+			auto wave = std::make_unique<fers_signal::RadarSignal>(name, power, carrier, sfcw_signal, id);
 			validate_fmcw_waveform(*wave, "Waveform '" + name + "'");
 			ctx.world->add(std::move(wave));
 		}
@@ -740,11 +915,9 @@ namespace serial::xml_parser_utils
 				chirp_count = static_cast<std::size_t>(raw_count);
 			}
 
-			auto fmcw_signal = std::make_unique<fers_signal::FmcwChirpSignal>(
-				chirp_bandwidth, chirp_duration, chirp_period, start_frequency_offset, chirp_count, direction);
-			// RadarSignal length is the active chirp duration, not T_rep. The repeat period only spaces chirps.
-			auto wave = std::make_unique<fers_signal::RadarSignal>(name, power, carrier, chirp_duration,
-																   std::move(fmcw_signal), id);
+			auto fmcw_signal = fers_signal::FmcwChirpWaveform(chirp_bandwidth, chirp_duration, chirp_period,
+															  start_frequency_offset, chirp_count, direction);
+			auto wave = std::make_unique<fers_signal::RadarSignal>(name, power, carrier, fmcw_signal, id);
 			validate_fmcw_waveform(*wave, "Waveform '" + name + "'");
 			ctx.world->add(std::move(wave));
 		}
@@ -773,10 +946,9 @@ namespace serial::xml_parser_utils
 				triangle_count = static_cast<std::size_t>(raw_count);
 			}
 
-			auto fmcw_signal = std::make_unique<fers_signal::FmcwTriangleSignal>(
-				chirp_bandwidth, chirp_duration, start_frequency_offset, triangle_count);
-			auto wave = std::make_unique<fers_signal::RadarSignal>(
-				name, power, carrier, fmcw_signal->getTrianglePeriod(), std::move(fmcw_signal), id);
+			auto fmcw_signal = fers_signal::FmcwTriangleWaveform(chirp_bandwidth, chirp_duration,
+																 start_frequency_offset, triangle_count);
+			auto wave = std::make_unique<fers_signal::RadarSignal>(name, power, carrier, fmcw_signal, id);
 			validate_fmcw_waveform(*wave, "Waveform '" + name + "'");
 			ctx.world->add(std::move(wave));
 		}
@@ -906,7 +1078,64 @@ namespace serial::xml_parser_utils
 			}
 		}
 
+		if (const auto pol_element = antenna.childElement("boresight_polarisation", 0); pol_element.isValid())
+		{
+			const auto component = [&](const char* attribute_name)
+			{
+				const auto text = XmlElement::getOptionalAttribute(pol_element, attribute_name);
+				if (!text)
+				{
+					return ComplexType(0.0, 0.0);
+				}
+				try
+				{
+					return parseComplexLiteral(*text);
+				}
+				catch (const XmlException&)
+				{
+					LOG(logging::Level::WARNING, "Antenna '{}' has an invalid '{}' of '{}', assuming 0.", name,
+						attribute_name, *text);
+					return ComplexType(0.0, 0.0);
+				}
+			};
+
+			try
+			{
+				ant->setPolarisation(
+					antenna::JonesPolarisation{.horizontal = component("h"), .vertical = component("v")});
+			}
+			catch (const std::runtime_error& e)
+			{
+				LOG(logging::Level::WARNING, "Antenna '{}' has an invalid polarisation ({}), assuming horizontal.",
+					name, e.what());
+			}
+		}
+
 		ctx.world->add(std::move(ant));
+	}
+
+	void parseMesh(const XmlElement& mesh, ParserContext& ctx)
+	{
+		const std::string name = XmlElement::getSafeAttribute(mesh, "name");
+		const SimId id = assign_id_from_attribute("mesh '" + name + "'", ObjectType::Mesh);
+		const std::string filename = XmlElement::getSafeAttribute(mesh, "filename");
+
+		LOG(logging::Level::DEBUG, "Adding mesh '{}' from 'meshes/{}'", name, filename);
+		ctx.world->add(
+			core::MeshAsset{.id = id, .name = name, .path = ctx.base_dir / "meshes" / filename, .filename = filename});
+	}
+
+	void parseMaterial(const XmlElement& material, ParserContext& ctx)
+	{
+		const std::string name = XmlElement::getSafeAttribute(material, "name");
+		const SimId id = assign_id_from_attribute("material '" + name + "'", ObjectType::Material);
+		const auto relative_permittivity = float(get_child_real_type(material, "relative_permittivity"));
+		const auto conductivity = float(get_child_real_type(material, "conductivity"));
+
+		LOG(logging::Level::DEBUG, "Adding material '{}' with relative_permittivity={} conductivity={}", name,
+			relative_permittivity, conductivity);
+		ctx.world->add(core::MaterialAsset{
+			.id = id, .name = name, .relative_permittivity = relative_permittivity, .conductivity = conductivity});
 	}
 
 	void parseMotionPath(const XmlElement& motionPath, radar::Platform* platform)
@@ -1117,7 +1346,7 @@ namespace serial::xml_parser_utils
 
 		RealType const pri = is_pulsed ? (1.0 / transmitter_obj->getPrf()) : 0.0;
 		auto schedule = parseSchedule(transmitter, name, is_pulsed, pri);
-		if (wave->isFmcwFamily() || wave->isSteppedFrequency())
+		if (wave->isFmcwFamily() || wave->isSfcw())
 		{
 			validate_fmcw_schedule(schedule, *wave, "Transmitter '" + name + "'");
 		}
@@ -1262,51 +1491,81 @@ namespace serial::xml_parser_utils
 		recv->setAttached(trans);
 	}
 
-	void parseTarget(const XmlElement& target, radar::Platform* platform, ParserContext& ctx)
+	void parseTarget(const XmlElement& target, radar::Platform* platform, ParserContext& ctx,
+					 const ReferenceLookup& refs)
 	{
 		const std::string name = XmlElement::getSafeAttribute(target, "name");
 		const SimId id = assign_id_from_attribute("target '" + name + "'", ObjectType::Target);
 
 		const XmlElement rcs_element = target.childElement("rcs", 0);
+		std::unique_ptr<radar::Target> target_obj;
+		std::string rcs_type = "none";
+
 		if (!rcs_element.isValid())
 		{
-			throw XmlException("<rcs> element is required in <target>!");
-		}
-
-		const std::string rcs_type = XmlElement::getSafeAttribute(rcs_element, "type");
-		std::unique_ptr<radar::Target> target_obj;
-		const unsigned seed = next_seed(*ctx.master_seeder);
-
-		if (rcs_type == "isotropic")
-		{
-			target_obj = radar::createIsoTarget(platform, name, get_child_real_type(rcs_element, "value"), seed, id);
-		}
-		else if (rcs_type == "file")
-		{
-			// Defer to dependency-injected file loader
-			target_obj = ctx.loaders.loadFileTarget(platform, name,
-													XmlElement::getSafeAttribute(rcs_element, "filename"), seed, id);
+			target_obj = std::make_unique<radar::Target>(platform, name, id);
 		}
 		else
 		{
-			throw XmlException("Unsupported RCS type: " + rcs_type);
+			rcs_type = XmlElement::getSafeAttribute(rcs_element, "type");
+			const unsigned seed = next_seed(*ctx.master_seeder);
+
+			if (rcs_type == "isotropic")
+			{
+				target_obj =
+					radar::createIsoTarget(platform, name, get_child_real_type(rcs_element, "value"), seed, id);
+			}
+			else if (rcs_type == "file")
+			{
+				// Defer to dependency-injected file loader
+				target_obj = ctx.loaders.loadFileTarget(
+					platform, name, XmlElement::getSafeAttribute(rcs_element, "filename"), seed, id);
+			}
+			else
+			{
+				throw XmlException("Unsupported RCS type: " + rcs_type);
+			}
 		}
 
 		if (const XmlElement model = target.childElement("model", 0); model.isValid())
 		{
+			auto* rcs = target_obj->getRcsSpec();
+			if (rcs == nullptr)
+			{
+				throw XmlException("<model> element requires <rcs> to be present in <target> '" + name + "'!");
+			}
+
 			if (const std::string model_type = XmlElement::getSafeAttribute(model, "type"); model_type == "constant")
 			{
-				target_obj->setFluctuationModel(std::make_unique<radar::RcsConst>());
+				rcs->setFluctuationModel(std::make_unique<radar::RcsConst>());
 			}
 			else if (model_type == "chisquare" || model_type == "gamma")
 			{
-				target_obj->setFluctuationModel(
-					std::make_unique<radar::RcsChiSquare>(target_obj->getRngEngine(), get_child_real_type(model, "k")));
+				rcs->setFluctuationModel(
+					std::make_unique<radar::RcsChiSquare>(rcs->getRngEngine(), get_child_real_type(model, "k")));
 			}
 			else
 			{
 				throw XmlException("Unsupported model type: " + model_type);
 			}
+		}
+
+		bool has_geometry = false;
+		if (const XmlElement geometry = target.childElement("geometry", 0); geometry.isValid())
+		{
+			const SimId mesh_id =
+				resolve_reference_id(geometry, "mesh", "target '" + name + "' geometry", *refs.meshes);
+			const SimId material_id =
+				resolve_reference_id(geometry, "material", "target '" + name + "' geometry", *refs.materials);
+
+			target_obj->setGeometry(ctx.world->findMesh(mesh_id), ctx.world->findMaterial(material_id));
+			has_geometry = true;
+		}
+
+		if (!rcs_element.isValid() && !has_geometry)
+		{
+			LOG(logging::Level::WARNING,
+				"Target '{}' has neither <rcs> nor <geometry>; it will not scatter under any propagation model.", name);
 		}
 
 		LOG(logging::Level::DEBUG, "Added target {} with RCS type {} to platform {}", name, rcs_type,
@@ -1331,23 +1590,10 @@ namespace serial::xml_parser_utils
 			}
 		};
 
-		auto parseChildrenWithoutRefs = [&](const std::string& elementName, auto parseFunc)
-		{
-			unsigned index = 0;
-			while (true)
-			{
-				const XmlElement element = platform.childElement(elementName, index++);
-				if (!element.isValid())
-					break;
-				register_name(element, elementName);
-				parseFunc(element, plat, ctx);
-			}
-		};
-
 		parseChildrenWithRefs("monostatic", parseMonostatic);
 		parseChildrenWithRefs("transmitter", parseTransmitter);
 		parseChildrenWithRefs("receiver", parseReceiver);
-		parseChildrenWithoutRefs("target", parseTarget);
+		parseChildrenWithRefs("target", parseTarget);
 	}
 
 	void parsePlatform(const XmlElement& platform, ParserContext& ctx,
@@ -1529,12 +1775,30 @@ namespace serial::xml_parser_utils
 						  parseAntenna(p, c);
 					  });
 
+		parseElements(root, "mesh", ctx,
+					  [&](const XmlElement& p, ParserContext& c)
+					  {
+						  register_name(p, "mesh");
+						  parseMesh(p, c);
+					  });
+
+		parseElements(root, "material", ctx,
+					  [&](const XmlElement& p, ParserContext& c)
+					  {
+						  register_name(p, "material");
+						  parseMaterial(p, c);
+					  });
+
 		std::unordered_map<std::string, SimId> waveform_refs;
 		std::unordered_map<std::string, SimId> antenna_refs;
 		std::unordered_map<std::string, SimId> timing_refs;
+		std::unordered_map<std::string, SimId> mesh_refs;
+		std::unordered_map<std::string, SimId> material_refs;
 		waveform_refs.reserve(ctx.world->getWaveforms().size());
 		antenna_refs.reserve(ctx.world->getAntennas().size());
 		timing_refs.reserve(ctx.world->getTimings().size());
+		mesh_refs.reserve(ctx.world->getMeshes().size());
+		material_refs.reserve(ctx.world->getMaterials().size());
 
 		for (const auto& [id, waveform] : ctx.world->getWaveforms())
 			waveform_refs.emplace(waveform->getName(), id);
@@ -1542,8 +1806,12 @@ namespace serial::xml_parser_utils
 			antenna_refs.emplace(antenna->getName(), id);
 		for (const auto& [id, timing] : ctx.world->getTimings())
 			timing_refs.emplace(timing->getName(), id);
+		for (const auto& [id, mesh] : ctx.world->getMeshes())
+			mesh_refs.emplace(mesh.name, id);
+		for (const auto& [id, material] : ctx.world->getMaterials())
+			material_refs.emplace(material.name, id);
 
-		const ReferenceLookup refs{&waveform_refs, &antenna_refs, &timing_refs};
+		const ReferenceLookup refs{&waveform_refs, &antenna_refs, &timing_refs, &mesh_refs, &material_refs};
 
 		parseElements(root, "platform", ctx,
 					  [&](const XmlElement& p, ParserContext& c)
@@ -1562,7 +1830,7 @@ namespace serial::xml_parser_utils
 	AssetLoaders createDefaultAssetLoaders()
 	{
 		return {.loadWaveform = [](const std::string& name, const fs::path& waveform_path, RealType power,
-								   RealType carrierFreq, SimId id, const fers_signal::FileWaveformKind kind)
+								   RealType carrierFreq, SimId id, const serial::FileWaveformRequestKind kind)
 				{ return serial::loadWaveformFromFile(name, waveform_path.string(), power, carrierFreq, id, kind); },
 				.loadXmlAntenna = [](const std::string& name, const std::string& filename, SimId id)
 				{ return std::make_unique<antenna::XmlAntenna>(name, filename, id); },

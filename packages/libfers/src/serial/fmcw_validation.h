@@ -16,9 +16,9 @@
 
 namespace fers_signal
 {
-	class FmcwChirpSignal;
-	class SteppedFrequencySignal;
-	class FmcwTriangleSignal;
+	class FmcwChirpWaveform;
+	class SfcwWaveform;
+	class FmcwTriangleWaveform;
 	class RadarSignal;
 }
 
@@ -35,8 +35,9 @@ namespace serial::fmcw_validation
 								   const std::string& owner, const Thrower& throw_error);
 
 	/// Validates that an FMCW waveform schedule can emit complete chirps.
-	void validateSchedule(const std::vector<radar::SchedulePeriod>& schedule, const fers_signal::FmcwChirpSignal& fmcw,
-						  const std::string& owner, const Thrower& throw_error);
+	void validateSchedule(const std::vector<radar::SchedulePeriod>& schedule,
+						  const fers_signal::FmcwChirpWaveform& fmcw, const std::string& owner,
+						  const Thrower& throw_error);
 
 	/// Validates that an FMCW waveform schedule can emit complete waveform periods.
 	void validateSchedule(const std::vector<radar::SchedulePeriod>& schedule, const fers_signal::RadarSignal& wave,

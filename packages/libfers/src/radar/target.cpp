@@ -52,14 +52,8 @@ namespace
 
 namespace radar
 {
-	RealType IsoTarget::getRcs(SVec3& /*inAngle*/, SVec3& /*outAngle*/, RealType /*time*/) const noexcept
-	{
-		return _model ? _rcs * _model->sampleModel() : _rcs;
-	}
-
-	FileTarget::FileTarget(Platform* platform, std::string name, const std::string& filename, const unsigned seed,
-						   const SimId id) :
-		Target(platform, std::move(name), seed, id), _azi_samples(std::make_unique_for_overwrite<interp::InterpSet>()),
+	FileTargetRcs::FileTargetRcs(const std::string& filename, const unsigned seed) :
+		TargetRcs(seed), _azi_samples(std::make_unique_for_overwrite<interp::InterpSet>()),
 		_elev_samples(std::make_unique_for_overwrite<interp::InterpSet>()), _filename(filename)
 	{
 		XmlDocument doc;
@@ -74,27 +68,23 @@ namespace radar
 		loadTargetGainAxis(_azi_samples.get(), root.childElement("azimuth", 0));
 	}
 
-	RealType FileTarget::getRcs(SVec3& inAngle, SVec3& outAngle, const RealType time) const
+	RealType FileTargetRcs::computeRcs(SVec3& inAngle, SVec3& outAngle, RealType time, const Target& owner) const
 	{
 		// TODO: the handling of arbitrary rcs models needs to be validated and expanded to cover edge cases.
 		// 1. Calculate the bistatic angle bisector in the GLOBAL frame.
 		const SVec3 global_bisector_angle = inAngle + outAngle;
 
-		// 2. Get the target's own rotation at the current time.
-		const SVec3 target_rotation = getRotation(time);
+		// 2. Transform the global angle into the target's LOCAL frame for lookup.
+		const SVec3 local_aspect_angle = global_bisector_angle - owner.getRotation(time);
 
-		// 3. Transform the global angle into the target's LOCAL frame for lookup.
-		const SVec3 local_aspect_angle = global_bisector_angle - target_rotation;
-
-		// 4. Use the local aspect angle (bisector is halved) to look up RCS.
+		// 3. Use the local aspect angle (bisector is halved) to look up RCS.
 		const auto azi_value = _azi_samples->getValueAt(local_aspect_angle.azimuth / 2.0);
 
 		if (const auto elev_value = _elev_samples->getValueAt(local_aspect_angle.elevation / 2.0);
 			azi_value && elev_value)
 		{
 			// Return the raw RCS value (proportional to power), not its square root.
-			const RealType rcs = *azi_value * *elev_value;
-			return _model ? rcs * _model->sampleModel() : rcs;
+			return *azi_value * *elev_value;
 		}
 
 		LOG(logging::Level::FATAL, "Could not get RCS value for target");

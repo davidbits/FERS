@@ -12,6 +12,7 @@
 
 #pragma once
 
+#include <cmath>
 #include <cstdint>
 #include <expected>
 #include <optional>
@@ -19,6 +20,7 @@
 #include <string_view>
 
 #include "config.h"
+#include "core/portable_utils.h"
 #include "logging.h"
 
 namespace params
@@ -45,6 +47,104 @@ namespace params
 	};
 
 	/**
+	 * @enum PropagationModelKind
+	 * @brief Selects which propagation model the simulation uses.
+	 */
+	enum class PropagationModelKind : std::uint8_t
+	{
+		RcsPointScatter = 1, ///< Analytic point-target RCS/radar-equation model (default).
+		SbrRayTracing = 2, ///< GO+PO ray-tracing model against target meshes.
+	};
+
+	/**
+	 * @enum RayTracingEnginePreference
+	 * @brief Runtime override for which ray-tracing engine the SBR propagation model should use.
+	 */
+	enum class RayTracingEnginePreference : std::uint8_t
+	{
+		Auto = 0, ///< Auto-select: prefer OptiX, fall back to Embree (default).
+		OptiX = 1, ///< Require the OptiX engine.
+		Embree = 2, ///< Require the Embree engine.
+	};
+
+	inline const char* rayTracingEngineName(RayTracingEnginePreference engine)
+	{
+		switch (engine)
+		{
+		case RayTracingEnginePreference::Auto:
+			return "Auto";
+		case RayTracingEnginePreference::OptiX:
+			return "OptiX";
+		case RayTracingEnginePreference::Embree:
+			return "Embree";
+		}
+		return "Unknown";
+	}
+
+	struct PointScatterParameters
+	{
+		/// Whether to enable polarimetric transport, including antenna polarisations and
+		/// Target scattering matrices.
+		bool polarimetric = false;
+	};
+
+	/// Simulation parameters for running the ray tracing propagation model.
+	///
+	/// Ray directions are sampled with two uniform densities: a finer one within a cone around
+	/// each source antenna's boresight, and a coarser one over the rest of the sphere. Pick each
+	/// density (`*_tube_solid_angle`) from the smallest facet area `A_facet` that needs resolving
+	/// in that regime, at the shortest expected range `R` and most oblique incidence angle `theta`
+	/// targets in that regime will be seen at: `S <= A_facet * cos(theta) / R^2`, where `S` is the
+	/// ray tube's solid angle. A ray tube whose footprint (`R^2 * S / cos(theta)`) exceeds a hit
+	/// facet's area is not fully resolving that facet.
+	struct RayTracingParameters
+	{
+		/// Maximum number of bounces/scattering events per path. Max ray depth is scatter_limit+1.
+		unsigned scatter_limit = 4;
+
+		/// Full angular width (radians) of the boresight sampling cone, centered on each source
+		/// antenna's boresight direction. The cone's half-angle is `boresight_width / 2`.
+		RealType boresight_width = 0.3;
+		/// Desired ray-tube solid angle (steradians) for rays sampled within the boresight cone.
+		RealType boresight_tube_solid_angle = 2e-8;
+		/// Desired ray-tube solid angle (steradians) for rays sampled outside the boresight cone.
+		RealType off_boresight_tube_solid_angle = 1e-5;
+
+		/// Optional dynamic-range cull, in dB of power. Within each
+		/// (transmit time, destination) group, paths more than this many dB below that group's
+		/// strongest path are dropped before being handed back to the rest of FERS. Unset (the
+		/// default) disables pruning entirely, preserving prior FERS behaviour exactly.
+		std::optional<RealType> prune_below_max_db;
+
+		/// Solid angle (steradians) of the boresight sampling cone, derived from `boresight_width`.
+		[[nodiscard]] RealType boresightSolidAngle() const noexcept
+		{
+			return 2.0 * PI * (1.0 - std::cos(boresight_width / 2.0));
+		}
+
+		/// Number of ray launch directions dedicated to the boresight cone,
+		/// derived from `boresightSolidAngle()` and `boresight_tube_solid_angle`.
+		[[nodiscard]] unsigned boresightDirections() const noexcept
+		{
+			return static_cast<unsigned>(std::llround(boresightSolidAngle() / boresight_tube_solid_angle));
+		}
+
+		/// Number of ray launch directions dedicated to outside the boresight cone,
+		/// derived from the remaining solid angle and `off_boresight_tube_solid_angle`.
+		[[nodiscard]] unsigned offBoresightDirections() const noexcept
+		{
+			const RealType off_solid_angle = 4.0 * PI - boresightSolidAngle();
+			return static_cast<unsigned>(std::llround(off_solid_angle / off_boresight_tube_solid_angle));
+		}
+
+		/// Total number of rays to launch per source antenna.
+		[[nodiscard]] unsigned directionsPerSource() const noexcept
+		{
+			return boresightDirections() + offBoresightDirections();
+		}
+	};
+
+	/**
 	 * @class Parameters
 	 * @brief Struct to hold simulation parameters.
 	 */
@@ -57,6 +157,9 @@ namespace params
 		RealType start = 0; ///< Start time for the simulation.
 		RealType end = 0; ///< End time for the simulation.
 		RealType sim_sampling_rate = 1000; ///< Time-step sampling rate for radar pulse simulation.
+		std::optional<RealType> cw_coarse_sample_rate; ///< CW/streaming coarse propagation sampling
+													   ///< rate; unset means every output sample is
+													   ///< propagated exactly.
 
 		// KML/geospatial export defaults to the location of the University of Cape Town in South Africa.
 		double origin_latitude = -33.957652; ///< KML ENU geodetic origin latitude
@@ -70,9 +173,15 @@ namespace params
 		std::optional<unsigned> random_seed; ///< Random seed for simulation.
 		unsigned adc_bits = 0; ///< ADC quantization bits.
 		unsigned filter_length = 33; ///< Default render filter length.
-		unsigned render_threads = 1; ///< Number of worker threads to use for parallel tasks.
+		std::optional<unsigned> worker_threads = std::nullopt; ///< Number of worker threads to use for parallel tasks.
 		std::string simulation_name; ///< The name of the simulation, from the XML.
 		unsigned oversample_ratio = 1; ///< Oversampling ratio.
+
+		PropagationModelKind propagation_model = PropagationModelKind::RcsPointScatter; ///< Active propagation model.
+		PointScatterParameters point_scatterer_params{}; ///< Point-scatterer (RCS) model parameters.
+		RayTracingParameters ray_tracing_params{}; ///< Ray-tracing (SBR) model parameters.
+		RayTracingEnginePreference ray_tracing_engine =
+			RayTracingEnginePreference::Auto; ///< Ray-tracing engine runtime override.
 
 		/**
 		 * @brief Resets the parameters to their default-constructed state.
@@ -115,6 +224,17 @@ namespace params
 	inline RealType simSamplingRate() noexcept { return params.sim_sampling_rate; }
 
 	/**
+	 * @brief Get the CW/streaming coarse propagation sampling rate, if enabled.
+	 *
+	 * When unset, CW/streaming propagation is evaluated exactly at every output sample.
+	 * When set, the scene is only re-sampled at this rate, with each path's delay/gain
+	 * linearly interpolated between samples.
+	 *
+	 * @return The coarse sampling rate in Hz, or `std::nullopt` if disabled.
+	 */
+	inline std::optional<RealType> cwSimSamplingRate() noexcept { return params.cw_coarse_sample_rate; }
+
+	/**
 	 * @brief Get the rendering sample rate.
 	 * @return The rendering sample rate.
 	 */
@@ -142,13 +262,37 @@ namespace params
 	 * @brief Get the number of worker threads.
 	 * @return The number of worker threads.
 	 */
-	inline unsigned renderThreads() noexcept { return params.render_threads; }
+	inline unsigned workerThreads() noexcept { return params.worker_threads.value_or(core::countProcessors()); }
 
 	/**
 	 * @brief Get the oversampling ratio.
 	 * @return The oversampling ratio.
 	 */
 	inline unsigned oversampleRatio() noexcept { return params.oversample_ratio; }
+
+	/**
+	 * @brief Get the active propagation model.
+	 * @return The propagation model selected for this simulation.
+	 */
+	inline PropagationModelKind propagationModel() noexcept { return params.propagation_model; }
+
+	/**
+	 * @brief Get the ray-tracing engine runtime override.
+	 * @return The ray-tracing engine preference selected for this simulation.
+	 */
+	inline RayTracingEnginePreference rayTracingEnginePreference() noexcept { return params.ray_tracing_engine; }
+
+	/**
+	 * @brief Get the point-scatterer modelling parameters.
+	 * @return The point-scatterer modelling parameters.
+	 */
+	inline const PointScatterParameters& pointScatterParams() noexcept { return params.point_scatterer_params; }
+
+	/**
+	 * @brief Get the ray-tracing modelling parameters.
+	 * @return The ray-tracing modelling parameters.
+	 */
+	inline const RayTracingParameters& rayTracingParams() noexcept { return params.ray_tracing_params; }
 
 	/**
 	 * @brief Gets the maximum supported oversampling ratio.
@@ -200,8 +344,13 @@ namespace params
 	 * @brief Set the simulation sampling rate.
 	 * @param rate The new simulation sampling rate.
 	 */
-	inline void setSimSamplingRate(const RealType rate) noexcept
+	inline void setSimSamplingRate(const RealType rate)
 	{
+		if (rate <= 0)
+		{
+			throw std::runtime_error("Simulation sampling rate must be > 0");
+		}
+
 		params.sim_sampling_rate = rate;
 		LOG(logging::Level::DEBUG, "Simulation sampling rate set to: {:.5f} Hz", rate);
 	}
@@ -296,9 +445,19 @@ namespace params
 		{
 			return std::unexpected("Thread count must be >= 1");
 		}
-		params.render_threads = threads;
+		params.worker_threads = threads;
 		LOG(logging::Level::INFO, "Number of worker threads set to: {}", threads);
 		return {};
+	}
+
+	/**
+	 * @brief Set the ray-tracing engine runtime override.
+	 * @param engine The ray-tracing engine preference.
+	 */
+	inline void setRayTracingEnginePreference(const RayTracingEnginePreference engine) noexcept
+	{
+		params.ray_tracing_engine = engine;
+		LOG(logging::Level::INFO, "Ray tracing engine preference set to: {}", rayTracingEngineName(engine));
 	}
 
 	/**

@@ -9,7 +9,6 @@
 #include <optional>
 #include <string>
 #include <thread>
-#include <tuple>
 #include <vector>
 
 #include "antenna/antenna_factory.h"
@@ -17,8 +16,12 @@
 #include "core/parameters.h"
 #include "core/rendering_job.h"
 #include "core/sim_threading.h"
+#include "core/world.h"
+#include "interpolation/interpolation_point.h"
 #include "math/coord.h"
 #include "processing/finalizer.h"
+#include "propagation/pointscatter/pointscatter.h"
+#include "propagation/propagation_model.h"
 #include "radar/platform.h"
 #include "radar/receiver.h"
 #include "radar/target.h"
@@ -43,18 +46,6 @@ namespace
 		ParamGuard(ParamGuard&&) = delete;
 		ParamGuard& operator=(ParamGuard&&) = delete;
 		~ParamGuard() { params::params = saved; }
-	};
-
-	struct FixedSignal final : public fers_signal::Signal
-	{
-		std::vector<ComplexType> data;
-
-		std::vector<ComplexType> render(const std::vector<interp::InterpPoint>&, unsigned& size,
-										RealType) const override
-		{
-			size = static_cast<unsigned>(data.size());
-			return data;
-		}
 	};
 
 	std::filesystem::path resultPath(const std::filesystem::path& dir, const std::string& receiver_name)
@@ -124,9 +115,9 @@ namespace
 					  std::optional<std::size_t> chirp_count) :
 			platform(name + "Platform"),
 			wave(std::make_unique<fers_signal::RadarSignal>(
-				name + "Wave", 1.0, 10.0e9, chirp_duration,
-				std::make_unique<fers_signal::FmcwChirpSignal>(chirp_bandwidth, chirp_duration, chirp_period,
-															   start_frequency_offset, chirp_count),
+				name + "Wave", 1.0, 10.0e9,
+				fers_signal::FmcwChirpWaveform(chirp_bandwidth, chirp_duration, chirp_period, start_frequency_offset,
+											   chirp_count),
 				waveform_id)),
 			transmitter(&platform, name, radar::OperationMode::FMCW_MODE, tx_id)
 		{
@@ -145,9 +136,9 @@ namespace
 					  std::optional<std::size_t> sweep_count) :
 			platform(name + "Platform"),
 			wave(std::make_unique<fers_signal::RadarSignal>(
-				name + "Wave", 1.0, 10.0e9, dwell_time,
-				std::make_unique<fers_signal::SteppedFrequencySignal>(start_frequency_offset, step_size, step_count,
-																	  dwell_time, step_period, sweep_count),
+				name + "Wave", 1.0, 10.0e9,
+				fers_signal::SfcwWaveform(start_frequency_offset, step_size, step_count, dwell_time,
+													  step_period, sweep_count),
 				waveform_id)),
 			transmitter(&platform, name, radar::OperationMode::SFCW_MODE, tx_id)
 		{
@@ -156,23 +147,28 @@ namespace
 	};
 
 	std::unique_ptr<serial::Response>
-	makeFixedResponse(const radar::Transmitter* transmitter,
-					  std::vector<std::unique_ptr<fers_signal::RadarSignal>>& wave_store,
-					  const std::vector<ComplexType>& samples, RealType sample_rate, RealType start_time)
+	makeFixedResponse(std::vector<std::unique_ptr<fers_signal::RadarSignal>>& wave_store,
+					  const std::vector<ComplexType>& samples, const RealType sample_rate, const RealType start_time)
 	{
-		auto signal = std::make_unique<FixedSignal>();
-		signal->data = samples;
-		signal->load(samples, static_cast<unsigned>(samples.size()), sample_rate);
+		fers_signal::PulseWaveform sampled;
+		sampled.load(samples, static_cast<unsigned>(samples.size()), sample_rate);
 
-		auto wave = std::make_unique<fers_signal::RadarSignal>(
-			"wave", 1.0, 1.0e9, static_cast<RealType>(samples.size()) / sample_rate, std::move(signal));
+		auto wave = std::make_unique<fers_signal::RadarSignal>("wave", 1.0, 1.0e9, std::move(sampled));
 		const auto* wave_ptr = wave.get();
 		wave_store.push_back(std::move(wave));
 
-		auto response = std::make_unique<serial::Response>(wave_ptr, transmitter);
-		response->addInterpPoint({1.0, start_time, 0.0, 0.0});
-		response->addInterpPoint({1.0, start_time + static_cast<RealType>(samples.size() - 1) / sample_rate, 0.0, 0.0});
-		return response;
+		const RealType edge = 1.0 / sample_rate;
+		const interp::InterpPoint first{.gain = 1.0, .rx_time = start_time, .delay = 0.0, .phase_delay = 0.0};
+		serial::ResponseBuilder builder(wave_ptr, first, edge, edge);
+		for (std::size_t i = 1; i < samples.size(); ++i)
+		{
+			builder.addInterpPoint({.gain = 1.0,
+								   .rx_time = start_time + static_cast<RealType>(i) / sample_rate,
+								   .delay = 0.0,
+								   .phase_delay = 0.0},
+								  edge);
+		}
+		return std::make_unique<serial::Response>(std::move(builder));
 	}
 
 	std::vector<RealType> readDataset(const HighFive::File& file, const std::string& name)
@@ -222,13 +218,17 @@ namespace
 		{
 			REQUIRE_THAT(sample, WithinAbs(0.0, 1e-12));
 		}
-		REQUIRE_THAT(q_chunk_0[0], WithinAbs(1.0, 1e-12));
+		// makeFixedResponse's response has two real samples (both == 1.0, rotated 90
+		// degrees by the PI/2 timing phase offset into the Q channel), bracketed by a
+		// zero-gain taper sample on each side; within this 4-sample window that lands
+		// as [0, 1, 1, 0].
+		REQUIRE_THAT(q_chunk_0[0], WithinAbs(0.0, 1e-12));
 		REQUIRE_THAT(q_chunk_0[1], WithinAbs(1.0, 1e-12));
-		REQUIRE_THAT(q_chunk_0[2], WithinAbs(0.0, 1e-12));
+		REQUIRE_THAT(q_chunk_0[2], WithinAbs(1.0, 1e-12));
 		REQUIRE_THAT(q_chunk_0[3], WithinAbs(0.0, 1e-12));
-		REQUIRE_THAT(q_chunk_1[0], WithinAbs(1.0, 1e-12));
+		REQUIRE_THAT(q_chunk_1[0], WithinAbs(0.0, 1e-12));
 		REQUIRE_THAT(q_chunk_1[1], WithinAbs(1.0, 1e-12));
-		REQUIRE_THAT(q_chunk_1[2], WithinAbs(0.0, 1e-12));
+		REQUIRE_THAT(q_chunk_1[2], WithinAbs(1.0, 1e-12));
 		REQUIRE_THAT(q_chunk_1[3], WithinAbs(0.0, 1e-12));
 		REQUIRE_THAT(time_attr_0, WithinAbs(0.125, 1e-12));
 		REQUIRE_THAT(time_attr_1, WithinAbs(1.125, 1e-12));
@@ -432,11 +432,12 @@ TEST_CASE("buildReceiverStreamDescriptor uses detached file-FMCW carrier as the 
 	auto timing_owner = makeQuietTiming("detached_file_fmcw_clk", 32, 204'800.0);
 	receiver.setTiming(timing_owner.timing);
 
-	auto file_signal = std::make_unique<fers_signal::FileSignal>(fers_signal::FileWaveformKind::Fmcw);
-	file_signal->load(std::vector<ComplexType>{{1.0, 0.0}, {0.0, 1.0}}, 2, 204'800.0);
+	fers_signal::FileWaveform file_wave{};
+	file_wave.setKind(fers_signal::FileWaveformKind::Fmcw);
+	file_wave.load(std::vector<ComplexType>{{1.0, 0.0}, {0.0, 1.0}}, 2, 204'800.0);
 	radar::Platform tx_platform("DetachedFileFmcwTxPlatform");
 	auto waveform =
-		std::make_unique<fers_signal::RadarSignal>("FileFmcwWaveform", 10.0, 77.0e6, 1.0, std::move(file_signal), 1802);
+		std::make_unique<fers_signal::RadarSignal>("FileFmcwWaveform", 10.0, 77.0e6, std::move(file_wave), 1802);
 	radar::Transmitter transmitter(&tx_platform, "DetachedFileFmcwTx", radar::OperationMode::FMCW_MODE, 1801);
 	transmitter.setSignal(waveform.get());
 	const std::vector sources = {core::makeActiveSource(&transmitter, 0.0, params::endTime())};
@@ -463,9 +464,10 @@ TEST_CASE("buildReceiverStreamDescriptor binds a sole detached file-CW source",
 	receiver.setTiming(timing_owner.timing);
 
 	radar::Platform tx_platform("DetachedFileCwTxPlatform");
-	auto waveform = std::make_unique<fers_signal::RadarSignal>(
-		"TxWaveform", 16'400.0, 89.0e6, 180.0,
-		std::make_unique<fers_signal::FileSignal>(fers_signal::FileWaveformKind::Cw), 1302);
+	fers_signal::FileWaveform file_wave{};
+	file_wave.setKind(fers_signal::FileWaveformKind::Cw);
+	auto waveform =
+		std::make_unique<fers_signal::RadarSignal>("TxWaveform", 16'400.0, 89.0e6, std::move(file_wave), 1302);
 	radar::Transmitter transmitter(&tx_platform, "DetachedFileCwTx", radar::OperationMode::CW_MODE, 1301);
 	transmitter.setSignal(waveform.get());
 	const std::vector sources = {core::makeActiveSource(&transmitter, 0.0, 90.0),
@@ -496,15 +498,15 @@ TEST_CASE("buildReceiverStreamDescriptor preserves attached CW source precedence
 	receiver.setTiming(timing_owner.timing);
 
 	radar::Platform attached_platform("AttachedCwTxPlatform");
-	auto attached_waveform = std::make_unique<fers_signal::RadarSignal>(
-		"AttachedCwWave", 25.0, 5.0e9, 1.0, std::make_unique<fers_signal::CwSignal>(), 1402);
+	auto attached_waveform =
+		std::make_unique<fers_signal::RadarSignal>("AttachedCwWave", 25.0, 5.0e9, fers_signal::CwWaveform{}, 1402);
 	radar::Transmitter attached(&attached_platform, "AttachedCwTx", radar::OperationMode::CW_MODE, 1401);
 	attached.setSignal(attached_waveform.get());
 	receiver.setAttached(&attached);
 
 	radar::Platform detached_platform("OtherCwTxPlatform");
-	auto detached_waveform = std::make_unique<fers_signal::RadarSignal>(
-		"OtherCwWave", 100.0, 9.0e9, 1.0, std::make_unique<fers_signal::CwSignal>(), 1502);
+	auto detached_waveform =
+		std::make_unique<fers_signal::RadarSignal>("OtherCwWave", 100.0, 9.0e9, fers_signal::CwWaveform{}, 1502);
 	radar::Transmitter detached(&detached_platform, "OtherCwTx", radar::OperationMode::CW_MODE, 1501);
 	detached.setSignal(detached_waveform.get());
 	const std::vector sources = {core::makeActiveSource(&detached, 0.0, params::endTime())};
@@ -532,13 +534,13 @@ TEST_CASE("buildReceiverStreamDescriptor leaves ambiguous detached CW sources un
 	receiver.setTiming(timing_owner.timing);
 
 	radar::Platform first_platform("FirstCwTxPlatform");
-	auto first_waveform = std::make_unique<fers_signal::RadarSignal>("FirstCwWave", 1.0, 1.0e9, 1.0,
-																	 std::make_unique<fers_signal::CwSignal>(), 1602);
+	auto first_waveform =
+		std::make_unique<fers_signal::RadarSignal>("FirstCwWave", 1.0, 1.0e9, fers_signal::CwWaveform{}, 1602);
 	radar::Transmitter first(&first_platform, "FirstCwTx", radar::OperationMode::CW_MODE, 1601);
 	first.setSignal(first_waveform.get());
 	radar::Platform second_platform("SecondCwTxPlatform");
-	auto second_waveform = std::make_unique<fers_signal::RadarSignal>("SecondCwWave", 2.0, 2.0e9, 1.0,
-																	  std::make_unique<fers_signal::CwSignal>(), 1702);
+	auto second_waveform =
+		std::make_unique<fers_signal::RadarSignal>("SecondCwWave", 2.0, 2.0e9, fers_signal::CwWaveform{}, 1702);
 	radar::Transmitter second(&second_platform, "SecondCwTx", radar::OperationMode::CW_MODE, 1701);
 	second.setSignal(second_waveform.get());
 	const std::vector sources = {core::makeActiveSource(&first, 0.0, params::endTime()),
@@ -788,6 +790,7 @@ TEST_CASE("runPulsedFinalizer writes jittered chunks and emits completion progre
 	ParamGuard const guard;
 	params::setRate(8.0);
 	params::setOversampleRatio(1);
+	params::setSimSamplingRate(8.0);
 	params::setAdcBits(0);
 
 	const std::string receiver_name = uniqueName("pulsed_finalize");
@@ -806,30 +809,30 @@ TEST_CASE("runPulsedFinalizer writes jittered chunks and emits completion progre
 	receiver.setNoiseTemperature(0.0);
 	receiver.setWindowProperties(0.5, 1.0, 0.125);
 
-	radar::Platform tx_platform("TxPlatform");
-	radar::Transmitter const transmitter(&tx_platform, "TxA", radar::OperationMode::PULSED_MODE, 701);
 	std::vector<std::unique_ptr<fers_signal::RadarSignal>> wave_store;
 
 	core::RenderingJob first_job{};
 	first_job.ideal_start_time = 0.0;
 	first_job.duration = 0.5;
 	first_job.responses.push_back(
-		makeFixedResponse(&transmitter, wave_store, {ComplexType{1.0, 0.0}, ComplexType{1.0, 0.0}}, 8.0, 0.125));
+		makeFixedResponse(wave_store, {ComplexType{1.0, 0.0}, ComplexType{1.0, 0.0}}, 8.0, 0.125));
 
 	core::RenderingJob second_job{};
 	second_job.ideal_start_time = 1.0;
 	second_job.duration = 0.5;
 	second_job.responses.push_back(
-		makeFixedResponse(&transmitter, wave_store, {ComplexType{1.0, 0.0}, ComplexType{1.0, 0.0}}, 8.0, 1.125));
+		makeFixedResponse(wave_store, {ComplexType{1.0, 0.0}, ComplexType{1.0, 0.0}}, 8.0, 1.125));
 
-	std::vector<std::unique_ptr<radar::Target>> targets;
+	const std::vector<std::unique_ptr<radar::Target>> targets;
+	core::World world;
+	const auto prop = std::make_shared<const propagation::pointscatter::PointScatterModel>(&world);
 	std::vector<ProgressCall> progress_calls;
 	auto reporter =
 		std::make_shared<core::ProgressReporter>([&progress_calls](const std::string& msg, int current, int total)
 												 { progress_calls.push_back({msg, current, total}); });
 
 	auto hdf5_sink = makeTestHdf5Sink(out_dir);
-	std::jthread worker(processing::runPulsedFinalizer, &receiver, &targets, reporter, out_dir.string(), nullptr,
+	std::jthread worker(processing::runPulsedFinalizer, &receiver, prop, reporter, out_dir.string(), nullptr,
 						hdf5_sink.get());
 	receiver.enqueueFinalizerJob(std::move(first_job));
 	receiver.enqueueFinalizerJob(std::move(second_job));
@@ -852,6 +855,7 @@ TEST_CASE("runPulsedFinalizer routes completed acquisition windows to an output 
 	params::setTime(0.0, 1.0);
 	params::setRate(4.0);
 	params::setOversampleRatio(1);
+	params::setSimSamplingRate(4.0);
 	params::setAdcBits(0);
 
 	const std::string receiver_name = uniqueName("pulsed_sink");
@@ -870,20 +874,19 @@ TEST_CASE("runPulsedFinalizer routes completed acquisition windows to an output 
 	receiver.setNoiseTemperature(0.0);
 	receiver.setWindowProperties(0.5, 1.0, 0.0);
 
-	radar::Platform tx_platform("TxPlatform");
-	radar::Transmitter const transmitter(&tx_platform, "TxA", radar::OperationMode::PULSED_MODE, 701);
 	std::vector<std::unique_ptr<fers_signal::RadarSignal>> wave_store;
 
 	core::RenderingJob job{};
 	job.ideal_start_time = 0.0;
 	job.duration = 0.5;
-	job.responses.push_back(
-		makeFixedResponse(&transmitter, wave_store, {ComplexType{1.0, 0.0}, ComplexType{2.0, 0.0}}, 4.0, 0.0));
+	job.responses.push_back(makeFixedResponse(wave_store, {ComplexType{1.0, 0.0}, ComplexType{2.0, 0.0}}, 4.0, 0.0));
 
-	std::vector<std::unique_ptr<radar::Target>> targets;
+	const std::vector<std::unique_ptr<radar::Target>> targets;
+	core::World world;
+	const auto prop = std::make_shared<const propagation::pointscatter::PointScatterModel>(&world);
 	CapturingOutputSink sink;
 
-	std::jthread worker(processing::runPulsedFinalizer, &receiver, &targets, nullptr, out_dir.string(), nullptr, &sink);
+	std::jthread worker(processing::runPulsedFinalizer, &receiver, prop, nullptr, out_dir.string(), nullptr, &sink);
 	receiver.enqueueFinalizerJob(std::move(job));
 	core::RenderingJob shutdown_job{};
 	shutdown_job.duration = -1.0;
@@ -902,8 +905,15 @@ TEST_CASE("runPulsedFinalizer routes completed acquisition windows to an output 
 	REQUIRE_THAT(block.sample_rate, WithinAbs(params::rate(), 1e-12));
 	REQUIRE(block.sample_start == 0u);
 	REQUIRE(block.samples.size() == 2u);
-	REQUIRE_THAT(block.samples[0].real(), WithinAbs(1.0, 1e-12));
-	REQUIRE_THAT(block.samples[1].real(), WithinAbs(2.0, 1e-12));
+	// The response (see makeFixedResponse) renders as [0, samples[0], samples[1]]
+	// starting at response->startTime() == 0.0 - edge == -0.25 (edge == 1/rate == 0.25).
+	// processResponse places that render at window index round(4*(-0.25-0.0)) == -1, so
+	// its taper sample (index 0 of the render) falls before the window and is dropped;
+	// samples[0] (1.0) lands at window index 1, and samples[1] (2.0) would land at
+	// window index 2, outside this 2-sample window, and is clipped. Window index 0
+	// stays at its zero-initialized value since nothing renders there.
+	REQUIRE_THAT(block.samples[0].real(), WithinAbs(0.0, 1e-12));
+	REQUIRE_THAT(block.samples[1].real(), WithinAbs(1.0, 1e-12));
 
 	std::filesystem::remove_all(out_dir);
 }

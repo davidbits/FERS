@@ -184,9 +184,8 @@ namespace
 		for (size_t i = 0; i < 20; ++i)
 		{
 			SimId const w_id = SimIdGenerator::instance().generateId(ObjectType::Waveform);
-			auto sig = std::make_unique<fers_signal::CwSignal>();
-			auto wave = std::make_unique<fers_signal::RadarSignal>("wave_" + std::to_string(i), dist_real(rng),
-																   1e9 + dist_real(rng), 1.0, std::move(sig), w_id);
+			auto wave = std::make_unique<fers_signal::RadarSignal>(
+				"wave_" + std::to_string(i), dist_real(rng), 1e9 + dist_real(rng), fers_signal::CwWaveform{}, w_id);
 			world.add(std::move(wave));
 			wave_ids.push_back(w_id);
 
@@ -322,11 +321,12 @@ namespace
 		auto tgt = radar::createIsoTarget(plat.get(), "tgt_" + std::to_string(i), dist_real(rng), seed_dist(rng));
 		if (i % 2 == 0)
 		{
-			tgt->setFluctuationModel(std::make_unique<radar::RcsChiSquare>(tgt->getRngEngine(), 2.0));
+			tgt->getRcsSpec()->setFluctuationModel(
+				std::make_unique<radar::RcsChiSquare>(tgt->getRcsSpec()->getRngEngine(), 2.0));
 		}
 		else
 		{
-			tgt->setFluctuationModel(std::make_unique<radar::RcsConst>());
+			tgt->getRcsSpec()->setFluctuationModel(std::make_unique<radar::RcsConst>());
 		}
 		world.add(std::move(tgt));
 		world.add(std::move(plat));

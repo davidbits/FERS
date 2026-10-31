@@ -13,12 +13,12 @@
 #pragma once
 
 #include <cstddef>
-#include <string>
+#include <span>
 #include <vector>
 
 #include "core/config.h"
-#include "core/sim_id.h"
 #include "interpolation/interpolation_point.h"
+#include "signal/radar_signal.h"
 
 class XmlElement;
 
@@ -35,22 +35,56 @@ namespace radar
 namespace serial
 {
 	/**
+	 * @class ResponseBuilder
+	 * @brief Accumulates a radar response's interpolation points sample by sample as they're
+	 * detected. Finalize it into an immutable, tapered `Response` once the path is done.
+	 */
+	class ResponseBuilder
+	{
+	public:
+		/**
+		 * @brief Starts a response at its first detected sample.
+		 *
+		 * @param signal Pointer to the radar signal object.
+		 * @param first_point The response's first sample.
+		 * @param left_interval The tx-time sampling gap immediately before `first_point`
+		 * (0 if `first_point` sits at the transmission's start).
+		 * @param right_interval This response's tx-time sampling gap after `first_point`,
+		 * used only if no further point is ever added.
+		 */
+		ResponseBuilder(const fers_signal::RadarSignal* signal, const interp::InterpPoint& first_point,
+						RealType left_interval, RealType right_interval);
+
+		/**
+		 * @brief Adds the next detected sample to the response.
+		 *
+		 * @param point The interpolation point to be added.
+		 * @param right_interval This response's tx-time gap after `point`, used when no
+		 * further point is detected and added.
+		 * @throws std::logic_error If the new point has a time earlier than the last point.
+		 */
+		void addInterpPoint(const interp::InterpPoint& point, RealType right_interval);
+
+	private:
+		friend class Response;
+
+		const fers_signal::RadarSignal* _signal; ///< Pointer to the radar signal object.
+		std::vector<interp::InterpPoint> _points; ///< Real points, plus a reserved lead slot if `_left_interval > 0`.
+		RealType _left_interval; ///< True tx-time gap before the first real point (0 if untapered).
+		RealType _right_interval; ///< Assumed tx-time gap after the last real point (0 if untapered).
+	};
+
+	/**
 	 * @class Response
-	 * @brief Manages radar signal responses from a transmitter.
+	 * @brief An immutable, tapered radar signal response, ready to render. Built by
+	 * finalizing a `ResponseBuilder`.
 	 */
 	class Response
 	{
 	public:
-		/**
-		 * @brief Constructor for the `Response` class.
-		 *
-		 * @param wave Pointer to the radar signal object.
-		 * @param transmitter Pointer to the transmitter object.
-		 */
-		Response(const fers_signal::RadarSignal* wave, const radar::Transmitter* transmitter) noexcept :
-			_transmitter(transmitter), _wave(wave)
-		{
-		}
+		/// Finalizes `builder` into a tapered `Response`: bakes in a zero-gain lead/tail
+		/// point on each side that still has something to taper into (a nonzero interval).
+		explicit Response(ResponseBuilder builder);
 
 		~Response() = default;
 		Response(const Response&) = delete;
@@ -58,37 +92,20 @@ namespace serial
 		Response(Response&&) = delete;
 		Response& operator=(Response&&) = delete;
 
-		/**
-		 * @brief Retrieves the start time of the response.
-		 *
-		 * @return Start time as a `RealType`. Returns 0.0 if no points are present.
-		 */
-		[[nodiscard]] RealType startTime() const noexcept { return _points.empty() ? 0.0 : _points.front().time; }
+		/// Start time of the response, including its leading fade-in taper if it has one.
+		[[nodiscard]] RealType startTime() const noexcept { return _points.front().rx_time; }
 
-		/**
-		 * @brief Retrieves the end time of the response.
-		 *
-		 * @return End time as a `RealType`. Returns 0.0 if no points are present.
-		 */
-		[[nodiscard]] RealType endTime() const noexcept { return _points.empty() ? 0.0 : _points.back().time; }
+		/// End time of the response, including its trailing fade-out taper if it has one.
+		[[nodiscard]] RealType endTime() const noexcept { return _points.back().rx_time; }
 
-		/**
-		 * @brief Adds an interpolation point to the response.
-		 *
-		 * @param point The interpolation point to be added.
-		 * @throws std::logic_error If the new point has a time earlier than the last point.
-		 */
-		void addInterpPoint(const interp::InterpPoint& point);
+		/// The receiving duration of the response, in seconds.
+		[[nodiscard]] RealType getRxDuration() const noexcept { return endTime() - startTime(); }
 
-		/**
-		 * @brief Renders the response in binary format.
-		 *
-		 * @param rate Output parameter for the signal rate.
-		 * @param size Output parameter for the size of the binary data.
-		 * @param fracWinDelay Delay factor applied during windowing.
-		 * @return A vector of `ComplexType` representing the binary data.
-		 */
-		std::vector<ComplexType> renderBinary(RealType& rate, unsigned& size, RealType fracWinDelay) const;
+		/// The response's points in rx-time order, including any baked-in taper points.
+		[[nodiscard]] std::span<const interp::InterpPoint> points() const noexcept { return _points; }
+
+		/// Renders the response in binary format.
+		[[nodiscard]] std::vector<ComplexType> render(RealType fracWinDelay) const;
 
 		/// Renders a bounded absolute-time response slice on the requested output grid.
 		[[nodiscard]] std::vector<ComplexType> renderSlice(RealType outputRate, RealType outputStartTime,
@@ -98,25 +115,12 @@ namespace serial
 		[[nodiscard]] RealType sampleRate() const noexcept;
 
 		/// Returns the waveform native sample count.
-		[[nodiscard]] unsigned sampleCount() const noexcept;
-
-		/**
-		 * @brief Retrieves the length of the response.
-		 *
-		 * @return The length of the response as a `RealType`.
-		 */
-		[[nodiscard]] RealType getLength() const noexcept { return endTime() - startTime(); }
-
-		/**
-		 * @brief Retrieves the ID of the associated transmitter.
-		 *
-		 * @return The transmitter SimId.
-		 */
-		[[nodiscard]] SimId getTransmitterId() const noexcept;
+		[[nodiscard]] size_t sampleCount() const noexcept;
 
 	private:
-		const radar::Transmitter* _transmitter; ///< Pointer to the transmitter object.
-		const fers_signal::RadarSignal* _wave; ///< Pointer to the radar signal object.
-		std::vector<interp::InterpPoint> _points; ///< Vector of interpolation points.
+		const fers_signal::RadarSignal* _signal; ///< Pointer to the radar signal object.
+		const fers_signal::PulseWaveform* _wave{nullptr}; ///< Pointer to the radar signal object's PulseWaveform.
+		std::vector<interp::InterpPoint> _points; ///< Channel property interpolation points, taper points included.
+		RealType _native_anchor_time; ///< rx_time of the true first sample (not a synthetic lead taper point).
 	};
 }

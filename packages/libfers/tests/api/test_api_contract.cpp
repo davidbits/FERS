@@ -70,6 +70,45 @@ TEST_CASE("API set thread count clears stale error state on success", "[api][cor
 	REQUIRE(error.get() == nullptr);
 }
 
+TEST_CASE("API set ray tracing engine updates params and clears stale error state", "[api][core]")
+{
+	api_test::ParamGuard const guard;
+	api_test::clearLastError();
+
+	REQUIRE(fers_set_ray_tracing_engine(FERS_RT_ENGINE_OPTIX) == 0);
+	CHECK(params::rayTracingEnginePreference() == params::RayTracingEnginePreference::OptiX);
+	const api_test::ApiString error = api_test::lastError();
+	REQUIRE(error.get() == nullptr);
+
+	REQUIRE(fers_set_ray_tracing_engine(FERS_RT_ENGINE_EMBREE) == 0);
+	CHECK(params::rayTracingEnginePreference() == params::RayTracingEnginePreference::Embree);
+
+	REQUIRE(fers_set_ray_tracing_engine(FERS_RT_ENGINE_AUTO) == 0);
+	CHECK(params::rayTracingEnginePreference() == params::RayTracingEnginePreference::Auto);
+}
+
+namespace
+{
+	template <typename E>
+	E make_invalid_enum(std::underlying_type_t<E> raw) noexcept
+	{
+		static_assert(std::is_enum_v<E>);
+		E e;
+		std::memcpy(&e, &raw, sizeof e);
+		return e;
+	};
+}
+
+TEST_CASE("API set ray tracing engine rejects an out-of-range value", "[api][core]")
+{
+	api_test::ParamGuard const guard;
+	api_test::clearLastError();
+
+	REQUIRE(fers_set_ray_tracing_engine(make_invalid_enum<fers_ray_tracing_engine_t>(99)) != 0);
+	const api_test::ApiString error = api_test::lastError();
+	REQUIRE(error.get() != nullptr);
+}
+
 TEST_CASE("API successful calls clear stale thread-local errors beyond thread-count changes", "[api][core]")
 {
 	api_test::Context const context;

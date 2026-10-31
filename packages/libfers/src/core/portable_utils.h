@@ -15,7 +15,7 @@
 #include <cmath>
 #include <thread>
 
-#include "config.h"
+#include "logging.h"
 
 namespace core
 {
@@ -25,7 +25,7 @@ namespace core
 	 * @param x The value for which the Bessel function is to be computed.
 	 * @return The computed value of the Bessel function of the first kind (order 1).
 	 */
-	inline RealType besselJ1(const RealType x) noexcept
+	inline double besselJ1(const double x) noexcept
 	{
 #ifdef _MSC_VER
 		return _j1(x);

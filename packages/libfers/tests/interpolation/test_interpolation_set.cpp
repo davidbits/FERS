@@ -10,10 +10,10 @@ using Catch::Matchers::WithinAbs;
 TEST_CASE("InterpPoint defaults to zeros", "[interpolation][point]")
 {
 	interp::InterpPoint point;
-	REQUIRE_THAT(point.power, WithinAbs(0.0, 0.0));
-	REQUIRE_THAT(point.time, WithinAbs(0.0, 0.0));
+	REQUIRE_THAT(point.gain, WithinAbs(0.0, 0.0));
+	REQUIRE_THAT(point.rx_time, WithinAbs(0.0, 0.0));
 	REQUIRE_THAT(point.delay, WithinAbs(0.0, 0.0));
-	REQUIRE_THAT(point.phase, WithinAbs(0.0, 0.0));
+	REQUIRE_THAT(point.phase_delay, WithinAbs(0.0, 0.0));
 }
 
 TEST_CASE("InterpSetData returns nullopt when empty", "[interpolation][set]")

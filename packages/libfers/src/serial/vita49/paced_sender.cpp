@@ -289,6 +289,9 @@ namespace serial::vita49
 
 	void PacedSender::insertByDeadlineUnlocked(SerializedPacket packet)
 	{
+		// std::ranges::upper_bound needs a symmetric comparator; this one is heterogeneous
+		// (RealType, SerializedPacket) only, so it can't be converted.
+		// NOLINTNEXTLINE(modernize-use-ranges)
 		const auto position = std::upper_bound(_queue.begin(), _queue.end(), packet.first_sample_time,
 											   [](const RealType deadline, const SerializedPacket& queued)
 											   { return deadline < queued.first_sample_time; });

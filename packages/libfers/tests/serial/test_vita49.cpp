@@ -1412,8 +1412,8 @@ TEST_CASE("VITA output sink anchors automatic pacing when the first data batch i
 	const auto stats = sink.finalize();
 
 	REQUIRE(stats.epoch_unix_nanoseconds.has_value());
-	CHECK(*stats.epoch_unix_nanoseconds >= epoch_lower_bound);
-	CHECK(*stats.epoch_unix_nanoseconds <= epoch_upper_bound);
+	CHECK(stats.epoch_unix_nanoseconds.value() >= epoch_lower_bound);
+	CHECK(stats.epoch_unix_nanoseconds.value() <= epoch_upper_bound);
 	REQUIRE(stats.streams.size() == 1u);
 	CHECK(stats.streams.front().packets_emitted == 1u);
 	CHECK(recording_raw->sent.size() >= 3u);

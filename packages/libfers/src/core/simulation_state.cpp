@@ -162,7 +162,7 @@ namespace core
 
 			source.carrier_freq = signal->getCarrier();
 			source.amplitude = std::sqrt(signal->getPower());
-			if (const auto* const fmcw = signal->getFmcwChirpSignal(); fmcw != nullptr)
+			if (const auto* const fmcw = signal->getFmcwChirpWaveform(); fmcw != nullptr)
 			{
 				source.kind = StreamingWaveformKind::FmcwLinear;
 				source.is_fmcw = true;
@@ -184,7 +184,7 @@ namespace core
 				return;
 			}
 
-			if (const auto* const sfcw = signal->getSteppedFrequencySignal(); sfcw != nullptr)
+			if (const auto* const sfcw = signal->getSfcwWaveform(); sfcw != nullptr)
 			{
 				source.kind = StreamingWaveformKind::Sfcw;
 				source.is_sfcw = true;
@@ -203,7 +203,7 @@ namespace core
 				return;
 			}
 
-			if (const auto* const triangle = signal->getFmcwTriangleSignal(); triangle != nullptr)
+			if (const auto* const triangle = signal->getFmcwTriangleWaveform(); triangle != nullptr)
 			{
 				source.kind = StreamingWaveformKind::FmcwTriangle;
 				source.is_fmcw = true;
@@ -244,13 +244,13 @@ namespace core
 				return;
 			}
 
-			if (const auto* const file = signal->getFileSignal();
-				file != nullptr && file->getKind() != fers_signal::FileWaveformKind::Pulsed)
+			if (const auto* const file = signal->getFileWaveform(); file != nullptr)
 			{
 				source.file = file;
-				source.file_duration = signal->getLength();
-				source.is_fmcw = file->getKind() == fers_signal::FileWaveformKind::Fmcw;
+				source.file_duration = file->getDuration();
+				source.is_fmcw = file->isFmcw();
 				source.kind = source.is_fmcw ? StreamingWaveformKind::FileFmcw : StreamingWaveformKind::FileCw;
+				// File-backed waveforms never wrap implicitly: clamp to one playthrough.
 				source.segment_end = std::min(source.segment_end, segment_start + source.file_duration);
 			}
 		}
@@ -285,6 +285,15 @@ namespace core
 				"FMCW triangle transmitter '{}' segment [{}, {}] emits {} complete triangles and drops {} s of "
 				"leftover active time.",
 				tx->getName(), segment_start, raw_segment_end, emitted_triangles, raw_segment_end - source.segment_end);
+		}
+		else if ((source.kind == StreamingWaveformKind::FileCw || source.kind == StreamingWaveformKind::FileFmcw) &&
+				 source.segment_end + kWaveformBoundaryTimeToleranceSeconds < raw_segment_end)
+		{
+			LOG(logging::Level::WARNING,
+				"File-backed {} transmitter '{}' segment [{}, {}] ends after {} s: the source file has ended and "
+				"will not loop, dropping {} s of scheduled active time.",
+				source.kind == StreamingWaveformKind::FileFmcw ? "FMCW" : "CW", tx->getName(), segment_start,
+				raw_segment_end, source.file_duration, raw_segment_end - source.segment_end);
 		}
 		return source;
 	}

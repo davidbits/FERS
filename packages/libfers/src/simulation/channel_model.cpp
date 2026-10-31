@@ -18,16 +18,23 @@
 
 #include <algorithm>
 #include <cmath>
-#include <limits>
+#include <complex>
+#include <cstdint>
+#include <memory>
 #include <string_view>
 #include <unordered_map>
+#include <utility>
+#include <vector>
 
+#include "core/config.h"
 #include "core/logging.h"
 #include "core/parameters.h"
-#include "core/sim_id.h"
 #include "core/world.h"
 #include "interpolation/interpolation_point.h"
 #include "math/geometry_ops.h"
+#include "propagation/common.h"
+#include "propagation/pointscatter/pointscatter.h"
+#include "propagation/propagation_model.h"
 #include "radar/radar_obj.h"
 #include "radar/receiver.h"
 #include "radar/target.h"
@@ -98,107 +105,11 @@ namespace
 		}
 	}
 
-	/**
-	 * @struct LinkGeometry
-	 * @brief Holds geometric properties of a path segment between two points.
-	 */
-	struct LinkGeometry
-	{
-		Vec3 u_vec; ///< Unit vector pointing from Source to Destination.
-		RealType dist{}; ///< Distance between Source and Destination.
-	};
-
 	struct StreamingWaveformEvaluation
 	{
 		RealType phase = 0.0;
-		RealType rf_frequency = 0.0;
 		ComplexType envelope{1.0, 0.0};
 	};
-
-	/**
-	 * @brief Computes the geometry (distance and direction) between two points.
-	 * @param p_from Starting position.
-	 * @param p_to Ending position.
-	 * @return LinkGeometry containing distance and unit vector.
-	 * @throws RangeError if the distance is too small (<= EPSILON).
-	 */
-	LinkGeometry computeLink(const Vec3& p_from, const Vec3& p_to)
-	{
-		const Vec3 vec = p_to - p_from;
-		const RealType dist = vec.length();
-
-		if (dist <= EPSILON)
-		{
-			// LOG(Level::FATAL) is handled by the caller or generic exception handler if needed,
-			// but for RangeError strictly we just throw here to keep it pure.
-			// However, existing code logged FATAL before throwing.
-			// We'll throw RangeError, and let callers decide if they want to log or return 0.
-			throw simulation::RangeError();
-		}
-
-		return {vec / dist, dist};
-	}
-
-	/**
-	 * @brief Calculates the antenna gain for a specific direction and time.
-	 * @param radar The radar object (Transmitter or Receiver).
-	 * @param direction_vec The unit vector pointing AWAY from the antenna towards the target/receiver.
-	 * @param time The simulation time for rotation lookup.
-	 * @param lambda The signal wavelength.
-	 * @return The linear gain value.
-	 */
-	RealType computeAntennaGain(const radar::Radar* radar, const Vec3& direction_vec, RealType time, RealType lambda)
-	{
-		return radar->getGain(SVec3(direction_vec), radar->getRotation(time), lambda);
-	}
-
-	/**
-	 * @brief Computes the power scaling factor for a direct path (Friis Transmission Equation).
-	 * @param tx_gain Transmitter gain (linear).
-	 * @param rx_gain Receiver gain (linear).
-	 * @param lambda Wavelength (meters).
-	 * @param dist Distance (meters).
-	 * @param no_prop_loss If true, distance-based attenuation is ignored.
-	 * @return The power scaling factor (Pr / Pt).
-	 */
-	RealType computeDirectPathPower(RealType tx_gain, RealType rx_gain, RealType lambda, RealType dist,
-									bool no_prop_loss)
-	{
-		const RealType numerator = tx_gain * rx_gain * lambda * lambda;
-		RealType denominator = 16.0 * PI * PI; // (4 * PI)^2
-
-		if (!no_prop_loss)
-		{
-			denominator *= dist * dist;
-		}
-
-		return numerator / denominator;
-	}
-
-	/**
-	 * @brief Computes the power scaling factor for a reflected path (Bistatic Radar Range Equation).
-	 * @param tx_gain Transmitter gain (linear).
-	 * @param rx_gain Receiver gain (linear).
-	 * @param rcs Target Radar Cross Section (m^2).
-	 * @param lambda Wavelength (meters).
-	 * @param r_tx Distance from Transmitter to Target.
-	 * @param r_rx Distance from Target to Receiver.
-	 * @param no_prop_loss If true, distance-based attenuation is ignored.
-	 * @return The power scaling factor (Pr / Pt).
-	 */
-	RealType computeReflectedPathPower(RealType tx_gain, RealType rx_gain, RealType rcs, RealType lambda, RealType r_tx,
-									   RealType r_rx, bool no_prop_loss)
-	{
-		const RealType numerator = tx_gain * rx_gain * rcs * lambda * lambda;
-		RealType denominator = 64.0 * PI * PI * PI; // (4 * PI)^3
-
-		if (!no_prop_loss)
-		{
-			denominator *= r_tx * r_tx * r_rx * r_rx;
-		}
-
-		return numerator / denominator;
-	}
 
 	/**
 	 * @brief Computes the non-coherent phase shift due to timing offsets.
@@ -314,17 +225,6 @@ namespace
 			}
 		}
 		return false;
-	}
-
-	/// Builds a compatibility streaming-source cache for classic CW paths.
-	core::ActiveStreamingSource makeClassicStreamingSource(const Transmitter* trans)
-	{
-		auto source = core::makeActiveSource(trans, params::startTime(), std::numeric_limits<RealType>::max());
-		if (source.kind == core::StreamingWaveformKind::Cw)
-		{
-			source.segment_start = std::numeric_limits<RealType>::lowest();
-		}
-		return source;
 	}
 
 	bool computeLinearFmcwPhaseWithoutTracker(const core::ActiveStreamingSource& source, const RealType t_ret,
@@ -451,7 +351,7 @@ namespace
 		return true;
 	}
 
-	/// Computes streaming waveform phase and active RF at a receiver time.
+	/// Computes streaming waveform phase at a receiver time.
 	bool computeStreamingEvaluation(const core::ActiveStreamingSource& source, const RealType rx_time,
 									const RealType tau, core::FmcwChirpBoundaryTracker* const chirp_tracker,
 									StreamingWaveformEvaluation& eval)
@@ -469,7 +369,6 @@ namespace
 
 		if (source.kind == core::StreamingWaveformKind::FmcwLinear)
 		{
-			eval.rf_frequency = source.carrier_freq;
 			if (chirp_tracker == nullptr)
 			{
 				return computeLinearFmcwPhaseWithoutTracker(source, t_ret, tau, eval.phase);
@@ -479,7 +378,6 @@ namespace
 
 		if (source.kind == core::StreamingWaveformKind::FmcwTriangle)
 		{
-			eval.rf_frequency = source.carrier_freq;
 			if (chirp_tracker == nullptr)
 			{
 				return computeTriangleFmcwPhaseWithoutTracker(source, t_ret, tau, eval.phase);
@@ -498,7 +396,6 @@ namespace
 			{
 				return false;
 			}
-			eval.rf_frequency = step->rf_frequency;
 			eval.phase = -2.0 * PI * step->rf_frequency * tau;
 			return true;
 		}
@@ -509,13 +406,11 @@ namespace
 			{
 				return false;
 			}
-			eval.rf_frequency = source.carrier_freq;
 			eval.phase = -2.0 * PI * source.carrier_freq * tau;
 			eval.envelope = source.file->sampleAt(t_ret - source.segment_start);
 			return true;
 		}
 
-		eval.rf_frequency = source.carrier_freq;
 		eval.phase = -2.0 * PI * source.carrier_freq * tau;
 		return true;
 	}
@@ -527,7 +422,7 @@ namespace
 		{
 			return 0.0;
 		}
-		if (const auto* fmcw = waveform->getFmcwChirpSignal(); fmcw != nullptr)
+		if (const auto* fmcw = waveform->getFmcwChirpWaveform(); fmcw != nullptr)
 		{
 			return waveform->getPower() * (fmcw->getChirpDuration() / fmcw->getChirpPeriod());
 		}
@@ -648,163 +543,128 @@ namespace simulation
 		return sample(tx_timing, tx_time) - sample(rx_timing, rx_time);
 	}
 
-	void solveRe(const Transmitter* trans, const Receiver* recv, const Target* targ,
-				 const std::chrono::duration<RealType>& time, const RadarSignal* wave, ReResults& results)
+	void updateCoarseStreamingCache(core::ReceiverTrackerCache& cache,
+									const std::vector<propagation::PropagationPath>& next_paths,
+									const RealType interval_start_time, const RealType sample_time)
 	{
-		// Note: RangeError log messages are handled by the original catch block in calculateResponse
-		// or explicitly here if strict adherence to original logging is required.
-		// Using the helper logic which throws RangeError on epsilon check.
-
-		const RealType t_val = time.count();
-		const auto p_tx = trans->getPosition(t_val);
-		const auto p_rx = recv->getPosition(t_val);
-		const auto p_tgt = targ->getPosition(t_val);
-
-		// Link 1: Tx -> Target
-		LinkGeometry link_tx_tgt;
-		// Link 2: Target -> Rx (Note: Vector for calculation is Tgt->Rx)
-		LinkGeometry link_tgt_rx;
-
-		try
+		for (const auto& path : next_paths)
 		{
-			link_tx_tgt = computeLink(p_tx, p_tgt);
-			link_tgt_rx = computeLink(p_tgt, p_rx); // Vector Tgt -> Rx
+			auto& per_source = cache.coarse_path_samples[path.source_index];
+			const RealType gain_mag = std::sqrt(std::norm(path.gain));
+			const RealType raw_phase = std::arg(path.gain);
+
+			const auto [it, inserted] = per_source.try_emplace(path.path_id);
+			auto& entry = it->second;
+
+			RealType hi_phase = raw_phase;
+			if (inserted)
+			{
+				// New path found.
+				// Only one sample to extrapolate from, so add a zero-gain copy.
+				// This mirrors serial::Response's simpleTaperPoint fallback.
+				entry.t_lo = interval_start_time;
+				entry.delay_lo = path.delay;
+				entry.gain_mag_lo = 0.0;
+				entry.gain_phase_lo = raw_phase;
+			}
+			else
+			{
+				// Unwrap the fresh phase relative to the previous "hi" so interpolation doesn't see
+				// a +/-2pi jump across samples.
+				hi_phase = raw_phase + 2.0 * PI * std::round((entry.gain_phase_hi - raw_phase) / (2.0 * PI));
+
+				entry.t_lo = entry.t_hi;
+				entry.delay_lo = entry.delay_hi;
+				entry.gain_mag_lo = entry.gain_mag_hi;
+				entry.gain_phase_lo = entry.gain_phase_hi;
+			}
+
+			entry.t_hi = sample_time;
+			entry.delay_hi = path.delay;
+			entry.gain_mag_hi = gain_mag;
+			entry.gain_phase_hi = hi_phase;
 		}
-		catch (const RangeError&)
+
+		// Every path touched above just had its `t_hi` set to `sample_time`. Anything still holding
+		// an older value wasn't in `next_paths` this round, so it's either tapering out (its first
+		// missed round: extrapolate a zero-gain "hi" from its own existing lo/hi, mirroring
+		// serial::Response's extrapolateTaperPoint, computed directly in rx-time since this grid has
+		// no Doppler-induced tx-time/rx-time gap to reconcile) or already fully tapered (drop it).
+		for (auto& per_source : cache.coarse_path_samples)
 		{
-			LOG(Level::INFO, "Transmitter or Receiver too close to Target for accurate simulation");
-			throw;
+			for (auto it = per_source.begin(); it != per_source.end();)
+			{
+				auto& entry = it->second;
+				if (entry.t_hi == sample_time)
+				{
+					++it;
+					continue;
+				}
+
+				if (entry.gain_mag_hi == 0.0)
+				{
+					it = per_source.erase(it);
+					continue;
+				}
+
+				const RealType dt = entry.t_hi - entry.t_lo;
+				RealType new_delay = entry.delay_hi;
+				RealType new_phase = entry.gain_phase_hi;
+				if (dt != 0.0)
+				{
+					const RealType extend = sample_time - entry.t_hi;
+					new_delay = entry.delay_hi + (entry.delay_hi - entry.delay_lo) / dt * extend;
+					new_phase = entry.gain_phase_hi + (entry.gain_phase_hi - entry.gain_phase_lo) / dt * extend;
+				}
+
+				entry.t_lo = entry.t_hi;
+				entry.delay_lo = entry.delay_hi;
+				entry.gain_mag_lo = entry.gain_mag_hi;
+				entry.gain_phase_lo = entry.gain_phase_hi;
+
+				entry.t_hi = sample_time;
+				entry.delay_hi = new_delay;
+				entry.gain_mag_hi = 0.0;
+				entry.gain_phase_hi = new_phase;
+
+				++it;
+			}
 		}
-
-		results.delay = (link_tx_tgt.dist + link_tgt_rx.dist) / params::c();
-
-		// Calculate RCS
-		// Note: getRcs expects (InAngle, OutAngle).
-		// InAngle: Tx -> Tgt (link_tx_tgt.u_vec)
-		// OutAngle: Rx -> Tgt (Opposite of Tgt->Rx, so -link_tgt_rx.u_vec)
-		// This matches existing logic.
-		SVec3 in_angle(link_tx_tgt.u_vec);
-		SVec3 out_angle(-link_tgt_rx.u_vec);
-		const auto rcs = targ->getRcs(in_angle, out_angle, t_val);
-
-		const auto wavelength = params::c() / wave->getCarrier();
-
-		// Tx Gain: Direction Tx -> Tgt
-		const auto tx_gain = computeAntennaGain(trans, link_tx_tgt.u_vec, t_val, wavelength);
-		// Rx Gain: Direction Rx -> Tgt (Opposite of Tgt->Rx).
-		// Time is time + delay.
-		const auto rx_gain = computeAntennaGain(recv, -link_tgt_rx.u_vec, results.delay + t_val, wavelength);
-
-		const bool no_loss = recv->checkFlag(Receiver::RecvFlag::FLAG_NOPROPLOSS);
-		results.power =
-			computeReflectedPathPower(tx_gain, rx_gain, rcs, wavelength, link_tx_tgt.dist, link_tgt_rx.dist, no_loss);
-
-		results.phase = -results.delay * 2 * PI * wave->getCarrier();
 	}
 
-	void solveReDirect(const Transmitter* trans, const Receiver* recv, const std::chrono::duration<RealType>& time,
-					   const RadarSignal* wave, ReResults& results)
+	std::vector<propagation::PropagationPath> interpolateCoarseStreamingPaths(const core::ReceiverTrackerCache& cache,
+																			  radar::Receiver& receiver,
+																			  const RealType rx_time)
 	{
-		const RealType t_val = time.count();
-		const auto p_tx = trans->getPosition(t_val);
-		const auto p_rx = recv->getPosition(t_val);
+		std::vector<propagation::PropagationPath> paths;
 
-		LinkGeometry link;
-		try
+		for (std::size_t source_index = 0; source_index < cache.coarse_path_samples.size(); ++source_index)
 		{
-			link = computeLink(p_tx, p_rx); // Vector Tx -> Rx
-		}
-		catch (const RangeError&)
-		{
-			LOG(Level::INFO, "Transmitter or Receiver too close for accurate simulation");
-			throw;
-		}
+			for (const auto& [path_id, entry] : cache.coarse_path_samples[source_index])
+			{
+				RealType delay = entry.delay_hi;
+				RealType gain_mag = entry.gain_mag_hi;
+				RealType gain_phase = entry.gain_phase_hi;
 
-		results.delay = link.dist / params::c();
-		const RealType wavelength = params::c() / wave->getCarrier();
+				if (entry.t_hi != entry.t_lo)
+				{
+					const RealType frac = (rx_time - entry.t_lo) / (entry.t_hi - entry.t_lo);
+					delay = std::lerp(entry.delay_lo, entry.delay_hi, frac);
+					gain_mag = std::lerp(entry.gain_mag_lo, entry.gain_mag_hi, frac);
+					gain_phase = std::lerp(entry.gain_phase_lo, entry.gain_phase_hi, frac);
+				}
 
-		// Discrepancy Fix: Original code used (Rx - Tx) for Receiver Gain but (Tx - Rx) logic for Transmitter gain
-		// was ambiguous/incorrect (using `tpos - rpos` which is Rx->Tx).
-		// Per `calculateDirectPathContribution` preference:
-		// Tx Gain uses Vector Tx -> Rx.
-		// Rx Gain uses Vector Rx -> Tx.
-
-		const auto tx_gain = computeAntennaGain(trans, link.u_vec, t_val, wavelength);
-		const auto rx_gain = computeAntennaGain(recv, -link.u_vec, t_val + results.delay, wavelength);
-
-		const bool no_loss = recv->checkFlag(Receiver::RecvFlag::FLAG_NOPROPLOSS);
-		results.power = computeDirectPathPower(tx_gain, rx_gain, wavelength, link.dist, no_loss);
-
-		results.phase = -results.delay * 2 * PI * wave->getCarrier();
-	}
-
-	ComplexType calculateDirectPathContribution(const Transmitter* trans, const Receiver* recv, const RealType timeK,
-												const CwPhaseNoiseLookup* const phase_noise_lookup)
-	{
-		return calculateStreamingDirectPathContribution(makeClassicStreamingSource(trans), recv, timeK,
-														phase_noise_lookup);
-	}
-
-	ComplexType calculateStreamingDirectPathContribution(const core::ActiveStreamingSource& source,
-														 const Receiver* recv, const RealType timeK,
-														 const CwPhaseNoiseLookup* const phase_noise_lookup,
-														 core::FmcwChirpBoundaryTracker* const chirp_tracker,
-														 const StreamingTimingPhaseMode timing_phase_mode)
-	{
-		const auto* const trans = source.transmitter;
-		if (trans == nullptr)
-		{
-			return {0.0, 0.0};
-		}
-		// Check for co-location to prevent singularities.
-		// If they share the same platform, we assume they are isolated (no leakage) or explicit
-		// monostatic handling is required (which is not modeled via the far-field path).
-		if (trans->getPlatform() == recv->getPlatform())
-		{
-			return {0.0, 0.0};
+				paths.push_back(propagation::PropagationPath{
+					.delay = delay,
+					.gain = std::polar(gain_mag, gain_phase),
+					.path_id = path_id,
+					.source_index = source_index,
+					.receiver = &receiver,
+				});
+			}
 		}
 
-		const auto p_tx = trans->getPlatform()->getPosition(timeK);
-		const auto p_rx = recv->getPlatform()->getPosition(timeK);
-
-		LinkGeometry link;
-		try
-		{
-			link = computeLink(p_tx, p_rx);
-		}
-		catch (const RangeError&)
-		{
-			return {0.0, 0.0};
-		}
-
-		const RealType tau = link.dist / params::c();
-		StreamingWaveformEvaluation eval;
-		if (!computeStreamingEvaluation(source, timeK, tau, chirp_tracker, eval))
-		{
-			return {0.0, 0.0};
-		}
-		const RealType lambda = params::c() / eval.rf_frequency;
-
-		// Tx Gain: Direction Tx -> Rx
-		const RealType tx_gain = computeAntennaGain(trans, link.u_vec, timeK, lambda);
-		// Rx Gain: Direction Rx -> Tx (-u_vec)
-		const RealType rx_gain = computeAntennaGain(recv, -link.u_vec, timeK + tau, lambda);
-
-		const bool no_loss = recv->checkFlag(Receiver::RecvFlag::FLAG_NOPROPLOSS);
-		const RealType scaling_factor = computeDirectPathPower(tx_gain, rx_gain, lambda, link.dist, no_loss);
-
-		// Include Signal Power
-		const RealType amplitude = source.amplitude * std::sqrt(scaling_factor);
-
-		// Carrier Phase
-		ComplexType contribution = amplitude * eval.envelope * std::polar(1.0, eval.phase);
-
-		// Non-coherent Local Oscillator Effects
-		const RealType non_coherent_phase =
-			computeTimingPhase(trans, recv, timeK, timeK - tau, phase_noise_lookup, timing_phase_mode);
-		contribution *= std::polar(1.0, non_coherent_phase);
-
-		return contribution;
+		return paths;
 	}
 
 	bool calculateStreamingReferencePhase(const core::ActiveStreamingSource& source, const RealType timeK,
@@ -835,159 +695,166 @@ namespace simulation
 		return true;
 	}
 
-	ComplexType calculateReflectedPathContribution(const Transmitter* trans, const Receiver* recv, const Target* targ,
-												   const RealType timeK,
-												   const CwPhaseNoiseLookup* const phase_noise_lookup)
-	{
-		return calculateStreamingReflectedPathContribution(makeClassicStreamingSource(trans), recv, targ, timeK,
-														   phase_noise_lookup);
-	}
-
-	ComplexType calculateStreamingReflectedPathContribution(const core::ActiveStreamingSource& source,
-															const Receiver* recv, const Target* targ,
-															const RealType timeK,
-															const CwPhaseNoiseLookup* const phase_noise_lookup,
-															core::FmcwChirpBoundaryTracker* const chirp_tracker,
-															const StreamingTimingPhaseMode timing_phase_mode)
+	ComplexType calculateStreamingPathContribution(const core::ActiveStreamingSource& source, const Receiver* recv,
+												   const propagation::PropagationPath& path, const RealType timeK,
+												   const CwPhaseNoiseLookup* const phase_noise_lookup,
+												   core::FmcwChirpBoundaryTracker* const chirp_tracker,
+												   const StreamingTimingPhaseMode timing_phase_mode)
 	{
 		const auto* const trans = source.transmitter;
 		if (trans == nullptr)
 		{
 			return {0.0, 0.0};
 		}
-		// Check for co-location involving the target.
-		// We do not model a platform tracking itself (R=0) or illuminating itself (R=0).
-		if (trans->getPlatform() == targ->getPlatform() || recv->getPlatform() == targ->getPlatform())
-		{
-			return {0.0, 0.0};
-		}
 
-		const auto p_tx = trans->getPlatform()->getPosition(timeK);
-		const auto p_rx = recv->getPlatform()->getPosition(timeK);
-		const auto p_tgt = targ->getPlatform()->getPosition(timeK);
-
-		LinkGeometry link_tx_tgt;
-		LinkGeometry link_tgt_rx;
-
-		try
-		{
-			link_tx_tgt = computeLink(p_tx, p_tgt);
-			link_tgt_rx = computeLink(p_tgt, p_rx);
-		}
-		catch (const RangeError&)
-		{
-			return {0.0, 0.0};
-		}
-
-		const RealType tau = (link_tx_tgt.dist + link_tgt_rx.dist) / params::c();
 		StreamingWaveformEvaluation eval;
-		if (!computeStreamingEvaluation(source, timeK, tau, chirp_tracker, eval))
+		if (!computeStreamingEvaluation(source, timeK, path.delay, chirp_tracker, eval))
 		{
 			return {0.0, 0.0};
 		}
-		const RealType lambda = params::c() / eval.rf_frequency;
 
-		// RCS Lookups: In (Tx->Tgt), Out (Rx->Tgt = - (Tgt->Rx))
-		SVec3 in_angle(link_tx_tgt.u_vec);
-		SVec3 out_angle(-link_tgt_rx.u_vec);
-		const RealType rcs = targ->getRcs(in_angle, out_angle, timeK);
 
-		// Tx Gain: Direction Tx -> Tgt
-		const RealType tx_gain = computeAntennaGain(trans, link_tx_tgt.u_vec, timeK, lambda);
-		// Rx Gain: Direction Rx -> Tgt (- (Tgt->Rx)). Time: timeK + tau.
-		const RealType rx_gain = computeAntennaGain(recv, -link_tgt_rx.u_vec, timeK + tau, lambda);
-
-		const bool no_loss = recv->checkFlag(Receiver::RecvFlag::FLAG_NOPROPLOSS);
-		const RealType scaling_factor =
-			computeReflectedPathPower(tx_gain, rx_gain, rcs, lambda, link_tx_tgt.dist, link_tgt_rx.dist, no_loss);
-
-		// Include Signal Power
-		const RealType amplitude = source.amplitude * std::sqrt(scaling_factor);
-
-		ComplexType contribution = amplitude * eval.envelope * std::polar(1.0, eval.phase);
+		// Accumulate amplitude and phase effects
+		ComplexType contribution = source.amplitude * path.gain * eval.envelope * std::polar(1.0, eval.phase);
 
 		// Non-coherent Local Oscillator Effects
 		const RealType non_coherent_phase =
-			computeTimingPhase(trans, recv, timeK, timeK - tau, phase_noise_lookup, timing_phase_mode);
+			computeTimingPhase(trans, recv, timeK, timeK - path.delay, phase_noise_lookup, timing_phase_mode);
 		contribution *= std::polar(1.0, non_coherent_phase);
 
 		return contribution;
 	}
 
-	std::unique_ptr<serial::Response> calculateResponse(const Transmitter* trans, const Receiver* recv,
-														const RadarSignal* signal, const RealType startTime,
-														const Target* targ)
+
+	/**
+	 * @brief Routes a calculated radar response to the appropriate receiver inbox or log.
+	 * @param rx Pointer to the receiving radar object.
+	 * @param response The calculated response to route.
+	 */
+	static void routeResponse(Receiver* rx, std::unique_ptr<serial::Response> response)
 	{
-		// If calculating direct path (no target) and components are co-located:
-		// 1. If explicitly attached (monostatic), skip (internal leakage handled elsewhere).
-		// 2. If independent but on the same platform, distance is 0. Far-field logic (1/R^2)
-		//    diverges. We skip calculation to avoid RangeError crashes, assuming
-		//    no direct coupling/interference for co-located far-field antennas.
-		if (targ == nullptr && (trans->getAttached() == recv || trans->getPlatform() == recv->getPlatform()))
+		if (!response)
 		{
-			return nullptr;
+			return;
+		}
+		if (rx->getMode() == radar::OperationMode::PULSED_MODE)
+		{
+			rx->addResponseToInbox(std::move(response));
+		}
+		else
+		{
+			rx->addInterferenceToLog(std::move(response));
+		}
+	}
+
+	void calculateResponses(const radar::Transmitter& tx, const RealType start_tx_time,
+							const propagation::PropagationModel& prop, propagation::ThreadContext* ctx)
+	{
+		// Skip if there's no signal associated with the transmitter or the signal has no length.
+		if (tx.getSignal() == nullptr || !tx.getSignal()->isPulsed() ||
+			tx.getSignal()->getPulseWaveform()->getDuration() == 0)
+		{
+			return;
 		}
 
-		// If calculating reflected path and target is co-located with either Tx or Rx:
-		// Skip to avoid singularity. Simulating a radar tracking its own platform
-		// requires near-field clutter models, not point-target RCS models.
-		if (targ != nullptr &&
-			(targ->getPlatform() == trans->getPlatform() || targ->getPlatform() == recv->getPlatform()))
+		const auto tx_duration = tx.getSignal()->getPulseWaveform()->getDuration();
+		const auto end_tx_time = start_tx_time + tx_duration;
+		const auto sample_period = 1.0 / params::simSamplingRate();
+		const auto point_count = static_cast<uint32_t>(std::ceil(tx_duration * params::simSamplingRate()));
+		std::vector<RealType> times(point_count + 1);
+		for (uint32_t i = 0; i < point_count; ++i)
 		{
-			LOG(Level::TRACE,
-				"Skipping reflected path calculation for Target {} co-located with Transmitter {} or Receiver {}",
-				targ->getName(), trans->getName(), recv->getName());
-			return nullptr;
+			times[i] = start_tx_time + i * sample_period;
 		}
+		times[point_count] = end_tx_time;
 
-		const auto start_time_chrono = std::chrono::duration<RealType>(startTime);
-		const auto end_time_chrono = start_time_chrono + std::chrono::duration<RealType>(signal->getLength());
-		const auto sample_time_chrono = std::chrono::duration<RealType>(1.0 / params::simSamplingRate());
-		const int point_count = static_cast<int>(std::ceil(signal->getLength() / sample_time_chrono.count()));
 
-		if ((targ != nullptr) && point_count == 0)
+		// This internally computes the paths for each timestep.
+		// The timestepping is internal to allow for batching across timesteps.
+		const auto timesteps_paths = prop.traceFromTransmitter(ctx, tx, times);
+
+		struct OpenResponse
 		{
-			LOG(Level::FATAL, "No time points are available for execution!");
-			throw std::runtime_error("No time points are available for execution!");
-		}
+			serial::ResponseBuilder builder;
+			Receiver* receiver;
+			size_t last_index;
+		};
+		std::unordered_map<uint64_t, OpenResponse> responses;
 
-		auto response = std::make_unique<serial::Response>(signal, trans);
-
-		try
+		for (size_t i = 0; i < timesteps_paths.size(); ++i)
 		{
-			for (int i = 0; i <= point_count; ++i)
+			// A response can only continue at the timestep immediately following its last
+			// one. Anything else means its path dropped out (e.g. momentary occlusion), so
+			// finalize and route it now rather than letting a later reappearance of the same
+			// path_id silently bridge the gap - see Response's tx-time-interval taper, which
+			// assumes each response's own points are contiguous on the sample grid.
+			for (auto it = responses.begin(); it != responses.end();)
 			{
-				const auto current_time =
-					i < point_count ? start_time_chrono + i * sample_time_chrono : end_time_chrono;
-
-				ReResults results{};
-				if (targ != nullptr)
+				if (it->second.last_index + 1 != i)
 				{
-					solveRe(trans, recv, targ, current_time, signal, results);
+					routeResponse(it->second.receiver,
+								 std::make_unique<serial::Response>(std::move(it->second.builder)));
+					it = responses.erase(it);
 				}
 				else
 				{
-					solveReDirect(trans, recv, current_time, signal, results);
+					++it;
 				}
+			}
 
-				interp::InterpPoint const point{.power = results.power,
-												.time = current_time.count() + results.delay,
-												.delay = results.delay,
-												.phase = results.phase};
-				response->addInterpPoint(point);
+			const auto& timesteps = timesteps_paths[i];
+			const RealType left_interval = i == 0 ? 0.0 : times[i] - times[i - 1];
+			const RealType right_interval = i == point_count ? 0.0 : times[i + 1] - times[i];
+
+			for (const auto& path : timesteps.paths)
+			{
+				auto phase_delay = -path.delay * 2.0 * PI * tx.getSignal()->getCarrier() + std::arg(path.gain);
+
+				const interp::InterpPoint point{.gain = std::sqrt(std::norm(path.gain)),
+												.rx_time = timesteps.tx_time + path.delay,
+												.delay = path.delay,
+												.phase_delay = phase_delay};
+
+				if (const auto found = responses.find(path.path_id); found != responses.end())
+				{
+					found->second.builder.addInterpPoint(point, right_interval);
+					found->second.last_index = i;
+				}
+				else
+				{
+					responses.insert({
+						path.path_id,
+						{serial::ResponseBuilder(tx.getSignal(), point, left_interval, right_interval), path.receiver,
+						 i},
+					});
+				}
 			}
 		}
-		catch (const RangeError&)
-		{
-			LOG(Level::INFO, "Receiver or Transmitter too close for accurate simulation");
-			throw; // Re-throw to be caught by the runner
-		}
 
-		return response;
+		for (auto& [k, v] : responses)
+		{
+			routeResponse(v.receiver, std::make_unique<serial::Response>(std::move(v.builder)));
+		}
+		responses.clear(); // To be explicit: the items are invalidated by the above.
 	}
 
 	namespace
 	{
+
+		/**
+		 * @brief Calculates the antenna gain for a specific direction and time.
+		 * @param radar The radar object (Transmitter or Receiver).
+		 * @param direction_vec The unit vector pointing AWAY from the antenna towards the target/receiver.
+		 * @param time The simulation time for rotation lookup.
+		 * @param lambda The signal wavelength.
+		 * @return The linear gain value.
+		 */
+		RealType computeAntennaGain(const radar::Radar* radar, const Vec3& direction_vec, RealType time,
+									RealType lambda)
+		{
+			return radar->getGain(SVec3(direction_vec), radar->getRotation(time), lambda);
+		}
+
 		struct PreviewTransmitterContext
 		{
 			const Transmitter& transmitter;
@@ -1064,12 +931,26 @@ namespace simulation
 				const RealType gr = computeAntennaGain(&rx_ctx.receiver, u_tx_tgt, time, tx_ctx.lambda);
 				SVec3 in_angle(u_tx_tgt);
 				SVec3 out_angle(-u_tx_tgt);
-				const RealType rcs = target->getRcs(in_angle, out_angle, time);
-				const RealType power_ratio =
-					computeReflectedPathPower(gt, gr, rcs, tx_ctx.lambda, range, range, rx_ctx.no_loss);
+				const auto rcs_opt = target->getRcs(in_angle, out_angle, time);
+				if (!rcs_opt)
+				{
+					continue;
+				}
+
+				ComplexType gain = propagation::pointscatter::computeReflectedPathGain(gt, gr, *rcs_opt, tx_ctx.lambda,
+																					   range, range, rx_ctx.no_loss);
+				ComplexType unit_gain = propagation::pointscatter::computeReflectedPathGain(
+					gt, gr, 1.0, tx_ctx.lambda, range, range, rx_ctx.no_loss);
+				if (params::pointScatterParams().polarimetric)
+				{
+					const auto linkage = propagation::pointscatter::computePolarimetricReflectedLinkage(
+						tx_ctx.transmitter, rx_ctx.receiver, vec_tx_tgt, -vec_tx_tgt, range, range, time, time);
+					gain *= linkage;
+					unit_gain *= linkage;
+				}
+				const RealType power_ratio = std::abs(gain) * std::abs(gain);
 				const RealType pr_watts = tx_ctx.radiated_power * power_ratio;
-				const RealType pr_unit_watts = tx_ctx.radiated_power *
-					computeReflectedPathPower(gt, gr, 1.0, tx_ctx.lambda, range, range, rx_ctx.no_loss);
+				const RealType pr_unit_watts = tx_ctx.radiated_power * std::abs(unit_gain) * std::abs(unit_gain);
 
 				links.push_back({.type = LinkType::Monostatic,
 								 .quality = isSignalStrong(pr_unit_watts, rx_ctx.receiver.getNoiseTemperature())
@@ -1080,7 +961,7 @@ namespace simulation
 								 .source_id = tx_ctx.transmitter.getId(),
 								 .dest_id = target->getId(),
 								 .origin_id = tx_ctx.transmitter.getId(),
-								 .rcs = rcs,
+								 .rcs = *rcs_opt,
 								 .actual_power_dbm = wattsToDbm(pr_watts)});
 			}
 		}
@@ -1103,7 +984,19 @@ namespace simulation
 			const Vec3 u_tx_rx = vec_direct / range;
 			const RealType gt = computeAntennaGain(&tx_ctx.transmitter, u_tx_rx, time, tx_ctx.lambda);
 			const RealType gr = computeAntennaGain(&rx_ctx.receiver, -u_tx_rx, time, tx_ctx.lambda);
-			const RealType power_ratio = computeDirectPathPower(gt, gr, tx_ctx.lambda, range, rx_ctx.no_loss);
+
+			const RealType scalar_gain = propagation::computeDirectPathGain(gt, gr, tx_ctx.lambda, range, rx_ctx.no_loss);
+			ComplexType gain{scalar_gain, 0.0};
+			if (params::pointScatterParams().polarimetric)
+			{
+				const auto tx_pol =
+					propagation::pointscatter::computeAntennaPolarisation(tx_ctx.transmitter, vec_direct, time);
+				const auto rx_pol =
+					propagation::pointscatter::computeAntennaPolarisation(rx_ctx.receiver, -vec_direct, time);
+				const auto linkage = propagation::dot_no_conj(tx_pol, rx_pol);
+				gain *= ComplexType{linkage.re, linkage.im};
+			}
+			const RealType power_ratio = std::abs(gain) * std::abs(gain);
 			const RealType pr_watts = tx_ctx.radiated_power * power_ratio;
 
 			links.push_back({.type = LinkType::DirectTxRx,
@@ -1133,16 +1026,38 @@ namespace simulation
 
 				const Vec3 u_tx_tgt = vec_tx_tgt / r1;
 				const Vec3 u_tgt_rx = vec_tgt_rx / r2;
+
+				// computePolarimetricReflectedLinkage requires tx_to_tgt and tgt_to_rx not to point in exactly
+				// the same direction (forward scatter).
+				if (math::dotProduct(u_tx_tgt, u_tgt_rx) > 1.0 - EPSILON)
+				{
+					continue;
+				}
 				const RealType gt = computeAntennaGain(&tx_ctx.transmitter, u_tx_tgt, time, tx_ctx.lambda);
 				const RealType gr = computeAntennaGain(&rx_ctx.receiver, -u_tgt_rx, time, tx_ctx.lambda);
 				SVec3 in_angle(u_tx_tgt);
 				SVec3 out_angle(-u_tgt_rx);
-				const RealType rcs = target->getRcs(in_angle, out_angle, time);
-				const RealType power_ratio =
-					computeReflectedPathPower(gt, gr, rcs, tx_ctx.lambda, r1, r2, rx_ctx.no_loss);
+				const auto rcs_opt = target->getRcs(in_angle, out_angle, time);
+				if (!rcs_opt)
+				{
+					continue;
+				}
+
+				ComplexType gain = propagation::pointscatter::computeReflectedPathGain(gt, gr, *rcs_opt, tx_ctx.lambda,
+																					   r1, r2, rx_ctx.no_loss);
+				ComplexType unit_gain =
+					propagation::pointscatter::computeReflectedPathGain(gt, gr, 1.0, tx_ctx.lambda, r1, r2,
+																		 rx_ctx.no_loss);
+				if (params::pointScatterParams().polarimetric)
+				{
+					const auto linkage = propagation::pointscatter::computePolarimetricReflectedLinkage(
+						tx_ctx.transmitter, rx_ctx.receiver, vec_tx_tgt, vec_tgt_rx, r1, r2, time, time);
+					gain *= linkage;
+					unit_gain *= linkage;
+				}
+				const RealType power_ratio = std::abs(gain) * std::abs(gain);
 				const RealType pr_watts = tx_ctx.radiated_power * power_ratio;
-				const RealType pr_unit_watts = tx_ctx.radiated_power *
-					computeReflectedPathPower(gt, gr, 1.0, tx_ctx.lambda, r1, r2, rx_ctx.no_loss);
+				const RealType pr_unit_watts = tx_ctx.radiated_power * std::abs(unit_gain) * std::abs(unit_gain);
 
 				links.push_back({.type = LinkType::BistaticTgtRx,
 								 .quality = isSignalStrong(pr_unit_watts, rx_ctx.receiver.getNoiseTemperature())
@@ -1153,7 +1068,7 @@ namespace simulation
 								 .source_id = target->getId(),
 								 .dest_id = rx_ctx.receiver.getId(),
 								 .origin_id = tx_ctx.transmitter.getId(),
-								 .rcs = rcs,
+								 .rcs = *rcs_opt,
 								 .actual_power_dbm = wattsToDbm(pr_watts)});
 			}
 		}

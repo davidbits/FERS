@@ -98,7 +98,7 @@ TEST_CASE("Gaussian antenna gain is symmetric about boresight", "[antenna]")
 	REQUIRE_THAT(antenna.getGain(positive, ref, 1.0), WithinAbs(antenna.getGain(negative, ref, 1.0), 1e-12));
 }
 
-TEST_CASE("Gaussian antenna currently ignores efficiency factor", "[antenna]")
+TEST_CASE("Gaussian antenna gain applies the efficiency factor", "[antenna]")
 {
 	const RealType azscale = 0.5;
 	const RealType elscale = 1.5;
@@ -107,7 +107,7 @@ TEST_CASE("Gaussian antenna currently ignores efficiency factor", "[antenna]")
 
 	const auto ref = unitDirection(0.0, 0.0);
 	const auto angle = unitDirection(0.2, 0.1);
-	const RealType expected = std::exp(-0.2 * 0.2 * azscale) * std::exp(-0.1 * 0.1 * elscale);
+	const RealType expected = std::exp(-0.2 * 0.2 * azscale) * std::exp(-0.1 * 0.1 * elscale) * 0.2;
 
 	REQUIRE_THAT(antenna.getGain(angle, ref, 1.0), WithinAbs(expected, 1e-12));
 }
@@ -138,6 +138,10 @@ TEST_CASE("Square horn gain matches aperture physics", "[antenna]")
 
 TEST_CASE("Parabolic gain matches Bessel-based model", "[antenna]")
 {
+	// On-axis (x=0): J1(x)/x -> 1/2 in the limit, so the peak gain is `ge * (2*0.5)^2 = ge`, not
+	// `ge * 4` (that would be the value if J1(x)/x wrongly evaluated to 1 at x=0 - a bug this antenna
+	// used to have via its old `j1C` helper, fixed by moving to the shared `gain::parabolicGain`
+	// kernel's `besselJ1OverX`, which resolves the x=0 singularity to its correct limit).
 	const RealType diameter = 1.2;
 	const RealType wavelength = 0.3;
 	antenna::Parabolic antenna("parabola", diameter);
@@ -146,17 +150,20 @@ TEST_CASE("Parabolic gain matches Bessel-based model", "[antenna]")
 	const auto ref = unitDirection(0.0, 0.0);
 	const auto on_axis = unitDirection(0.0, 0.0);
 	const RealType ge = std::pow(PI * diameter / wavelength, 2);
-	const RealType expected_on_axis = ge * 4.0 * 0.8;
+	const RealType expected_on_axis = ge * 0.8;
 	const auto gain_on_axis = antenna.getGain(on_axis, ref, wavelength);
 
 	REQUIRE_THAT(gain_on_axis, WithinAbs(expected_on_axis, 1e-8));
 	REQUIRE(antenna.getDiameter() == diameter);
 
+	// Off-axis now goes through gain::besselJ1Approx (a portable ~1e-6-accurate approximation,
+	// used so this formula is evaluable from GPU device code too), not the exact libm core::besselJ1
+	// - loosen the tolerance accordingly (still far tighter than any real modeling error).
 	const auto off_axis = unitDirection(0.1, 0.0);
 	const RealType x = PI * diameter * std::sin(0.1) / wavelength;
 	const RealType expected_off_axis = ge * std::pow(2.0 * (core::besselJ1(x) / x), 2) * 0.8;
 	const auto gain_off_axis = antenna.getGain(off_axis, ref, wavelength);
-	REQUIRE_THAT(gain_off_axis, WithinAbs(expected_off_axis, 1e-8));
+	REQUIRE_THAT(gain_off_axis, Catch::Matchers::WithinRel(expected_off_axis, 1e-5));
 	REQUIRE(gain_off_axis < gain_on_axis);
 }
 

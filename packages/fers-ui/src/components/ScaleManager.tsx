@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: GPL-2.0-only
 // Copyright (c) 2025-present FERS Contributors (see AUTHORS.md).
 
-import { useThree, useFrame } from '@react-three/fiber';
-import { type MapControls as MapControlsImpl } from 'three-stdlib';
-import * as THREE from 'three';
+import { useFrame, useThree } from '@react-three/fiber';
 import React from 'react';
+import * as THREE from 'three';
+import { type MapControls as MapControlsImpl } from 'three-stdlib';
 
 interface ScaleManagerProps {
     controlsRef: React.RefObject<MapControlsImpl | null>;

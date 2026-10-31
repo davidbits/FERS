@@ -114,11 +114,13 @@ TEST_CASE("Waveform factory loads CSV waveform metadata", "[serial][waveform_fac
 	REQUIRE_THAT(waveform->getPower(), WithinAbs(power, 1e-12));
 	REQUIRE_THAT(waveform->getCarrier(), WithinAbs(carrier, 1e-3));
 	REQUIRE(waveform->getId() == explicitId);
-	const auto filename = waveform->getFilename();
+	const auto* sampled = waveform->getPulseWaveform();
+	REQUIRE(sampled != nullptr);
+	const auto filename = sampled->getFilename();
 	REQUIRE(filename.has_value());
 	REQUIRE(filename.value_or("") == path.string());
-	REQUIRE_THAT(waveform->getRate(), WithinAbs(csvRate * params::oversampleRatio(), 1e-12));
-	REQUIRE_THAT(waveform->getLength(), WithinAbs(static_cast<RealType>(samples.size()) / csvRate, 1e-12));
+	REQUIRE_THAT(sampled->getRate(), WithinAbs(csvRate * params::oversampleRatio(), 1e-12));
+	REQUIRE_THAT(sampled->getDuration(), WithinAbs(static_cast<RealType>(samples.size()) / csvRate, 1e-12));
 
 	removeIfExists(path);
 }
@@ -134,14 +136,15 @@ TEST_CASE("Waveform factory assigns CW and FMCW identity to pulsed-compatible HD
 	removeIfExists(path);
 	writeHdf5Waveform(path, {ComplexType(1.0, 0.0), ComplexType(0.0, 1.0)});
 
-	const auto cw = serial::loadWaveformFromFile("cw", path.string(), 1.0, 10.0, 1, fers_signal::FileWaveformKind::Cw);
+	const auto cw =
+		serial::loadWaveformFromFile("cw", path.string(), 1.0, 10.0, 1, serial::FileWaveformRequestKind::Cw);
 	const auto fmcw =
-		serial::loadWaveformFromFile("fmcw", path.string(), 1.0, 10.0, 2, fers_signal::FileWaveformKind::Fmcw);
+		serial::loadWaveformFromFile("fmcw", path.string(), 1.0, 10.0, 2, serial::FileWaveformRequestKind::Fmcw);
 
 	REQUIRE(cw->isCw());
-	REQUIRE(cw->getFileSignal()->getKind() == fers_signal::FileWaveformKind::Cw);
+	REQUIRE(cw->getFileWaveform()->getKind() == fers_signal::FileWaveformKind::Cw);
 	REQUIRE(fmcw->isFmcwFamily());
-	REQUIRE(fmcw->getFileSignal()->getKind() == fers_signal::FileWaveformKind::Fmcw);
+	REQUIRE(fmcw->getFileWaveform()->getKind() == fers_signal::FileWaveformKind::Fmcw);
 	removeIfExists(path);
 }
 
@@ -152,10 +155,10 @@ TEST_CASE("CW and FMCW file loading rejects legacy CSV input", "[serial][wavefor
 	writeCsvWaveform(path, 8.0, {ComplexType(1.0, 0.0)});
 
 	REQUIRE_THROWS_WITH(
-		serial::loadWaveformFromFile("cw", path.string(), 1.0, 10.0, 1, fers_signal::FileWaveformKind::Cw),
+		serial::loadWaveformFromFile("cw", path.string(), 1.0, 10.0, 1, serial::FileWaveformRequestKind::Cw),
 		ContainsSubstring("require the pulsed-compatible HDF5"));
 	REQUIRE_THROWS_WITH(
-		serial::loadWaveformFromFile("fmcw", path.string(), 1.0, 10.0, 2, fers_signal::FileWaveformKind::Fmcw),
+		serial::loadWaveformFromFile("fmcw", path.string(), 1.0, 10.0, 2, serial::FileWaveformRequestKind::Fmcw),
 		ContainsSubstring("require the pulsed-compatible HDF5"));
 
 	removeIfExists(path);
@@ -198,11 +201,13 @@ TEST_CASE("Waveform factory loads HDF5 waveform metadata", "[serial][waveform_fa
 	REQUIRE_THAT(waveform->getPower(), WithinAbs(power, 1e-12));
 	REQUIRE_THAT(waveform->getCarrier(), WithinAbs(carrier, 1e-3));
 	REQUIRE(waveform->getId() == explicitId);
-	const auto filename = waveform->getFilename();
+	const auto* sampled = waveform->getPulseWaveform();
+	REQUIRE(sampled != nullptr);
+	const auto filename = sampled->getFilename();
 	REQUIRE(filename.has_value());
 	REQUIRE(filename.value_or("") == path.string());
-	REQUIRE_THAT(waveform->getRate(), WithinAbs(params::rate(), 1e-12));
-	REQUIRE_THAT(waveform->getLength(), WithinAbs(static_cast<RealType>(samples.size()) / params::rate(), 1e-12));
+	REQUIRE_THAT(sampled->getRate(), WithinAbs(params::rate(), 1e-12));
+	REQUIRE_THAT(sampled->getDuration(), WithinAbs(static_cast<RealType>(samples.size()) / params::rate(), 1e-12));
 
 	removeIfExists(path);
 }

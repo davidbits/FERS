@@ -21,6 +21,10 @@
                     <xs:element ref="timing"/>
                     <!-- At least 1 antenna is required -->
                     <xs:element ref="antenna"/>
+                    <!-- Any number of mesh elements is allowed -->
+                    <xs:element ref="mesh" minOccurs="0"/>
+                    <!-- Any number of material elements is allowed -->
+                    <xs:element ref="material" minOccurs="0"/>
                     <!-- At least 1 platform is required -->
                     <xs:element ref="platform"/>
                     <!-- Any number of include elements is allowed -->
@@ -40,6 +44,7 @@
                 <xs:element name="rate" type="xs:string"/>
                 <xs:element minOccurs="0" name="c" type="xs:string"/>
                 <xs:element minOccurs="0" name="simSamplingRate" type="xs:string"/>
+                <xs:element minOccurs="0" name="cwSimSamplingRate" type="xs:string"/>
                 <xs:element minOccurs="0" name="randomseed" type="xs:string"/>
                 <xs:element minOccurs="0" name="adc_bits" type="xs:string"/>
                 <xs:element minOccurs="0" name="oversample" type="xs:string"/>
@@ -53,6 +58,7 @@
                 </xs:element>
                 <xs:element minOccurs="0" ref="origin"/>
                 <xs:element minOccurs="0" ref="coordinatesystem"/>
+                <xs:element minOccurs="0" ref="propagation"/>
             </xs:sequence>
         </xs:complexType>
     </xs:element>
@@ -87,6 +93,28 @@
                     </xs:restriction>
                 </xs:simpleType>
             </xs:attribute>
+        </xs:complexType>
+    </xs:element>
+
+    <!-- Selects the propagation model and sets model-specific parameters. -->
+    <xs:element name="propagation">
+        <xs:complexType>
+            <xs:choice>
+                <xs:element name="pointscatter">
+                    <xs:complexType>
+                        <xs:attribute name="polarimetric" type="xs:boolean"/>
+                    </xs:complexType>
+                </xs:element>
+                <xs:element name="raytracing">
+                    <xs:complexType>
+                        <xs:attribute name="scatter_limit" type="xs:unsignedInt"/>
+                        <xs:attribute name="boresight_width" type="xs:double"/>
+                        <xs:attribute name="boresight_tube_solid_angle" type="xs:double"/>
+                        <xs:attribute name="off_boresight_tube_solid_angle" type="xs:double"/>
+                        <xs:attribute name="prune_below_max_db" type="xs:double"/>
+                    </xs:complexType>
+                </xs:element>
+            </xs:choice>
         </xs:complexType>
     </xs:element>
 
@@ -218,10 +246,45 @@
                 <xs:element minOccurs="0" name="azscale" type="xs:string"/>
                 <xs:element minOccurs="0" name="elscale" type="xs:string"/>
                 <xs:element minOccurs="0" name="efficiency" type="xs:string"/>
+                <!-- Boresight polarisation Jones vector (Ludwig-3). h/v each hold a complex
+                     number as text, e.g. "1.0+0.0i" (also accepts a leading unit marker like
+                     "1.0+j0.5", a bare real or imaginary term, and "j" as well as "i"). Defaults
+                     to purely horizontal (h="1+0i", v="0+0i") if the element is omitted; an
+                     omitted h or v attribute defaults that axis to 0+0i. Normalised on load. -->
+                <xs:element minOccurs="0" name="boresight_polarisation">
+                    <xs:complexType>
+                        <xs:attribute name="h" type="xs:string"/>
+                        <xs:attribute name="v" type="xs:string"/>
+                    </xs:complexType>
+                </xs:element>
             </xs:sequence>
             <xs:attribute name="name" use="required"/>
             <xs:attribute name="pattern" use="required"/>
             <xs:attribute name="filename"/>
+        </xs:complexType>
+    </xs:element>
+
+    <!-- Mesh Asset -->
+    <!-- A reusable mesh, loaded from a file within the "meshes" directory next to the scenario file. -->
+    <xs:element name="mesh">
+        <xs:complexType>
+            <xs:attribute name="name" use="required"/>
+            <xs:attribute name="filename" use="required"/>
+        </xs:complexType>
+    </xs:element>
+
+    <!-- Material Asset -->
+    <!-- A reusable surface material for ray-tracing propagation. The PO/GO model derives its
+         per-polarization reflection coefficients from these at each hit, as a function of
+         incidence angle and carrier frequency. `conductivity` may be "inf" to specify a perfect
+         electric conductor. -->
+    <xs:element name="material">
+        <xs:complexType>
+            <xs:sequence>
+                <xs:element name="relative_permittivity" type="xs:string"/>
+                <xs:element name="conductivity" type="xs:string"/>
+            </xs:sequence>
+            <xs:attribute name="name" use="required"/>
         </xs:complexType>
     </xs:element>
 
@@ -467,10 +530,20 @@
     <xs:element name="target">
         <xs:complexType>
             <xs:sequence>
-                <xs:element ref="rcs"/>
-                <xs:element ref="model" minOccurs="0"/> <!-- model is optional -->
+                <xs:element ref="rcs" minOccurs="0"/> <!-- rcs is optional -->
+                <xs:element ref="model" minOccurs="0"/> <!-- model is optional; requires rcs -->
+                <xs:element ref="geometry" minOccurs="0"/> <!-- geometry is optional -->
             </xs:sequence>
             <xs:attribute name="name" use="required"/>
+        </xs:complexType>
+    </xs:element>
+
+    <!-- Target Geometry -->
+    <!-- References a mesh/material pair for ray-tracing propagation. Both are required together. -->
+    <xs:element name="geometry">
+        <xs:complexType>
+            <xs:attribute name="mesh" type="xs:string" use="required"/>
+            <xs:attribute name="material" type="xs:string" use="required"/>
         </xs:complexType>
     </xs:element>
 

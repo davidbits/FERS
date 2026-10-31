@@ -3,12 +3,12 @@
 
 import { useMemo, useRef } from 'react';
 import * as THREE from 'three';
+import { useDynamicScale } from '@/hooks/useDynamicScale';
 import {
-    Platform,
     calculateInterpolatedVelocity,
+    Platform,
 } from '@/stores/scenarioStore';
 import { fersColors } from '@/theme';
-import { useDynamicScale } from '@/hooks/useDynamicScale';
 
 const VELOCITY_ARROW_LENGTH = 7; // Fixed base length (matches Boresight)
 

@@ -71,6 +71,13 @@ namespace interp
 		template <RealConcept T>
 		void divide(T a);
 
+		/**
+		 * @brief Retrieves the raw (x, y) sample points backing this set, in ascending x order.
+		 *
+		 * @return The sorted map of sample points.
+		 */
+		[[nodiscard]] const std::map<RealType, RealType>& samples() const noexcept { return _data; }
+
 	private:
 		std::map<RealType, RealType> _data; ///< The set of data points
 	};
@@ -139,6 +146,13 @@ namespace interp
 		{
 			_data->divide(a);
 		}
+
+		/**
+		 * @brief Retrieves the raw (x, y) sample points backing this set, in ascending x order.
+		 *
+		 * @return The sorted map of sample points.
+		 */
+		[[nodiscard]] const std::map<RealType, RealType>& getSamples() const noexcept { return _data->samples(); }
 
 	private:
 		std::unique_ptr<InterpSetData> _data; ///< The internal InterpSetData object

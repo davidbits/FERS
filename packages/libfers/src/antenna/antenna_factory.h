@@ -12,16 +12,17 @@
 
 #pragma once
 
+#include <complex>
 #include <cstdint>
 #include <memory>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <utility>
 #include <vector>
 
 #include "core/config.h"
-#include "core/logging.h"
 #include "core/sim_id.h"
 #include "interpolation/interpolation_set.h"
 #include "math/geometry_ops.h"
@@ -34,6 +35,26 @@ namespace serial
 
 namespace antenna
 {
+	/// A Jones vector describing the polarisation of an antenna at its boresight.
+	///
+	/// The components should be unit-normalised: `|horizontal|^2 + |vertical|^2 == 1`.
+	///
+	/// This is currently used to describe the full antenna polarisation pattern.
+	/// This isn't a sufficiently general method to describe most antennas accurately,
+	/// and future work may wish to implement 2D polarisation azimuth/elevation maps.
+	struct JonesPolarisation
+	{
+		/// Magnitude and phase in the horizontal direction (+Y) at the boresight (+X)
+		/// in the antenna-local frame. This is currently extended to the rest of the
+		/// antenna the using Ludwig-3 definition of polarisation.
+		ComplexType horizontal;
+		/// Magnitude and phase in the vertical direction (+Z) at the boresight (+X)
+		/// in the antenna-local frame. This is currently extended to the rest of the
+		/// antenna the using Ludwig-3 definition of polarisation.
+		ComplexType vertical;
+	};
+
+
 	/**
 	 * @class Antenna
 	 * @brief Abstract base class representing an antenna.
@@ -73,11 +94,25 @@ namespace antenna
 											   RealType wavelength) const = 0;
 
 		/**
+		 * @brief Returns whether this antenna's gain pattern depends on the wavelength.
+		 *
+		 * This facilitates caching optimisations.
+		 */
+		[[nodiscard]] virtual constexpr bool isWavelengthDependent() const = 0;
+
+		/**
 		 * @brief Retrieves the efficiency factor of the antenna.
 		 *
 		 * @return The efficiency factor of the antenna.
 		 */
 		[[nodiscard]] RealType getEfficiencyFactor() const noexcept { return _loss_factor; }
+
+		/**
+		 * @brief Retrieves the boresight polarisation of the antenna.
+		 *
+		 * @return The boresight polarisation of the antenna.
+		 */
+		[[nodiscard]] JonesPolarisation getPolarisation() const noexcept { return _polarisation; }
 
 		/**
 		 * @brief Retrieves the name of the antenna.
@@ -116,6 +151,24 @@ namespace antenna
 		 */
 		void setName(std::string name) noexcept { _name = std::move(name); }
 
+		/**
+		 * @brief Sets the boresight polarisation of the antenna.
+		 *
+		 * @param pol The new boresight polarisation of the antenna.
+		 */
+		void setPolarisation(JonesPolarisation pol)
+		{
+			auto len = std::sqrt(std::norm(pol.horizontal) + std::norm(pol.vertical));
+
+			if (std::abs(len) < EPSILON)
+			{
+				throw std::runtime_error("Polarisation cannot be zero.");
+			}
+
+			_polarisation.horizontal = pol.horizontal / len;
+			_polarisation.vertical = pol.vertical / len;
+		}
+
 	protected:
 		/**
 		 * @brief Computes the angle between the input and reference angles.
@@ -128,6 +181,8 @@ namespace antenna
 
 	private:
 		RealType _loss_factor{1}; ///< Efficiency factor of the antenna.
+		/// Polarisation of the antenna boresight. Defaults to horizontal.
+		JonesPolarisation _polarisation{.horizontal = ComplexType(1.0, 0.0), .vertical = ComplexType(0.0, 0.0)};
 		SimId _id; ///< Unique ID for this antenna.
 		std::string _name; ///< Name of the antenna.
 	};
@@ -170,6 +225,13 @@ namespace antenna
 			// therefore, the gain of the antenna is the efficiency factor
 			return getEfficiencyFactor();
 		}
+
+		/**
+		 * @brief Returns whether this antenna's gain pattern depends on the wavelength.
+		 *
+		 * This facilitates caching optimisations.
+		 */
+		[[nodiscard]] constexpr bool isWavelengthDependent() const override { return false; }
 	};
 
 	/**
@@ -222,7 +284,14 @@ namespace antenna
 		 * @return The computed gain of the antenna.
 		 */
 		[[nodiscard]] RealType getGain(const math::SVec3& angle, const math::SVec3& refangle,
-									   RealType wavelength) const noexcept override;
+									   RealType /* wavelength */) const noexcept override;
+
+		/**
+		 * @brief Returns whether this antenna's gain pattern depends on the wavelength.
+		 *
+		 * This facilitates caching optimisations.
+		 */
+		[[nodiscard]] constexpr bool isWavelengthDependent() const override { return false; }
 
 		/**
 		 * @brief Sets the alpha parameter of the sinc function.
@@ -291,7 +360,14 @@ namespace antenna
 		 * @return The computed gain of the antenna.
 		 */
 		[[nodiscard]] RealType getGain(const math::SVec3& angle, const math::SVec3& refangle,
-									   RealType wavelength) const noexcept override;
+									   RealType /* wavelength */) const noexcept override;
+
+		/**
+		 * @brief Returns whether this antenna's gain pattern depends on the wavelength.
+		 *
+		 * This facilitates caching optimisations.
+		 */
+		[[nodiscard]] constexpr bool isWavelengthDependent() const override { return false; }
 
 		/** @brief Gets the azimuth scale factor. */
 		[[nodiscard]] RealType getAzimuthScale() const noexcept { return _azscale; }
@@ -359,6 +435,13 @@ namespace antenna
 		[[nodiscard]] RealType getGain(const math::SVec3& angle, const math::SVec3& refangle,
 									   RealType wavelength) const noexcept override;
 
+		/**
+		 * @brief Returns whether this antenna's gain pattern depends on the wavelength.
+		 *
+		 * This facilitates caching optimisations.
+		 */
+		[[nodiscard]] constexpr bool isWavelengthDependent() const override { return true; }
+
 		/** @brief Gets the dimension of the square horn. */
 		[[nodiscard]] RealType getDimension() const noexcept { return _dimension; }
 
@@ -413,6 +496,13 @@ namespace antenna
 		 */
 		[[nodiscard]] RealType getGain(const math::SVec3& angle, const math::SVec3& refangle,
 									   RealType wavelength) const noexcept override;
+
+		/**
+		 * @brief Returns whether this antenna's gain pattern depends on the wavelength.
+		 *
+		 * This facilitates caching optimisations.
+		 */
+		[[nodiscard]] constexpr bool isWavelengthDependent() const override { return true; }
 
 		/** @brief Gets the diameter of the parabolic reflector. */
 		[[nodiscard]] RealType getDiameter() const noexcept { return _diameter; }
@@ -479,7 +569,14 @@ namespace antenna
 		 * @throws std::runtime_error If gain values cannot be retrieved from the interpolation sets.
 		 */
 		[[nodiscard]] RealType getGain(const math::SVec3& angle, const math::SVec3& refangle,
-									   RealType wavelength) const override;
+									   RealType /* wavelength */) const override;
+
+		/**
+		 * @brief Returns whether this antenna's gain pattern depends on the wavelength.
+		 *
+		 * This facilitates caching optimisations.
+		 */
+		[[nodiscard]] constexpr bool isWavelengthDependent() const override { return false; }
 
 		/** @brief Gets the filename of the antenna description. */
 		[[nodiscard]] const std::string& getFilename() const noexcept { return _filename; }
@@ -492,6 +589,12 @@ namespace antenna
 
 		/** @brief Gets the interpolation set for elevation gain samples. */
 		[[nodiscard]] const interp::InterpSet* getElevationSamples() const noexcept { return _elev_samples.get(); }
+
+		/** @brief Gets the symmetry mode for azimuth gain samples. */
+		[[nodiscard]] AxisSymmetry getAzimuthSymmetry() const noexcept { return _azi_symmetry; }
+
+		/** @brief Gets the symmetry mode for elevation gain samples. */
+		[[nodiscard]] AxisSymmetry getElevationSymmetry() const noexcept { return _elev_symmetry; }
 
 	private:
 		/// Looks up a gain value from an XML antenna axis interpolation set.
@@ -554,6 +657,13 @@ namespace antenna
 		 */
 		[[nodiscard]] RealType getGain(const math::SVec3& angle, const math::SVec3& refangle,
 									   RealType /*wavelength*/) const override;
+
+		/**
+		 * @brief Returns whether this antenna's gain pattern depends on the wavelength.
+		 *
+		 * This facilitates caching optimisations.
+		 */
+		[[nodiscard]] constexpr bool isWavelengthDependent() const override { return false; }
 
 		/** @brief Gets the filename of the antenna description. */
 		[[nodiscard]] const std::string& getFilename() const noexcept { return _filename; }

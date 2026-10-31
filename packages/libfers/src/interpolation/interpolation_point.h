@@ -12,17 +12,20 @@
 
 #pragma once
 
+#include "core/config.h"
+
 namespace interp
 {
 	/**
 	 * @struct InterpPoint
-	 * @brief Stores data for an interpolation point.
+	 * @brief Stores channel properties to interpolate between.
 	 */
 	struct InterpPoint
 	{
-		RealType power{}; ///< Power level of the signal at the interpolation point.
-		RealType time{}; ///< Time at which the interpolation point is recorded.
-		RealType delay{}; ///< Delay associated with the signal at the interpolation point.
-		RealType phase{}; ///< Phase of the signal at the interpolation point.
+		RealType gain{}; ///< Amplitude gain magnitude of the channel, as a ratio of voltage into a unit impedance.
+		RealType rx_time{}; ///< RX time at which the channel exists, in seconds.
+		RealType delay{}; ///< Propagation delay of the channel, in seconds.
+		RealType phase_delay{}; ///< Phase delay of the carrier frequency through the channel plus path ampltide phase
+								///< modulation, in radians.
 	};
 }

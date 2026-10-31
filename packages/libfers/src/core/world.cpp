@@ -150,6 +150,26 @@ namespace core
 		_timings[id] = std::move(timing);
 	}
 
+	void World::add(MeshAsset mesh)
+	{
+		const SimId id = mesh.id;
+		if (_meshes.contains(id))
+		{
+			throw std::runtime_error("A mesh with the ID " + std::to_string(id) + " already exists.");
+		}
+		_meshes.emplace(id, std::move(mesh));
+	}
+
+	void World::add(MaterialAsset material)
+	{
+		const SimId id = material.id;
+		if (_materials.contains(id))
+		{
+			throw std::runtime_error("A material with the ID " + std::to_string(id) + " already exists.");
+		}
+		_materials.emplace(id, std::move(material));
+	}
+
 	RadarSignal* World::findWaveform(const SimId id)
 	{
 		const auto it = _waveforms.find(id);
@@ -166,6 +186,18 @@ namespace core
 	{
 		const auto it = _timings.find(id);
 		return it != _timings.end() ? it->second.get() : nullptr;
+	}
+
+	MeshAsset* World::findMesh(const SimId id)
+	{
+		const auto it = _meshes.find(id);
+		return it != _meshes.end() ? &it->second : nullptr;
+	}
+
+	MaterialAsset* World::findMaterial(const SimId id)
+	{
+		const auto it = _materials.find(id);
+		return it != _materials.end() ? &it->second : nullptr;
 	}
 
 	Platform* World::findPlatform(const SimId id)
@@ -416,6 +448,8 @@ namespace core
 		_waveform_ids_by_name.clear();
 		_antennas.clear();
 		_timings.clear();
+		_meshes.clear();
+		_materials.clear();
 		_event_queue = {};
 		_simulation_state = {};
 	}
@@ -433,6 +467,8 @@ namespace core
 		_transmitters_by_name.swap(other._transmitters_by_name);
 		_antennas.swap(other._antennas);
 		_timings.swap(other._timings);
+		_meshes.swap(other._meshes);
+		_materials.swap(other._materials);
 		_event_queue.swap(other._event_queue);
 		swap(_simulation_state, other._simulation_state);
 	}

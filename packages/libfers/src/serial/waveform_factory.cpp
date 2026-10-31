@@ -30,9 +30,10 @@
 #include "hdf5_handler.h"
 #include "signal/radar_signal.h"
 
-using fers_signal::FileSignal;
-using fers_signal::FileWaveformKind;
+using fers_signal::FileWaveform;
+using fers_signal::PulseWaveform;
 using fers_signal::RadarSignal;
+using serial::FileWaveformRequestKind;
 
 namespace
 {
@@ -67,6 +68,30 @@ namespace
 		return static_cast<unsigned>(sample_count);
 	}
 
+	/// Builds the RadarSignal for a loaded sample buffer, routing to PulseWaveform for
+	/// the pulsed kind and to FileWaveform (classified Cw/Fmcw) otherwise.
+	std::unique_ptr<RadarSignal> makeFileBackedWaveform(const std::string& name, const std::string& source_filename,
+														const RealType power, const RealType carrierFreq,
+														const SimId id, const FileWaveformRequestKind kind,
+														std::span<const ComplexType> data, const unsigned sample_count,
+														const RealType sampleRate)
+	{
+		if (kind == FileWaveformRequestKind::Pulsed)
+		{
+			PulseWaveform wave{};
+			wave.setFilename(source_filename);
+			wave.load(data, sample_count, sampleRate);
+			return std::make_unique<RadarSignal>(name, power, carrierFreq, std::move(wave), id);
+		}
+
+		FileWaveform wave{};
+		wave.setFilename(source_filename);
+		wave.setKind(kind == FileWaveformRequestKind::Cw ? fers_signal::FileWaveformKind::Cw
+														 : fers_signal::FileWaveformKind::Fmcw);
+		wave.load(data, sample_count, sampleRate);
+		return std::make_unique<RadarSignal>(name, power, carrierFreq, std::move(wave), id);
+	}
+
 	/**
 	 * @brief Loads a radar waveform from an HDF5 file and returns a RadarSignal object.
 	 *
@@ -74,26 +99,28 @@ namespace
 	 * @param filepath The path to the HDF5 file containing the waveform data.
 	 * @param power The power of the radar signal in the waveform.
 	 * @param carrierFreq The carrier frequency of the radar signal.
+	 * @param kind Radar mode assigned to the loaded samples.
 	 * @return A unique pointer to a RadarSignal object loaded with the waveform data.
 	 * @throws std::runtime_error If the file cannot be opened or the file format is unrecognized.
 	 */
 	std::unique_ptr<RadarSignal> loadWaveformFromHdf5File(const std::string& name,
 														  const std::filesystem::path& filepath, const RealType power,
 														  const RealType carrierFreq, const SimId id,
-														  const FileWaveformKind kind)
+														  const FileWaveformRequestKind kind)
 	{
 		std::vector<ComplexType> data;
 		serial::readPulseData(filepath.string(), data);
 		const unsigned sample_count = checked_sample_count(data.size(), filepath.string());
 
-		auto signal = std::make_unique<FileSignal>(kind);
-		signal->load(data, sample_count, params::rate());
-		return std::make_unique<RadarSignal>(
-			name, power, carrierFreq, static_cast<RealType>(sample_count) / params::rate(), std::move(signal), id);
+		return makeFileBackedWaveform(name, filepath.string(), power, carrierFreq, id, kind, data, sample_count,
+									  params::rate());
 	}
 
 	/**
 	 * @brief Loads a radar waveform from a CSV file and returns a RadarSignal object.
+	 *
+	 * CSV is pulsed-only; the caller guarantees `kind == Pulsed` before reaching here
+	 * (see `loadWaveformFromFile`'s HDF5-only guard for Cw/Fmcw).
 	 *
 	 * @param name The name of the radar signal.
 	 * @param filepath The path to the CSV file containing the waveform data.
@@ -104,7 +131,7 @@ namespace
 	 */
 	std::unique_ptr<RadarSignal> loadWaveformFromCsvFile(const std::string& name, const std::filesystem::path& filepath,
 														 const RealType power, const RealType carrierFreq,
-														 const SimId id, const FileWaveformKind kind)
+														 const SimId id)
 	{
 		std::ifstream ifile(filepath);
 		if (!ifile)
@@ -144,9 +171,10 @@ namespace
 			throw std::runtime_error("Could not read full waveform from file '" + filepath.string() + "'");
 		}
 
-		auto signal = std::make_unique<FileSignal>(kind);
-		signal->load(data, length, rate);
-		return std::make_unique<RadarSignal>(name, power, carrierFreq, rlength / rate, std::move(signal), id);
+		PulseWaveform wave{};
+		wave.setFilename(filepath.string());
+		wave.load(data, length, rate);
+		return std::make_unique<RadarSignal>(name, power, carrierFreq, std::move(wave), id);
 	}
 
 	/**
@@ -166,11 +194,12 @@ namespace serial
 {
 	std::unique_ptr<RadarSignal> loadWaveformFromFile(const std::string& name, const std::string& filename,
 													  const RealType power, const RealType carrierFreq, const SimId id,
-													  const FileWaveformKind kind)
+													  const FileWaveformRequestKind kind)
 	{
 		const std::filesystem::path filepath = filename;
 		const auto extension = filepath.extension().string();
-		if (kind != FileWaveformKind::Pulsed && !hasExtension(extension, ".h5"))
+
+		if (kind != FileWaveformRequestKind::Pulsed && !hasExtension(extension, ".h5"))
 		{
 			throw std::runtime_error("File-backed CW and FMCW waveforms require the pulsed-compatible HDF5 (.h5) "
 									 "format: " +
@@ -179,15 +208,11 @@ namespace serial
 
 		if (hasExtension(extension, ".csv"))
 		{
-			auto wave = loadWaveformFromCsvFile(name, filepath, power, carrierFreq, id, kind);
-			wave->setFilename(filename);
-			return wave;
+			return loadWaveformFromCsvFile(name, filepath, power, carrierFreq, id);
 		}
 		if (hasExtension(extension, ".h5"))
 		{
-			auto wave = loadWaveformFromHdf5File(name, filepath, power, carrierFreq, id, kind);
-			wave->setFilename(filename);
-			return wave;
+			return loadWaveformFromHdf5File(name, filepath, power, carrierFreq, id, kind);
 		}
 
 		LOG(logging::Level::FATAL, "Unrecognized file extension '{}' for file: '{}'", extension, filename);

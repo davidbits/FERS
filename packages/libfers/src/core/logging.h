@@ -16,7 +16,7 @@
 
 #pragma once
 
-#define LOG(level, ...) log(level, std::source_location::current(), __VA_ARGS__)
+#define LOG(level, ...) logging::log(level, std::source_location::current(), __VA_ARGS__)
 
 #include <atomic>
 #include <cstdint>

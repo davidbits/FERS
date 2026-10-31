@@ -11,6 +11,7 @@
 #include "antenna/antenna_factory.h"
 #include "core/parameters.h"
 #include "core/rendering_job.h"
+#include "interpolation/interpolation_point.h"
 #include "radar/platform.h"
 #include "radar/receiver.h"
 #include "radar/transmitter.h"
@@ -33,14 +34,18 @@ namespace
 		~ParamGuard() { params::params = saved; }
 	};
 
-	std::unique_ptr<serial::Response> makeResponse(const radar::Transmitter* tx,
-												   std::vector<std::unique_ptr<fers_signal::RadarSignal>>& wave_store)
+	std::unique_ptr<serial::Response> makeResponse(std::vector<std::unique_ptr<fers_signal::RadarSignal>>& wave_store)
 	{
-		auto signal = std::make_unique<fers_signal::CwSignal>();
-		auto wave = std::make_unique<fers_signal::RadarSignal>("Wave", 1.0, 1.0e9, 1.0, std::move(signal));
+		// Response requires a RadarSignal wrapping a PulseWaveform (it throws otherwise) --
+		// an unloaded one is fine here since these tests only exercise inbox/log bookkeeping,
+		// never rendering.
+		auto wave = std::make_unique<fers_signal::RadarSignal>("Wave", 1.0, 1.0e9, fers_signal::PulseWaveform{});
 		const auto* wave_ptr = wave.get();
 		wave_store.push_back(std::move(wave));
-		return std::make_unique<serial::Response>(wave_ptr, tx);
+		serial::ResponseBuilder builder(
+			wave_ptr, interp::InterpPoint{.gain = 1.0, .rx_time = 0.0, .delay = 0.0, .phase_delay = 0.0},
+			/*left_interval=*/0.0, /*right_interval=*/0.0);
+		return std::make_unique<serial::Response>(std::move(builder));
 	}
 
 	void requireComplexVectorsNear(const std::vector<ComplexType>& actual, const std::vector<ComplexType>& expected,
@@ -152,17 +157,16 @@ TEST_CASE("Receiver inbox and interference log", "[radar][receiver]")
 {
 	radar::Platform platform("RxPlatform");
 	radar::Receiver rx(&platform, "RxA", 5, radar::OperationMode::CW_MODE);
-	radar::Transmitter const tx(&platform, "TxA", radar::OperationMode::CW_MODE, 9001);
 
 	std::vector<std::unique_ptr<fers_signal::RadarSignal>> waves;
-	rx.addResponseToInbox(makeResponse(&tx, waves));
-	rx.addResponseToInbox(makeResponse(&tx, waves));
+	rx.addResponseToInbox(makeResponse(waves));
+	rx.addResponseToInbox(makeResponse(waves));
 
 	const auto drained = rx.drainInbox();
 	REQUIRE(drained.size() == 2);
 	REQUIRE(rx.drainInbox().empty());
 
-	rx.addInterferenceToLog(makeResponse(&tx, waves));
+	rx.addInterferenceToLog(makeResponse(waves));
 	REQUIRE(rx.getPulsedInterferenceLog().size() == 1);
 	rx.prunePulsedInterferenceEndingBefore(1.0);
 	REQUIRE(rx.getPulsedInterferenceLog().empty());

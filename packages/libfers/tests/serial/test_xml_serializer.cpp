@@ -4,12 +4,14 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_string.hpp>
 #include <fstream>
+#include <limits>
 #include <optional>
 #include <random>
 #include <string>
 #include <vector>
 
 #include "antenna/antenna_factory.h"
+#include "core/assets.h"
 #include "core/parameters.h"
 #include "core/world.h"
 #include "math/path.h"
@@ -134,6 +136,100 @@ TEST_CASE("serializeParameters creates correct tags across frames", "[serial][xm
 		REQUIRE_THAT(s, !ContainsSubstring("<adc_bits>"));
 		REQUIRE_THAT(s, !ContainsSubstring("<oversample>"));
 		REQUIRE_THAT(s, !ContainsSubstring("<rotationangleunit>"));
+		REQUIRE_THAT(s, !ContainsSubstring("<propagation>"));
+	}
+}
+
+TEST_CASE("serializeParameters writes raytracing propagation as a nested element", "[serial][xml_serializer]")
+{
+	XmlDocument const doc;
+	XmlElement const root = XmlElement::create("root");
+	doc.setRootElement(root);
+
+	params::Parameters p;
+	p.start = 0.0;
+	p.end = 1.0;
+	p.rate = 1000.0;
+
+	SECTION("pointscatter model with default (non-polarimetric) sub-parameters emits no <propagation> element")
+	{
+		p.propagation_model = params::PropagationModelKind::RcsPointScatter;
+		serial::xml_serializer_utils::serializeParameters(root, p);
+		std::string s = dumpElement(root);
+		REQUIRE_THAT(s, !ContainsSubstring("<propagation>"));
+	}
+
+	SECTION("pointscatter model writes a nested <pointscatter> when polarimetric is enabled")
+	{
+		p.propagation_model = params::PropagationModelKind::RcsPointScatter;
+		p.point_scatterer_params.polarimetric = true;
+		serial::xml_serializer_utils::serializeParameters(root, p);
+		std::string s = dumpElement(root);
+		REQUIRE_THAT(s, ContainsSubstring("<propagation><pointscatter"));
+		REQUIRE_THAT(s, ContainsSubstring("polarimetric=\"true\""));
+	}
+
+	SECTION("raytracing model writes a nested <raytracing> with non-default attributes")
+	{
+		p.propagation_model = params::PropagationModelKind::SbrRayTracing;
+		p.ray_tracing_params.scatter_limit = 7;
+		p.ray_tracing_params.boresight_width = 20.0 * PI / 180.0;
+		p.ray_tracing_params.boresight_tube_solid_angle = 1e-6;
+		p.ray_tracing_params.off_boresight_tube_solid_angle = 1e-3;
+		p.ray_tracing_params.prune_below_max_db = 60.0;
+
+		serial::xml_serializer_utils::serializeParameters(root, p);
+		std::string s = dumpElement(root);
+		REQUIRE_THAT(s, ContainsSubstring("<propagation><raytracing"));
+		REQUIRE_THAT(s, ContainsSubstring("scatter_limit=\"7\""));
+		REQUIRE_THAT(s, ContainsSubstring("boresight_width=\"20\""));
+		REQUIRE_THAT(s, ContainsSubstring("boresight_tube_solid_angle=\"1e-06\""));
+		REQUIRE_THAT(s, ContainsSubstring("off_boresight_tube_solid_angle=\"0.001\""));
+		REQUIRE_THAT(s, ContainsSubstring("prune_below_max_db=\"60\""));
+	}
+
+	SECTION("raytracing model with all-default sub-parameters omits the attributes")
+	{
+		p.propagation_model = params::PropagationModelKind::SbrRayTracing;
+		serial::xml_serializer_utils::serializeParameters(root, p);
+		std::string s = dumpElement(root);
+		REQUIRE_THAT(s, ContainsSubstring("<raytracing/>"));
+	}
+}
+
+TEST_CASE("serializeMesh and serializeMaterial write asset attributes/children", "[serial][xml_serializer]")
+{
+	XmlDocument const doc;
+	XmlElement const root = XmlElement::create("root");
+	doc.setRootElement(root);
+
+	SECTION("Mesh")
+	{
+		const core::MeshAsset mesh{.id = 1, .name = "Cube", .path = "/scenario/meshes/cube.obj", .filename = "cube.obj"};
+		serial::xml_serializer_utils::serializeMesh(mesh, root);
+		std::string s = dumpElement(root);
+		REQUIRE_THAT(s, ContainsSubstring("name=\"Cube\""));
+		REQUIRE_THAT(s, ContainsSubstring("filename=\"cube.obj\""));
+	}
+
+	SECTION("Material")
+	{
+		const core::MaterialAsset material{
+			.id = 2, .name = "Aluminium", .relative_permittivity = 0.9F, .conductivity = 0.1F};
+		serial::xml_serializer_utils::serializeMaterial(material, root);
+		std::string s = dumpElement(root);
+		REQUIRE_THAT(s, ContainsSubstring("name=\"Aluminium\""));
+		REQUIRE_THAT(s, ContainsSubstring("<relative_permittivity>0.9</relative_permittivity>"));
+		REQUIRE_THAT(s, ContainsSubstring("<conductivity>0.1</conductivity>"));
+	}
+
+	SECTION("Material with infinite conductivity (PEC) is written as \"inf\"")
+	{
+		const core::MaterialAsset pec{
+			.id = 3, .name = "PEC", .relative_permittivity = 1.0F, .conductivity = std::numeric_limits<float>::infinity()};
+		serial::xml_serializer_utils::serializeMaterial(pec, root);
+		std::string s = dumpElement(root);
+		REQUIRE_THAT(s, ContainsSubstring("<conductivity>inf</conductivity>"));
 	}
 }
 
@@ -145,8 +241,7 @@ TEST_CASE("serializeWaveform processes CW and Pulsed correctly", "[serial][xml_s
 
 	SECTION("CW Mode")
 	{
-		auto sig = std::make_unique<fers_signal::CwSignal>();
-		fers_signal::RadarSignal const wave("w1", 10.0, 1e9, 1.0, std::move(sig));
+		fers_signal::RadarSignal const wave("w1", 10.0, 1e9, fers_signal::CwWaveform{});
 		serial::xml_serializer_utils::serializeWaveform(wave, root);
 		std::string s = dumpElement(root);
 		REQUIRE_THAT(s, ContainsSubstring("name=\"w1\""));
@@ -155,9 +250,9 @@ TEST_CASE("serializeWaveform processes CW and Pulsed correctly", "[serial][xml_s
 
 	SECTION("Pulsed Mode File")
 	{
-		auto sig = std::make_unique<fers_signal::Signal>(); // Implies NOT CwSignal
-		fers_signal::RadarSignal wave("w2", 20.0, 2e9, 1.0, std::move(sig));
-		wave.setFilename("pulse.csv");
+		fers_signal::PulseWaveform sampled;
+		sampled.setFilename("pulse.csv");
+		const fers_signal::RadarSignal wave("w2", 20.0, 2e9, std::move(sampled));
 		serial::xml_serializer_utils::serializeWaveform(wave, root);
 		std::string s = dumpElement(root);
 		REQUIRE_THAT(s, ContainsSubstring("name=\"w2\""));
@@ -166,8 +261,7 @@ TEST_CASE("serializeWaveform processes CW and Pulsed correctly", "[serial][xml_s
 
 	SECTION("Pulsed Missing Filename safely defaults")
 	{
-		auto sig = std::make_unique<fers_signal::Signal>();
-		fers_signal::RadarSignal const wave("w3", 20.0, 2e9, 1.0, std::move(sig));
+		fers_signal::RadarSignal const wave("w3", 20.0, 2e9, fers_signal::PulseWaveform{});
 		serial::xml_serializer_utils::serializeWaveform(wave, root);
 		std::string s = dumpElement(root);
 		REQUIRE_THAT(s, ContainsSubstring("<pulsed_from_file filename=\"\"/>"));
@@ -175,18 +269,20 @@ TEST_CASE("serializeWaveform processes CW and Pulsed correctly", "[serial][xml_s
 
 	SECTION("CW file")
 	{
-		auto sig = std::make_unique<fers_signal::FileSignal>(fers_signal::FileWaveformKind::Cw);
-		fers_signal::RadarSignal wave("cw-file", 20.0, 2e9, 1.0, std::move(sig));
-		wave.setFilename("cw.h5");
+		fers_signal::FileWaveform file_wave{};
+		file_wave.setKind(fers_signal::FileWaveformKind::Cw);
+		file_wave.setFilename("cw.h5");
+		fers_signal::RadarSignal const wave("cw-file", 20.0, 2e9, std::move(file_wave));
 		serial::xml_serializer_utils::serializeWaveform(wave, root);
 		REQUIRE_THAT(dumpElement(root), ContainsSubstring("<cw_from_file filename=\"cw.h5\"/>"));
 	}
 
 	SECTION("FMCW file")
 	{
-		auto sig = std::make_unique<fers_signal::FileSignal>(fers_signal::FileWaveformKind::Fmcw);
-		fers_signal::RadarSignal wave("fmcw-file", 20.0, 2e9, 1.0, std::move(sig));
-		wave.setFilename("fmcw.h5");
+		fers_signal::FileWaveform file_wave{};
+		file_wave.setKind(fers_signal::FileWaveformKind::Fmcw);
+		file_wave.setFilename("fmcw.h5");
+		fers_signal::RadarSignal const wave("fmcw-file", 20.0, 2e9, std::move(file_wave));
 		serial::xml_serializer_utils::serializeWaveform(wave, root);
 		REQUIRE_THAT(dumpElement(root), ContainsSubstring("<fmcw_from_file filename=\"fmcw.h5\"/>"));
 	}
@@ -203,9 +299,9 @@ TEST_CASE("serializeWaveform round trips FMCW linear chirp direction", "[serial]
 	XmlElement const root = XmlElement::create("waveform");
 	doc.setRootElement(root);
 
-	auto sig = std::make_unique<fers_signal::FmcwChirpSignal>(1.0e6, 1.0e-3, 1.0e-3, 0.0, std::nullopt,
-															  fers_signal::FmcwChirpDirection::Down);
-	fers_signal::RadarSignal const wave("down", 20.0, 2e9, 1.0e-3, std::move(sig));
+	fers_signal::RadarSignal const wave("down", 20.0, 2e9,
+										fers_signal::FmcwChirpWaveform(1.0e6, 1.0e-3, 1.0e-3, 0.0, std::nullopt,
+																	   fers_signal::FmcwChirpDirection::Down));
 
 	serial::xml_serializer_utils::serializeWaveform(wave, root);
 	const std::string serialized = dumpElement(root);
@@ -223,8 +319,8 @@ TEST_CASE("serializeWaveform round trips FMCW linear chirp direction", "[serial]
 
 	REQUIRE(world.getWaveforms().size() == 1);
 	const auto* parsed_wave = world.getWaveforms().begin()->second.get();
-	REQUIRE(parsed_wave->getFmcwChirpSignal() != nullptr);
-	REQUIRE(parsed_wave->getFmcwChirpSignal()->isDownChirp());
+	REQUIRE(parsed_wave->getFmcwChirpWaveform() != nullptr);
+	REQUIRE(parsed_wave->getFmcwChirpWaveform()->isDownChirp());
 }
 
 TEST_CASE("serializeTiming preserves clock phase and jitter characteristics", "[serial][xml_serializer]")
@@ -307,6 +403,31 @@ TEST_CASE("serializeAntenna dispatches to correct pattern forms", "[serial][xml_
 	}
 
 	// TODO: XmlAntenna and H5Antenna coverage skipped as they require structurally-valid backing files
+}
+
+TEST_CASE("serializeAntenna emits boresight_polarisation only when non-default", "[serial][xml_serializer]")
+{
+	XmlDocument const doc;
+	XmlElement const root = XmlElement::create("root");
+	doc.setRootElement(root);
+
+	SECTION("Default (pure horizontal) is omitted")
+	{
+		antenna::Isotropic const ant("a1");
+		serial::xml_serializer_utils::serializeAntenna(ant, root);
+		REQUIRE_THAT(dumpElement(root), !ContainsSubstring("boresight_polarisation"));
+	}
+
+	SECTION("Non-default is written as a complex literal attribute pair")
+	{
+		antenna::Isotropic ant("a1");
+		ant.setPolarisation(antenna::JonesPolarisation{.horizontal = ComplexType(0.6, 0.0), .vertical = ComplexType(0.0, 0.8)});
+		serial::xml_serializer_utils::serializeAntenna(ant, root);
+		std::string const s = dumpElement(root);
+		REQUIRE_THAT(s, ContainsSubstring("boresight_polarisation"));
+		REQUIRE_THAT(s, ContainsSubstring("h=\"0.6+0i\""));
+		REQUIRE_THAT(s, ContainsSubstring("v=\"0+0.8i\""));
+	}
 }
 
 TEST_CASE("serializeMotionPath sets right interpolation models", "[serial][xml_serializer]")
@@ -547,10 +668,40 @@ TEST_CASE("serializeTarget models", "[serial][xml_serializer]")
 	SECTION("Fluctuation Model ChiSquare")
 	{
 		auto t = radar::createIsoTarget(&plat, "tgt2", 10.0, 42);
-		t->setFluctuationModel(std::make_unique<radar::RcsChiSquare>(t->getRngEngine(), 2.0));
+		t->getRcsSpec()->setFluctuationModel(std::make_unique<radar::RcsChiSquare>(t->getRcsSpec()->getRngEngine(), 2.0));
 		serial::xml_serializer_utils::serializeTarget(*t, root);
 		std::string s = dumpElement(root);
 		REQUIRE_THAT(s, ContainsSubstring("<model type=\"chisquare\"><k>2</k></model>"));
+	}
+
+	SECTION("Geometry is written when present")
+	{
+		const core::MeshAsset mesh{.id = 10, .name = "Cube", .path = "/scenario/meshes/cube.obj", .filename = "cube.obj"};
+		const core::MaterialAsset material{
+			.id = 20, .name = "Aluminium", .relative_permittivity = 1.0F, .conductivity = 0.0F};
+
+		auto t = radar::createIsoTarget(&plat, "tgt3", 10.0, 42);
+		t->setGeometry(&mesh, &material);
+		serial::xml_serializer_utils::serializeTarget(*t, root);
+		std::string s = dumpElement(root);
+		REQUIRE_THAT(s, ContainsSubstring("<geometry mesh=\"Cube\" material=\"Aluminium\"/>"));
+	}
+
+	SECTION("Geometry is omitted when absent")
+	{
+		auto t = radar::createIsoTarget(&plat, "tgt4", 10.0, 42);
+		serial::xml_serializer_utils::serializeTarget(*t, root);
+		std::string s = dumpElement(root);
+		REQUIRE_THAT(s, !ContainsSubstring("<geometry"));
+	}
+
+	SECTION("RCS is omitted when absent")
+	{
+		auto t = std::make_unique<radar::Target>(&plat, "tgt5");
+		serial::xml_serializer_utils::serializeTarget(*t, root);
+		std::string s = dumpElement(root);
+		REQUIRE_THAT(s, !ContainsSubstring("<rcs"));
+		REQUIRE_THAT(s, !ContainsSubstring("<model"));
 	}
 
 	// TODO: Missing Coverage for `FileTarget` due to inability to mock generic external valid file loads cleanly

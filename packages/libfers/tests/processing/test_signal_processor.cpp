@@ -14,8 +14,6 @@
 #include "core/parameters.h"
 #include "interpolation/interpolation_point.h"
 #include "processing/signal_processor.h"
-#include "radar/platform.h"
-#include "radar/transmitter.h"
 #include "serial/response.h"
 #include "signal/radar_signal.h"
 
@@ -35,28 +33,13 @@ namespace
 		~ParamGuard() { params::params = saved; }
 	};
 
-	struct TestSignal final : public fers_signal::Signal
+	std::unique_ptr<serial::Response> makeSingleSampleResponse(const fers_signal::RadarSignal& wave,
+															   const RealType rx_time)
 	{
-		std::vector<ComplexType> data;
-
-		std::vector<ComplexType> render(const std::vector<interp::InterpPoint>&, unsigned& size,
-										RealType) const override
-		{
-			size = static_cast<unsigned>(data.size());
-			return data;
-		}
-	};
-
-	std::unique_ptr<serial::Response> makeResponse(const fers_signal::RadarSignal& wave,
-												   const radar::Transmitter& transmitter,
-												   const std::vector<interp::InterpPoint>& points)
-	{
-		auto response = std::make_unique<serial::Response>(&wave, &transmitter);
-		for (const auto& point : points)
-		{
-			response->addInterpPoint(point);
-		}
-		return response;
+		const RealType edge = 1.0 / params::simSamplingRate();
+		serial::ResponseBuilder builder(
+			&wave, interp::InterpPoint{.gain = 1.0, .rx_time = rx_time, .delay = 0.0, .phase_delay = 0.0}, edge, edge);
+		return std::make_unique<serial::Response>(std::move(builder));
 	}
 
 	RealType meanOfChannel(const std::vector<ComplexType>& window, bool realChannel)
@@ -85,49 +68,67 @@ namespace
 TEST_CASE("renderWindow accumulates overlapping responses with offsets", "[processing][signal]")
 {
 	ParamGuard const guard;
-	params::setRate(4.0);
+	params::setRate(1000.0);
 	params::setOversampleRatio(1);
+	params::setSimSamplingRate(1000.0);
 
-	radar::Platform platform("RxPlatform");
-	radar::Transmitter const transmitter(&platform, "TxA", radar::OperationMode::PULSED_MODE, 11);
+	const std::vector<ComplexType> data_a = {ComplexType{1.0, 0.0}, ComplexType{2.0, 1.0}, ComplexType{3.0, -1.0}};
+	fers_signal::PulseWaveform sampled_a;
+	sampled_a.load(data_a, static_cast<unsigned>(data_a.size()), 1000.0);
+	const fers_signal::RadarSignal wave_a("wave_a", 1.0, 1.0e9, std::move(sampled_a), 101);
 
-	auto signal_a = std::make_unique<TestSignal>();
-	signal_a->data = {ComplexType{1.0, 0.0}, ComplexType{2.0, 1.0}, ComplexType{3.0, -1.0}};
-	fers_signal::RadarSignal const wave_a("wave_a", 1.0, 1.0, 1.0, std::move(signal_a), 101);
-
-	auto signal_b = std::make_unique<TestSignal>();
-	signal_b->data = {ComplexType{1.0, 1.0}, ComplexType{1.0, -1.0}};
-	fers_signal::RadarSignal const wave_b("wave_b", 1.0, 1.0, 1.0, std::move(signal_b), 102);
-
-	auto signal_c = std::make_unique<TestSignal>();
-	signal_c->data = {ComplexType{9.0, 9.0}};
-	fers_signal::RadarSignal const wave_c("wave_c", 1.0, 1.0, 1.0, std::move(signal_c), 103);
-
-	std::vector<std::unique_ptr<serial::Response>> responses;
-	responses.emplace_back(makeResponse(wave_a, transmitter, {{1.0, -0.25, 0.0, 0.0}, {1.0, 0.1, 0.0, 0.0}}));
-	responses.emplace_back(makeResponse(wave_b, transmitter, {{1.0, 0.25, 0.0, 0.0}, {1.0, 0.5, 0.0, 0.0}}));
-	responses.emplace_back(makeResponse(wave_c, transmitter, {{1.0, 2.0, 0.0, 0.0}, {1.0, 3.0, 0.0, 0.0}}));
+	const std::vector<ComplexType> data_b = {ComplexType{1.0, 1.0}, ComplexType{1.0, -1.0}};
+	fers_signal::PulseWaveform sampled_b;
+	sampled_b.load(data_b, static_cast<unsigned>(data_b.size()), 1000.0);
+	const fers_signal::RadarSignal wave_b("wave_b", 1.0, 1.0e9, std::move(sampled_b), 102);
 
 	const RealType length = 1.0;
 	const RealType start = 0.0;
 	const RealType frac_delay = 0.0;
 	const auto local_window_size = static_cast<unsigned>(std::ceil(length * params::rate()));
-	std::vector<ComplexType> window(local_window_size, ComplexType{0.5, 0.0});
 
-	processing::renderWindow(window, length, start, frac_delay, responses);
+	const auto renderWithResponses = [&](std::vector<std::unique_ptr<serial::Response>> responses)
+	{
+		std::vector<ComplexType> window(local_window_size, ComplexType{0.5, 0.0});
+		processing::renderWindow(window, length, start, frac_delay, responses);
+		return window;
+	};
 
-	REQUIRE(window.size() == 4);
-	REQUIRE_THAT(window[0].real(), WithinAbs(0.5, 1e-12));
-	REQUIRE_THAT(window[0].imag(), WithinAbs(0.0, 1e-12));
+	// Deliberately overlapping active spans (both anchored at rx_time == 0.1) so any
+	// bug that clobbers rather than accumulates contributions is caught below.
+	std::vector<std::unique_ptr<serial::Response>> only_a;
+	only_a.push_back(makeSingleSampleResponse(wave_a, 0.1));
+	const auto window_a = renderWithResponses(std::move(only_a));
 
-	REQUIRE_THAT(window[1].real(), WithinAbs(3.5, 1e-12));
-	REQUIRE_THAT(window[1].imag(), WithinAbs(2.0, 1e-12));
+	std::vector<std::unique_ptr<serial::Response>> only_b;
+	only_b.push_back(makeSingleSampleResponse(wave_b, 0.1));
+	const auto window_b = renderWithResponses(std::move(only_b));
 
-	REQUIRE_THAT(window[2].real(), WithinAbs(4.5, 1e-12));
-	REQUIRE_THAT(window[2].imag(), WithinAbs(-2.0, 1e-12));
+	std::vector<std::unique_ptr<serial::Response>> both;
+	both.push_back(makeSingleSampleResponse(wave_a, 0.1));
+	both.push_back(makeSingleSampleResponse(wave_b, 0.1));
+	const auto window_both = renderWithResponses(std::move(both));
 
-	REQUIRE_THAT(window[3].real(), WithinAbs(0.5, 1e-12));
-	REQUIRE_THAT(window[3].imag(), WithinAbs(0.0, 1e-12));
+	// renderWindow should be linear in its responses: rendering both together must
+	// equal the baseline-adjusted sum of rendering each alone. This holds regardless
+	// of the exact fade-in/fade-out shape Response applies at its own boundaries, so
+	// it doesn't require hand-deriving the filtered/padded waveform by hand.
+	REQUIRE(window_both.size() == window_a.size());
+	REQUIRE(window_both.size() == window_b.size());
+	bool any_nonbaseline = false;
+	for (std::size_t i = 0; i < window_both.size(); ++i)
+	{
+		const ComplexType expected = window_a[i] + window_b[i] - ComplexType{0.5, 0.0};
+		REQUIRE_THAT(window_both[i].real(), WithinAbs(expected.real(), 1e-9));
+		REQUIRE_THAT(window_both[i].imag(), WithinAbs(expected.imag(), 1e-9));
+
+		if (std::abs(window_a[i].real() - 0.5) > 1e-9 || std::abs(window_a[i].imag()) > 1e-9)
+		{
+			any_nonbaseline = true;
+		}
+	}
+	// Guards against a vacuous pass where renderWindow silently placed nothing.
+	REQUIRE(any_nonbaseline);
 }
 
 TEST_CASE("applyThermalNoiseAtSampleRate scales complex variance to IF rate", "[processing][signal][fmcw][if]")

@@ -194,7 +194,7 @@ namespace serial::vita49
 						   std::make_move_iterator(result.packets.end()));
 		}
 
-		std::stable_sort(packets.begin(), packets.end(), [](const SerializedPacket& lhs, const SerializedPacket& rhs)
+		std::ranges::stable_sort(packets, [](const SerializedPacket& lhs, const SerializedPacket& rhs)
 						 { return lhs.first_sample_time < rhs.first_sample_time; });
 		startPacing();
 		if (!enqueuePackets(std::move(packets)))
@@ -282,7 +282,7 @@ namespace serial::vita49
 			std::vector<SerializedPacket> packets;
 			std::vector<std::uint32_t> context_stream_ids;
 			appendPendingContexts(packets, context_stream_ids);
-			std::stable_sort(packets.begin(), packets.end(),
+			std::ranges::stable_sort(packets,
 							 [](const SerializedPacket& lhs, const SerializedPacket& rhs)
 							 { return lhs.first_sample_time < rhs.first_sample_time; });
 			startPacing();

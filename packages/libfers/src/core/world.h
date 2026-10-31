@@ -19,6 +19,7 @@
 #include <vector>
 
 #include "antenna/antenna_factory.h"
+#include "core/assets.h"
 #include "core/sim_events.h"
 #include "core/sim_id.h"
 #include "core/simulation_state.h"
@@ -103,6 +104,22 @@ namespace core
 		void add(std::unique_ptr<timing::PrototypeTiming> timing);
 
 		/**
+		 * @brief Adds a mesh asset to the simulation world.
+		 *
+		 * @param mesh The MeshAsset to add.
+		 * @throws std::runtime_error if a mesh with the same ID already exists.
+		 */
+		void add(MeshAsset mesh);
+
+		/**
+		 * @brief Adds a material asset to the simulation world.
+		 *
+		 * @param material The MaterialAsset to add.
+		 * @throws std::runtime_error if a material with the same ID already exists.
+		 */
+		void add(MaterialAsset material);
+
+		/**
 		 * @brief Finds a radar signal by ID.
 		 *
 		 * @param id The ID of the radar signal to find.
@@ -125,6 +142,22 @@ namespace core
 		 * @return A pointer to the PrototypeTiming if found, or nullptr if not found.
 		 */
 		[[nodiscard]] timing::PrototypeTiming* findTiming(const SimId id);
+
+		/**
+		 * @brief Finds a mesh asset by ID.
+		 *
+		 * @param id The ID of the mesh asset to find.
+		 * @return A pointer to the MeshAsset if found, or nullptr if not found.
+		 */
+		[[nodiscard]] MeshAsset* findMesh(const SimId id);
+
+		/**
+		 * @brief Finds a material asset by ID.
+		 *
+		 * @param id The ID of the material asset to find.
+		 * @return A pointer to the MaterialAsset if found, or nullptr if not found.
+		 */
+		[[nodiscard]] MaterialAsset* findMaterial(const SimId id);
 
 		/**
 		 * @brief Finds a platform by ID.
@@ -278,6 +311,21 @@ namespace core
 		}
 
 		/**
+		 * @brief Retrieves the map of mesh assets.
+		 * @return A const reference to the map of mesh IDs to MeshAsset.
+		 */
+		[[nodiscard]] const std::unordered_map<SimId, MeshAsset>& getMeshes() const noexcept { return _meshes; }
+
+		/**
+		 * @brief Retrieves the map of material assets.
+		 * @return A const reference to the map of material IDs to MaterialAsset.
+		 */
+		[[nodiscard]] const std::unordered_map<SimId, MaterialAsset>& getMaterials() const noexcept
+		{
+			return _materials;
+		}
+
+		/**
 		 * @brief Clears all objects and assets from the simulation world.
 		 */
 		void clear() noexcept;
@@ -351,6 +399,10 @@ namespace core
 		std::unordered_map<SimId, std::unique_ptr<antenna::Antenna>> _antennas; ///< Owned antenna assets.
 
 		std::unordered_map<SimId, std::unique_ptr<timing::PrototypeTiming>> _timings; ///< Owned timing prototypes.
+
+		std::unordered_map<SimId, MeshAsset> _meshes; ///< Owned mesh assets.
+
+		std::unordered_map<SimId, MaterialAsset> _materials; ///< Owned material assets.
 
 		std::priority_queue<Event, std::vector<Event>, EventComparator> _event_queue; ///< Pending simulation events.
 

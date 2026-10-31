@@ -31,6 +31,7 @@ Windows:
 | `--vita49-queue-depth <packets>` | Optional VITA sender queue depth. Must be greater than zero. Default is `1024`. |
 | `--log-level=<level>` | Set logging detail. Use `TRACE`, `DEBUG`, `INFO`, `WARNING`, `ERROR`, or `FATAL`. |
 | `--log-file=<file>` | Write logs to a `.log` or `.txt` file as well as the terminal. |
+| `--rt-engine=<engine>` | Force the ray-tracing engine for the SBR propagation model: `auto`, `optix`, or `embree` (case-insensitive). Defaults to `auto`. |
 | `-n=<threads>` | Choose how many worker threads to use. |
 
 If `--out-dir` is not supplied, results are written beside the scenario file.
@@ -83,6 +84,16 @@ Tune VITA UDP packet sizing and queue depth:
 ```
 
 For the packet format, metadata fields, counters, and source-backed implementation contract, see [[VITA49 Streaming Implementation]].
+
+## Choosing a Ray-Tracing Engine
+
+SBR scenarios (`<propagation><raytracing .../></propagation>` in the `.fersxml`) auto-detect between OptiX and Embree by default, preferring OptiX. Force a specific engine with `--rt-engine=`:
+
+```bash
+./build/release/packages/fers-cli/fers-cli scenario.fersxml --rt-engine=embree
+```
+
+Accepted values are `auto`, `optix`, and `embree`, matched case-insensitively. Requesting an engine that wasn't compiled into this build fails with an error when the simulation starts.
 
 ## Choosing Thread Count
 

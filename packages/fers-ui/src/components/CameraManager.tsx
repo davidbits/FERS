@@ -1,14 +1,14 @@
 // SPDX-License-Identifier: GPL-2.0-only
 // Copyright (c) 2025-present FERS Contributors (see AUTHORS.md).
 
+import { useFrame, useThree } from '@react-three/fiber';
 import { useEffect, useRef } from 'react';
-import { useThree, useFrame } from '@react-three/fiber';
-import {
-    useScenarioStore,
-    calculateInterpolatedPosition,
-} from '@/stores/scenarioStore';
-import { type MapControls as MapControlsImpl } from 'three-stdlib';
 import * as THREE from 'three';
+import { type MapControls as MapControlsImpl } from 'three-stdlib';
+import {
+    calculateInterpolatedPosition,
+    useScenarioStore,
+} from '@/stores/scenarioStore';
 
 interface CameraManagerProps {
     controlsRef: React.RefObject<MapControlsImpl | null>;

@@ -14,27 +14,10 @@ file(READ "${INPUT}" _fers_embed_hex HEX)
 string(LENGTH "${_fers_embed_hex}" _fers_embed_hex_length)
 math(EXPR _fers_embed_byte_count "${_fers_embed_hex_length} / 2")
 
-set(_fers_embed_body)
+# Convert the string to a C-style array of byte values.
+set(_fers_embed_body "${_fers_embed_hex}")
 if (_fers_embed_byte_count GREATER 0)
-	math(EXPR _fers_embed_last_index "${_fers_embed_byte_count} - 1")
-	foreach (_fers_embed_index RANGE 0 ${_fers_embed_last_index})
-		math(EXPR _fers_embed_pos "${_fers_embed_index} * 2")
-		string(SUBSTRING "${_fers_embed_hex}" ${_fers_embed_pos} 2 _fers_embed_byte)
-
-		if (_fers_embed_index GREATER 0)
-			string(APPEND _fers_embed_body ",")
-		endif ()
-
-		math(EXPR _fers_embed_col "${_fers_embed_index} % 12")
-		if (_fers_embed_col EQUAL 0)
-			string(APPEND _fers_embed_body "\n\t")
-		else ()
-			string(APPEND _fers_embed_body " ")
-		endif ()
-
-		string(APPEND _fers_embed_body "0x${_fers_embed_byte}")
-	endforeach ()
-	string(APPEND _fers_embed_body "\n")
+	string(REGEX REPLACE "([0-9a-f][0-9a-f])" "0x\\1, " _fers_embed_body "${_fers_embed_body}")
 endif ()
 
 file(WRITE "${OUTPUT}"

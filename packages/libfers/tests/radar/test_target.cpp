@@ -120,65 +120,89 @@ TEST_CASE("RcsChiSquare sample mean matches configured mean power", "[radar][tar
 	REQUIRE_THAT(sum / static_cast<RealType>(sample_count), WithinAbs(4.0, 0.15));
 }
 
-TEST_CASE("IsoTarget returns constant RCS", "[radar][target]")
+TEST_CASE("Target with constant (isotropic) RCS returns it", "[radar][target]")
 {
 	radar::Platform platform("TargetPlatform");
-	radar::IsoTarget const target(&platform, "Iso", 12.5, 42, 9002);
+	radar::Target target(&platform, "Iso", 9002);
+	target.setRcs(std::make_unique<radar::IsoTargetRcs>(12.5, 42));
 
 	math::SVec3 in_angle(1.0, 0.0, 0.0);
 	math::SVec3 out_angle(1.0, 0.0, 0.0);
 
-	REQUIRE_THAT(target.getConstRcs(), WithinAbs(12.5, 1e-12));
-	REQUIRE_THAT(target.getRcs(in_angle, out_angle, 0.0), WithinAbs(12.5, 1e-12));
+	const auto* iso = dynamic_cast<const radar::IsoTargetRcs*>(target.getRcsSpec());
+	REQUIRE(iso != nullptr);
+	REQUIRE_THAT(iso->getConstRcs(), WithinAbs(12.5, 1e-12));
+
+	const auto rcs = target.getRcs(in_angle, out_angle, 0.0);
+	REQUIRE(rcs.has_value());
+	REQUIRE_THAT(rcs.value(), WithinAbs(12.5, 1e-12));
 	REQUIRE(target.getId() == 9002);
 }
 
-TEST_CASE("createIsoTarget constructs IsoTarget", "[radar][target]")
+TEST_CASE("createIsoTarget attaches a constant RCS", "[radar][target]")
 {
 	radar::Platform platform("TargetPlatform");
 	const auto target = radar::createIsoTarget(&platform, "IsoFactory", 9.0, 77, 8080);
 
-	const auto* iso_target = dynamic_cast<const radar::IsoTarget*>(target.get());
-	REQUIRE(iso_target != nullptr);
-	REQUIRE_THAT(iso_target->getConstRcs(), WithinAbs(9.0, 1e-12));
-	REQUIRE(iso_target->getId() == 8080);
+	const auto* iso_rcs = dynamic_cast<const radar::IsoTargetRcs*>(target->getRcsSpec());
+	REQUIRE(iso_rcs != nullptr);
+	REQUIRE_THAT(iso_rcs->getConstRcs(), WithinAbs(9.0, 1e-12));
+	REQUIRE(target->getId() == 8080);
 }
 
-TEST_CASE("IsoTarget applies fluctuation model", "[radar][target]")
+TEST_CASE("Constant RCS applies fluctuation model", "[radar][target]")
 {
 	radar::Platform platform("TargetPlatform");
-	radar::IsoTarget target(&platform, "Iso", 3.0, 7);
+	radar::Target target(&platform, "Iso");
+	target.setRcs(std::make_unique<radar::IsoTargetRcs>(3.0, 7));
 
 	auto model = std::make_unique<FixedRcsModel>(2.0);
 	const auto* model_ptr = model.get();
-	target.setFluctuationModel(std::move(model));
+	target.getRcsSpec()->setFluctuationModel(std::move(model));
 
 	math::SVec3 in_angle(1.0, 0.0, 0.0);
 	math::SVec3 out_angle(1.0, 0.0, 0.0);
 
-	REQUIRE(target.getFluctuationModel() == model_ptr);
-	REQUIRE_THAT(target.getRcs(in_angle, out_angle, 0.0), WithinAbs(6.0, 1e-12));
+	REQUIRE(target.getRcsSpec()->getFluctuationModel() == model_ptr);
+	const auto rcs = target.getRcs(in_angle, out_angle, 0.0);
+	REQUIRE(rcs.has_value());
+	REQUIRE_THAT(rcs.value(), WithinAbs(6.0, 1e-12));
 }
 
-TEST_CASE("Target RNG is deterministic per seed", "[radar][target]")
+TEST_CASE("Target's RCS RNG is deterministic per seed", "[radar][target]")
 {
 	radar::Platform platform("TargetPlatform");
-	radar::IsoTarget target_a(&platform, "IsoA", 1.0, 1337);
-	radar::IsoTarget target_b(&platform, "IsoB", 1.0, 1337);
+	radar::Target target_a(&platform, "IsoA");
+	target_a.setRcs(std::make_unique<radar::IsoTargetRcs>(1.0, 1337));
+	radar::Target target_b(&platform, "IsoB");
+	target_b.setRcs(std::make_unique<radar::IsoTargetRcs>(1.0, 1337));
 
-	const auto first_a = target_a.getRngEngine()();
-	const auto first_b = target_b.getRngEngine()();
+	const auto first_a = target_a.getRcsSpec()->getRngEngine()();
+	const auto first_b = target_b.getRcsSpec()->getRngEngine()();
 
 	REQUIRE(first_a == first_b);
 }
 
-TEST_CASE("IsoTarget defaults to no fluctuation model and target-typed id", "[radar][target]")
+TEST_CASE("Target with constant RCS defaults to no fluctuation model and target-typed id", "[radar][target]")
 {
 	radar::Platform platform("TargetPlatform");
-	radar::IsoTarget const target(&platform, "Iso", 1.0, 99);
+	radar::Target target(&platform, "Iso");
+	target.setRcs(std::make_unique<radar::IsoTargetRcs>(1.0, 99));
 
-	REQUIRE(target.getFluctuationModel() == nullptr);
+	REQUIRE(target.getRcsSpec()->getFluctuationModel() == nullptr);
 	REQUIRE(SimIdGenerator::getType(target.getId()) == ObjectType::Target);
+}
+
+TEST_CASE("Target with no RCS has no RCS spec", "[radar][target]")
+{
+	radar::Platform platform("TargetPlatform");
+	radar::Target const target(&platform, "Bare", 12021);
+
+	REQUIRE(target.getRcsSpec() == nullptr);
+
+	math::SVec3 in_angle(1.0, 0.0, 0.0);
+	math::SVec3 out_angle(1.0, 0.0, 0.0);
+	REQUIRE_FALSE(target.getRcs(in_angle, out_angle, 0.0).has_value());
 }
 
 TEST_CASE("FileTarget multiplies interpolated azimuth and elevation RCS in the target frame", "[radar][target]")
@@ -191,7 +215,8 @@ TEST_CASE("FileTarget multiplies interpolated azimuth and elevation RCS in the t
 	setStaticRotation(platform);
 
 	constexpr SimId explicit_id = 4001;
-	radar::FileTarget const target(&platform, "File", path.string(), 12, explicit_id);
+	radar::Target target(&platform, "File", explicit_id);
+	target.setRcs(std::make_unique<radar::FileTargetRcs>(path.string(), 12));
 
 	math::SVec3 in_angle = unitDirection(0.6, 0.2);
 	math::SVec3 out_angle = unitDirection(0.4, 0.6);
@@ -200,9 +225,13 @@ TEST_CASE("FileTarget multiplies interpolated azimuth and elevation RCS in the t
 	const RealType expected_elevation_rcs = 3.0 + 2.0 * 0.4;
 	const RealType expected_rcs = expected_azimuth_rcs * expected_elevation_rcs;
 
+	const auto* file_rcs = dynamic_cast<const radar::FileTargetRcs*>(target.getRcsSpec());
+	REQUIRE(file_rcs != nullptr);
 	REQUIRE(target.getId() == explicit_id);
-	REQUIRE(target.getFilename() == path.string());
-	REQUIRE_THAT(target.getRcs(in_angle, out_angle, 0.0), WithinAbs(expected_rcs, 1e-12));
+	REQUIRE(file_rcs->getFilename() == path.string());
+	const auto rcs = target.getRcs(in_angle, out_angle, 0.0);
+	REQUIRE(rcs.has_value());
+	REQUIRE_THAT(rcs.value(), WithinAbs(expected_rcs, 1e-12));
 
 	removeIfExists(path);
 }
@@ -216,7 +245,8 @@ TEST_CASE("FileTarget uses time-dependent platform rotation to look up body-fram
 	radar::Platform platform("TargetPlatform");
 	setConstantRotation(platform, 0.1, 0.2, 0.2, 0.1);
 
-	radar::FileTarget const target(&platform, "File", path.string(), 34, 5002);
+	radar::Target target(&platform, "File", 5002);
+	target.setRcs(std::make_unique<radar::FileTargetRcs>(path.string(), 34));
 
 	math::SVec3 in_angle = unitDirection(0.4, 0.2);
 	math::SVec3 out_angle = unitDirection(0.5, 0.4);
@@ -226,7 +256,9 @@ TEST_CASE("FileTarget uses time-dependent platform rotation to look up body-fram
 	const RealType expected_elevation_rcs = 3.0 + 2.0 * 0.1;
 	const RealType expected_rcs = expected_azimuth_rcs * expected_elevation_rcs;
 
-	REQUIRE_THAT(target.getRcs(in_angle, out_angle, time), WithinAbs(expected_rcs, 1e-12));
+	const auto rcs = target.getRcs(in_angle, out_angle, time);
+	REQUIRE(rcs.has_value());
+	REQUIRE_THAT(rcs.value(), WithinAbs(expected_rcs, 1e-12));
 
 	removeIfExists(path);
 }
@@ -240,21 +272,24 @@ TEST_CASE("FileTarget applies fluctuation model as a multiplicative RCS term", "
 	radar::Platform platform("TargetPlatform");
 	setStaticRotation(platform);
 
-	radar::FileTarget target(&platform, "File", path.string(), 56, 6003);
+	radar::Target target(&platform, "File", 6003);
+	target.setRcs(std::make_unique<radar::FileTargetRcs>(path.string(), 56));
 	auto model = std::make_unique<FixedRcsModel>(1.5);
 	const auto* model_ptr = model.get();
-	target.setFluctuationModel(std::move(model));
+	target.getRcsSpec()->setFluctuationModel(std::move(model));
 
 	math::SVec3 in_angle = unitDirection(1.0, 1.0);
 	math::SVec3 out_angle = unitDirection(1.0, 1.0);
 
-	REQUIRE(target.getFluctuationModel() == model_ptr);
-	REQUIRE_THAT(target.getRcs(in_angle, out_angle, 0.0), WithinAbs(30.0 * 1.5, 1e-12));
+	REQUIRE(target.getRcsSpec()->getFluctuationModel() == model_ptr);
+	const auto rcs = target.getRcs(in_angle, out_angle, 0.0);
+	REQUIRE(rcs.has_value());
+	REQUIRE_THAT(rcs.value(), WithinAbs(30.0 * 1.5, 1e-12));
 
 	removeIfExists(path);
 }
 
-TEST_CASE("createFileTarget constructs FileTarget with explicit id and filename", "[radar][target]")
+TEST_CASE("createFileTarget constructs a target with explicit id and filename", "[radar][target]")
 {
 	const std::filesystem::path path = tempFilePath(uniqueFileName("target_factory"));
 	removeIfExists(path);
@@ -264,11 +299,11 @@ TEST_CASE("createFileTarget constructs FileTarget with explicit id and filename"
 	setStaticRotation(platform);
 
 	const auto target = radar::createFileTarget(&platform, "FileFactory", path.string(), 78, 7004);
-	const auto* file_target = dynamic_cast<const radar::FileTarget*>(target.get());
+	const auto* file_rcs = dynamic_cast<const radar::FileTargetRcs*>(target->getRcsSpec());
 
-	REQUIRE(file_target != nullptr);
-	REQUIRE(file_target->getId() == 7004);
-	REQUIRE(file_target->getFilename() == path.string());
+	REQUIRE(file_rcs != nullptr);
+	REQUIRE(target->getId() == 7004);
+	REQUIRE(file_rcs->getFilename() == path.string());
 
 	removeIfExists(path);
 }
@@ -292,27 +327,27 @@ TEST_CASE("FileTarget skips incomplete sample nodes and uses the valid samples t
 	radar::Platform platform("TargetPlatform");
 	setStaticRotation(platform);
 
-	radar::FileTarget const target(&platform, "File", path.string(), 90, 8005);
+	radar::Target target(&platform, "File", 8005);
+	target.setRcs(std::make_unique<radar::FileTargetRcs>(path.string(), 90));
 	math::SVec3 in_angle = unitDirection(1.0, 1.0);
 	math::SVec3 out_angle = unitDirection(1.0, 1.0);
 
-	REQUIRE_THAT(target.getRcs(in_angle, out_angle, 0.0), WithinAbs(12.0, 1e-12));
+	const auto rcs = target.getRcs(in_angle, out_angle, 0.0);
+	REQUIRE(rcs.has_value());
+	REQUIRE_THAT(rcs.value(), WithinAbs(12.0, 1e-12));
 
 	removeIfExists(path);
 }
 
-TEST_CASE("FileTarget throws for missing target description file", "[radar][target]")
+TEST_CASE("FileTargetRcs throws for missing target description file", "[radar][target]")
 {
 	const std::filesystem::path path = tempFilePath(uniqueFileName("target_missing"));
 	removeIfExists(path);
 
-	radar::Platform platform("TargetPlatform");
-	setStaticRotation(platform);
-
-	REQUIRE_THROWS_AS(radar::FileTarget(&platform, "File", path.string(), 111, 9006), std::runtime_error);
+	REQUIRE_THROWS_AS(radar::FileTargetRcs(path.string(), 111), std::runtime_error);
 }
 
-TEST_CASE("FileTarget throws for malformed target description file", "[radar][target]")
+TEST_CASE("FileTargetRcs throws for malformed target description file", "[radar][target]")
 {
 	const std::filesystem::path path = tempFilePath(uniqueFileName("target_malformed"));
 	removeIfExists(path);
@@ -323,10 +358,7 @@ TEST_CASE("FileTarget throws for malformed target description file", "[radar][ta
 		out << "<target><azimuth><rcssample></target>";
 	}
 
-	radar::Platform platform("TargetPlatform");
-	setStaticRotation(platform);
-
-	REQUIRE_THROWS_AS(radar::FileTarget(&platform, "File", path.string(), 222, 10007), std::runtime_error);
+	REQUIRE_THROWS_AS(radar::FileTargetRcs(path.string(), 222), std::runtime_error);
 
 	removeIfExists(path);
 }
@@ -346,7 +378,8 @@ TEST_CASE("FileTarget currently throws at lookup time when an RCS axis has no sa
 	radar::Platform platform("TargetPlatform");
 	setStaticRotation(platform);
 
-	radar::FileTarget const target(&platform, "File", path.string(), 333, 11008);
+	radar::Target target(&platform, "File", 11008);
+	target.setRcs(std::make_unique<radar::FileTargetRcs>(path.string(), 333));
 	math::SVec3 in_angle = unitDirection(0.0, 0.0);
 	math::SVec3 out_angle = unitDirection(0.0, 0.0);
 
@@ -355,14 +388,15 @@ TEST_CASE("FileTarget currently throws at lookup time when an RCS axis has no sa
 	removeIfExists(path);
 }
 
-TEST_CASE("Target exposes initial seed", "[radar][target]")
+TEST_CASE("Target's RCS exposes initial seed", "[radar][target]")
 {
 	radar::Platform platform("TargetPlatform");
-	radar::IsoTarget const target(&platform, "Iso", 1.0, 12345);
-	REQUIRE(target.getSeed() == 12345);
+	radar::Target target(&platform, "Iso");
+	target.setRcs(std::make_unique<radar::IsoTargetRcs>(1.0, 12345));
+	REQUIRE(target.getRcsSpec()->getSeed() == 12345);
 }
 
-// TODO: FileTarget accepts XML files with missing/empty azimuth or elevation axes
-// during construction and only fails later in getRcs(). Once the source validates
+// TODO: FileTargetRcs accepts XML files with missing/empty azimuth or elevation axes
+// during construction and only fails later in computeRcs(). Once the source validates
 // required sample sets in the constructor, replace the lookup-time failure test
 // with a constructor-level validation test.

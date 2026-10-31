@@ -14,6 +14,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <optional>
+#include <unordered_map>
 #include <vector>
 
 #include "config.h"
@@ -21,11 +22,11 @@
 
 namespace fers_signal
 {
-	class FmcwChirpSignal;
-	class FmcwTriangleSignal;
-	class FileSignal;
+	class FmcwChirpWaveform;
+	class FmcwTriangleWaveform;
+	class FileWaveform;
 	class RadarSignal;
-	class SteppedFrequencySignal;
+	class SfcwWaveform;
 }
 
 namespace core
@@ -54,11 +55,11 @@ namespace core
 		bool is_fmcw = false; ///< Compatibility flag for any FMCW source.
 		bool is_sfcw = false; ///< Compatibility flag for any stepped-frequency source.
 
-		const fers_signal::FmcwChirpSignal* fmcw = nullptr; ///< Stable pointer to the linear FMCW waveform, if any.
-		const fers_signal::FmcwTriangleSignal* triangle = nullptr; ///< Stable pointer to the triangle waveform, if any.
-		const fers_signal::FileSignal* file = nullptr; ///< Stable pointer to the finite sampled waveform, if any.
-		const fers_signal::SteppedFrequencySignal* sfcw =
-			nullptr; ///< Stable pointer to the stepped-frequency waveform, if any.
+		const fers_signal::FmcwChirpWaveform* fmcw = nullptr; ///< Stable pointer to the linear FMCW waveform, if any.
+		const fers_signal::FmcwTriangleWaveform* triangle =
+			nullptr; ///< Stable pointer to the triangle waveform, if any.
+		const fers_signal::FileWaveform* file = nullptr; ///< Stable pointer to the finite sampled waveform, if any.
+		const fers_signal::SfcwWaveform* sfcw = nullptr; ///< Stable pointer to the stepped-frequency waveform, if any.
 		RealType chirp_duration = 0.0; ///< Cached FMCW chirp duration in seconds.
 		RealType chirp_period = 0.0; ///< Cached FMCW chirp period in seconds.
 		RealType chirp_rate = 0.0; ///< Cached FMCW chirp rate in hertz per second.
@@ -147,14 +148,38 @@ namespace core
 		FmcwTriangleBoundaryTracker triangle;
 	};
 
+	/// One coarsely-sampled propagation path's two bracketing samples, used to linearly interpolate
+	/// its delay/gain for every full-rate sample between them (CW coarse-rate sampling). `lo`/`hi`
+	/// are always both populated once a path is tracked at all - either real coarse samples, or a
+	/// synthetic zero-gain taper point (mirroring `serial::Response`'s lead/trail tapers) when the
+	/// path has just appeared or is about to disappear, so appearance/disappearance fades smoothly
+	/// rather than snapping. `gain_phase` is this path's own (slowly-varying antenna/RCS/
+	/// polarization) phase, unwrapped across samples - not the fast carrier phase, which is
+	/// evaluated separately at full rate.
+	struct CoarsePathSample
+	{
+		RealType t_lo = 0.0;
+		RealType delay_lo = 0.0;
+		RealType gain_mag_lo = 0.0;
+		RealType gain_phase_lo = 0.0;
+		RealType t_hi = 0.0;
+		RealType delay_hi = 0.0;
+		RealType gain_mag_hi = 0.0;
+		RealType gain_phase_hi = 0.0;
+	};
+
 	/// Per-receiver FMCW tracker state for direct and reflected streaming paths.
 	struct ReceiverTrackerCache
 	{
-		std::vector<FmcwChirpBoundaryTracker> direct; ///< Trackers for direct paths by source index.
-		std::vector<std::vector<FmcwChirpBoundaryTracker>> reflected; ///< Trackers for reflected paths.
+		/// Trackers for all paths by source index and path_id.
+		std::vector<std::unordered_map<uint64_t, FmcwChirpBoundaryTracker>> path_trackers;
 		std::vector<FmcwChirpBoundaryTracker> dechirp_reference; ///< Trackers for receiver LO source segments.
 		std::size_t active_dechirp_source_index = 0; ///< Monotonic cursor for receiver LO source segments.
 		std::optional<RealType> last_dechirp_time = std::nullopt; ///< Last sample time used by the LO cursor.
+
+		/// Coarse-rate CW sampling extrapolation state for all paths, by source index and path_id.
+		/// Only populated when CW coarse sampling is enabled; otherwise stays empty.
+		std::vector<std::unordered_map<uint64_t, CoarsePathSample>> coarse_path_samples;
 	};
 
 	/**

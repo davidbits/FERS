@@ -18,7 +18,6 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
-#include <future>
 #include <limits>
 #include <queue>
 #include <stdexcept>
@@ -26,7 +25,6 @@
 #include <vector>
 
 #include "core/parameters.h"
-#include "core/thread_pool.h"
 #include "noise/noise_generators.h"
 #include "serial/response.h"
 
@@ -91,14 +89,21 @@ namespace
 	void processResponse(const serial::Response* resp, std::vector<ComplexType>& localWindow, const RealType rate,
 						 const RealType start, const RealType fracDelay, const std::size_t localWindowSize)
 	{
-		unsigned psize = 0;
-		RealType prate = std::numeric_limits<RealType>::quiet_NaN();
-		const auto array = resp->renderBinary(prate, psize, fracDelay);
+		const auto sample_count = static_cast<std::size_t>(std::ceil(resp->getRxDuration() * rate));
+		if (sample_count == 0)
+		{
+			// Notably, response always adds a leading and trailing zero point a nonzero amount of time away.
+			// This is assuming params::rate() and params::simSamplingRate() are nonzero - both are checked.
+			throw std::logic_error("Response duration and output sample rate should always be nonzero.");
+		}
+
+		const auto array = resp->renderSlice(rate, resp->startTime(), sample_count, fracDelay);
+
 		int const start_sample = static_cast<int>(std::round(rate * (resp->startTime() - start)));
 		const auto roffset = start_sample < 0 ? static_cast<std::size_t>(-start_sample) : std::size_t{0};
 		const auto start_offset = static_cast<std::size_t>(std::max(start_sample, 0));
 
-		for (std::size_t i = roffset; i < psize && i + start_offset < localWindowSize; ++i)
+		for (std::size_t i = roffset; i < array.size() && i + start_offset < localWindowSize; ++i)
 		{
 			localWindow[i + start_offset] += array[i];
 		}

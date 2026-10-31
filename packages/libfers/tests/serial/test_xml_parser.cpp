@@ -1,6 +1,8 @@
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/matchers/catch_matchers_floating_point.hpp>
 #include <catch2/matchers/catch_matchers_string.hpp>
 #include <chrono>
+#include <cmath>
 #include <filesystem>
 #include <fstream>
 #include <highfive/highfive.hpp>
@@ -9,9 +11,12 @@
 
 #include "core/parameters.h"
 #include "core/world.h"
+#include "radar/target.h"
 #include "serial/xml_parser.h"
+#include "serial/xml_serializer.h"
 
 using Catch::Matchers::ContainsSubstring;
+using Catch::Matchers::WithinAbs;
 
 namespace
 {
@@ -180,10 +185,103 @@ TEST_CASE("parseSimulation resolves relative CW and FMCW HDF5 waveform files",
 	REQUIRE(world.getWaveforms().size() == 2u);
 	REQUIRE(world.findWaveformByName("FileCw")->isCw());
 	REQUIRE(world.findWaveformByName("FileFmcw")->isFmcwFamily());
-	REQUIRE(world.findWaveformByName("FileCw")->getFilename() == hdf5_path.string());
-	REQUIRE(world.findWaveformByName("FileFmcw")->getFilename() == hdf5_path.string());
+	REQUIRE(world.findWaveformByName("FileCw")->getFileWaveform()->getFilename() == hdf5_path.string());
+	REQUIRE(world.findWaveformByName("FileFmcw")->getFileWaveform()->getFilename() == hdf5_path.string());
 	std::error_code ec;
 	std::filesystem::remove_all(directory, ec);
+}
+
+TEST_CASE("fersxml round-trips mesh, material (including PEC), geometry, and raytracing propagation",
+		  "[serial][xml_parser][xml_serializer]")
+{
+	ParamGuard const guard;
+	core::World world;
+	std::mt19937 seeder(42);
+
+	std::string const xml = R"(<?xml version="1.0" encoding="UTF-8"?>
+		<simulation name="RoundTrip">
+		  <parameters>
+		    <starttime>0</starttime>
+		    <endtime>1</endtime>
+		    <rate>1000</rate>
+		    <propagation>
+		      <raytracing scatter_limit="7" boresight_width="12.5"
+		                  boresight_tube_solid_angle="3e-7" off_boresight_tube_solid_angle="2e-4"
+		                  prune_below_max_db="60"/>
+		    </propagation>
+		  </parameters>
+		  <mesh name="Cube" filename="cube.obj"/>
+		  <material name="PEC">
+		    <relative_permittivity>1</relative_permittivity>
+		    <conductivity>inf</conductivity>
+		  </material>
+		  <platform name="p1">
+		    <motionpath interpolation="static">
+		      <positionwaypoint><x>0</x><y>0</y><altitude>0</altitude><time>0</time></positionwaypoint>
+		    </motionpath>
+		    <fixedrotation>
+		      <startazimuth>0</startazimuth><startelevation>0</startelevation>
+		      <azimuthrate>0</azimuthrate><elevationrate>0</elevationrate>
+		    </fixedrotation>
+		    <target name="tgt1">
+		      <rcs type="isotropic"><value>1</value></rcs>
+		      <geometry mesh="Cube" material="PEC"/>
+		    </target>
+		    <target name="tgt2">
+		      <geometry mesh="Cube" material="PEC"/>
+		    </target>
+		  </platform>
+		</simulation>)";
+
+	REQUIRE_NOTHROW(serial::parseSimulationFromString(xml, &world, true, seeder));
+
+	// Serialize back out and re-parse through the full validated pipeline (DTD + XSD + semantic parse).
+	std::string const roundtripped = serial::world_to_xml_string(world);
+
+	core::World world2;
+	std::mt19937 seeder2(42);
+	REQUIRE_NOTHROW(serial::parseSimulationFromString(roundtripped, &world2, true, seeder2));
+
+	REQUIRE(params::params.propagation_model == params::PropagationModelKind::SbrRayTracing);
+	REQUIRE(params::params.ray_tracing_params.scatter_limit == 7);
+	REQUIRE_THAT(params::params.ray_tracing_params.boresight_width, WithinAbs(12.5 * PI / 180.0, 1e-9));
+	REQUIRE_THAT(params::params.ray_tracing_params.boresight_tube_solid_angle, WithinAbs(3e-7, 1e-13));
+	REQUIRE_THAT(params::params.ray_tracing_params.off_boresight_tube_solid_angle, WithinAbs(2e-4, 1e-10));
+	REQUIRE(params::params.ray_tracing_params.prune_below_max_db.has_value());
+	REQUIRE_THAT(params::params.ray_tracing_params.prune_below_max_db.value(), WithinAbs(60.0, 1e-9));
+
+	REQUIRE(world2.getMeshes().size() == 1);
+	const auto& mesh2 = world2.getMeshes().begin()->second;
+	REQUIRE(mesh2.name == "Cube");
+	REQUIRE(mesh2.filename == "cube.obj");
+
+	REQUIRE(world2.getMaterials().size() == 1);
+	const auto& material2 = world2.getMaterials().begin()->second;
+	REQUIRE(material2.name == "PEC");
+	REQUIRE(std::isinf(material2.conductivity));
+
+	REQUIRE(world2.getTargets().size() == 2);
+	const radar::Target* tgt1 = nullptr;
+	const radar::Target* tgt2 = nullptr;
+	for (const auto& tgt : world2.getTargets())
+	{
+		(tgt->getName() == "tgt1" ? tgt1 : tgt2) = tgt.get();
+	}
+	REQUIRE(tgt1 != nullptr);
+	REQUIRE(tgt2 != nullptr);
+
+	const auto& geometry1 = tgt1->getGeometry();
+	REQUIRE(geometry1.has_value());
+	REQUIRE(geometry1.value().mesh->name == "Cube");
+	REQUIRE(geometry1.value().material->name == "PEC");
+	REQUIRE(tgt1->getRcsSpec() != nullptr);
+
+	// tgt2 has geometry but no <rcs>: round-trips with no RCS spec, still fully resolving its geometry.
+	const auto& geometry2 = tgt2->getGeometry();
+	REQUIRE(geometry2.has_value());
+	REQUIRE(geometry2.value().mesh->name == "Cube");
+	REQUIRE(geometry2.value().material->name == "PEC");
+	REQUIRE(tgt2->getRcsSpec() == nullptr);
 }
 
 TEST_CASE("parseSimulation throws on missing file", "[serial][xml_parser]")

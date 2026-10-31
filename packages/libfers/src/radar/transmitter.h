@@ -20,7 +20,7 @@
 
 namespace fers_signal
 {
-	class FmcwChirpSignal;
+	class FmcwChirpWaveform;
 	class RadarSignal;
 }
 
@@ -72,7 +72,7 @@ namespace radar
 		[[nodiscard]] fers_signal::RadarSignal* getSignal() const noexcept { return _signal; }
 
 		/// Gets the FMCW chirp signal when this transmitter uses one.
-		[[nodiscard]] const fers_signal::FmcwChirpSignal* getFmcwSignal() const noexcept;
+		[[nodiscard]] const fers_signal::FmcwChirpWaveform* getFmcwSignal() const noexcept;
 
 		/// Returns true when the transmitter uses a continuous streaming mode.
 		[[nodiscard]] bool isStreamingMode() const noexcept

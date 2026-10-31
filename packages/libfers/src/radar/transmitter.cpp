@@ -17,9 +17,9 @@
 
 namespace radar
 {
-	const fers_signal::FmcwChirpSignal* Transmitter::getFmcwSignal() const noexcept
+	const fers_signal::FmcwChirpWaveform* Transmitter::getFmcwSignal() const noexcept
 	{
-		return (_signal != nullptr) ? _signal->getFmcwChirpSignal() : nullptr;
+		return (_signal != nullptr) ? _signal->getFmcwChirpWaveform() : nullptr;
 	}
 
 	void Transmitter::setPrf(const RealType mprf) noexcept

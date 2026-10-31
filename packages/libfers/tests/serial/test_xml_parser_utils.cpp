@@ -17,6 +17,7 @@
 #include "radar/target.h"
 #include "radar/transmitter.h"
 #include "serial/libxml_wrapper.h"
+#include "serial/waveform_factory.h"
 #include "serial/xml_parser_utils.h"
 #include "signal/radar_signal.h"
 #include "timing/prototype_timing.h"
@@ -71,10 +72,17 @@ namespace
 	{
 		serial::xml_parser_utils::AssetLoaders loaders;
 		loaders.loadWaveform = [](const std::string& name, const std::filesystem::path&, RealType power,
-								  RealType carrierFreq, SimId id, const fers_signal::FileWaveformKind kind)
+								  RealType carrierFreq, SimId id, const serial::FileWaveformRequestKind kind)
 		{
-			auto sig = std::make_unique<fers_signal::FileSignal>(kind);
-			return std::make_unique<fers_signal::RadarSignal>(name, power, carrierFreq, 1.0, std::move(sig), id);
+			if (kind == serial::FileWaveformRequestKind::Pulsed)
+			{
+				return std::make_unique<fers_signal::RadarSignal>(name, power, carrierFreq,
+																  fers_signal::PulseWaveform{}, id);
+			}
+			fers_signal::FileWaveform wave{};
+			wave.setKind(kind == serial::FileWaveformRequestKind::Cw ? fers_signal::FileWaveformKind::Cw
+																	 : fers_signal::FileWaveformKind::Fmcw);
+			return std::make_unique<fers_signal::RadarSignal>(name, power, carrierFreq, std::move(wave), id);
 		};
 		loaders.loadXmlAntenna = [](const std::string& name, const std::string&, SimId id)
 		{ return std::make_unique<antenna::Isotropic>(name, id); };
@@ -112,6 +120,39 @@ TEST_CASE("get_child_real_type extracts floating point values", "[serial][xml_pa
 
 	auto missing_doc = loadXml("<root></root>");
 	REQUIRE_THROWS_AS(serial::xml_parser_utils::get_child_real_type(missing_doc.getRootElement(), "val"), XmlException);
+}
+
+TEST_CASE("parseComplexLiteral accepts the documented grammar", "[serial][xml_parser_utils]")
+{
+	using serial::xml_parser_utils::parseComplexLiteral;
+
+	auto check = [](const std::string& literal, const double expected_re, const double expected_im)
+	{
+		const auto value = parseComplexLiteral(literal);
+		REQUIRE_THAT(value.real(), WithinAbs(expected_re, 1e-9));
+		REQUIRE_THAT(value.imag(), WithinAbs(expected_im, 1e-9));
+	};
+
+	check("1.0+0.0i", 1.0, 0.0);
+	check("1.0", 1.0, 0.0);
+	check("0.5i", 0.0, 0.5);
+	check("-0.5j", 0.0, -0.5);
+	check("1.0 + j0.5", 1.0, 0.5);
+	check("-0.5 - i2", -0.5, -2.0);
+	check("1e-3+2e-4i", 1e-3, 2e-4);
+	check("-1E2j", 0.0, -100.0);
+}
+
+TEST_CASE("parseComplexLiteral rejects malformed literals", "[serial][xml_parser_utils]")
+{
+	using serial::xml_parser_utils::parseComplexLiteral;
+
+	REQUIRE_THROWS_AS(parseComplexLiteral(""), XmlException);
+	REQUIRE_THROWS_AS(parseComplexLiteral("abc"), XmlException);
+	REQUIRE_THROWS_AS(parseComplexLiteral("1.0+2.0"), XmlException);
+	REQUIRE_THROWS_AS(parseComplexLiteral("1.0i+2.0i"), XmlException);
+	REQUIRE_THROWS_AS(parseComplexLiteral("j1i"), XmlException);
+	REQUIRE_THROWS_AS(parseComplexLiteral("1.0+0.0i+"), XmlException);
 }
 
 TEST_CASE("get_attribute_bool extracts boolean values safely", "[serial][xml_parser_utils]")
@@ -238,6 +279,113 @@ TEST_CASE("parseParameters uses defaults without warnings for omitted optional p
 	REQUIRE(p.adc_bits == 0);
 	REQUIRE(p.oversample_ratio == 1);
 	REQUIRE(capture.str().empty());
+	REQUIRE(p.propagation_model == params::PropagationModelKind::RcsPointScatter);
+	REQUIRE(p.point_scatterer_params.polarimetric == false);
+}
+
+TEST_CASE("parseParameters extracts the pointscatter polarimetric flag", "[serial][xml_parser_utils]")
+{
+	ParamGuard const guard;
+	const auto p = parseParametersXml("<parameters>"
+									  "  <starttime>0</starttime><endtime>1</endtime><rate>1000</rate>"
+									  "  <propagation><pointscatter polarimetric=\"true\"/></propagation>"
+									  "</parameters>");
+
+	REQUIRE(p.propagation_model == params::PropagationModelKind::RcsPointScatter);
+	REQUIRE(p.point_scatterer_params.polarimetric == true);
+}
+
+TEST_CASE("parseParameters extracts the raytracing propagation model and its sub-parameters",
+		  "[serial][xml_parser_utils]")
+{
+	ParamGuard const guard;
+	const auto p = parseParametersXml(
+		"<parameters>"
+		"  <starttime>0</starttime><endtime>1</endtime><rate>1000</rate>"
+		"  <propagation><raytracing scatter_limit=\"5\" boresight_width=\"20\" "
+		"boresight_tube_solid_angle=\"1e-6\" off_boresight_tube_solid_angle=\"1e-3\" "
+		"prune_below_max_db=\"60\"/></propagation>"
+		"</parameters>");
+
+	REQUIRE(p.propagation_model == params::PropagationModelKind::SbrRayTracing);
+	REQUIRE(p.ray_tracing_params.scatter_limit == 5);
+	// Default rotation_angle_unit is degrees, so boresight_width="20" is 20 degrees.
+	REQUIRE_THAT(p.ray_tracing_params.boresight_width, WithinAbs(20.0 * PI / 180.0, 1e-9));
+	REQUIRE_THAT(p.ray_tracing_params.boresight_tube_solid_angle, WithinAbs(1e-6, 1e-12));
+	REQUIRE_THAT(p.ray_tracing_params.off_boresight_tube_solid_angle, WithinAbs(1e-3, 1e-12));
+	REQUIRE(p.ray_tracing_params.prune_below_max_db.has_value());
+	REQUIRE_THAT(p.ray_tracing_params.prune_below_max_db.value(), WithinAbs(60.0, 1e-9));
+}
+
+TEST_CASE("parseParameters keeps ray-tracing sub-parameter defaults when omitted", "[serial][xml_parser_utils]")
+{
+	ParamGuard const guard;
+	const params::Parameters defaults;
+	const auto p = parseParametersXml("<parameters>"
+									  "  <starttime>0</starttime><endtime>1</endtime><rate>1000</rate>"
+									  "  <propagation><raytracing/></propagation>"
+									  "</parameters>");
+
+	REQUIRE(p.propagation_model == params::PropagationModelKind::SbrRayTracing);
+	REQUIRE(p.ray_tracing_params.scatter_limit == defaults.ray_tracing_params.scatter_limit);
+	REQUIRE_THAT(p.ray_tracing_params.boresight_width, WithinAbs(defaults.ray_tracing_params.boresight_width, 1e-12));
+	REQUIRE_THAT(p.ray_tracing_params.boresight_tube_solid_angle,
+				 WithinAbs(defaults.ray_tracing_params.boresight_tube_solid_angle, 1e-18));
+	REQUIRE_THAT(p.ray_tracing_params.off_boresight_tube_solid_angle,
+				 WithinAbs(defaults.ray_tracing_params.off_boresight_tube_solid_angle, 1e-15));
+	REQUIRE_FALSE(p.ray_tracing_params.prune_below_max_db.has_value());
+}
+
+TEST_CASE("parseParameters rejects a boresight_width of a full turn or more", "[serial][xml_parser_utils]")
+{
+	ParamGuard const guard;
+	REQUIRE_THROWS_AS(parseInvalidParametersXml("<parameters>"
+												"  <starttime>0</starttime><endtime>1</endtime><rate>1000</rate>"
+												"  <propagation><raytracing boresight_width=\"360\"/></propagation>"
+												"</parameters>"),
+					  std::exception);
+}
+
+TEST_CASE("parseParameters rejects a non-positive prune_below_max_db", "[serial][xml_parser_utils]")
+{
+	ParamGuard const guard;
+	REQUIRE_THROWS_AS(
+		parseInvalidParametersXml("<parameters>"
+								  "  <starttime>0</starttime><endtime>1</endtime><rate>1000</rate>"
+								  "  <propagation><raytracing prune_below_max_db=\"0\"/></propagation>"
+								  "</parameters>"),
+		std::exception);
+}
+
+TEST_CASE("parseParameters selects the pointscatter propagation model", "[serial][xml_parser_utils]")
+{
+	ParamGuard const guard;
+	const auto p = parseParametersXml("<parameters>"
+									  "  <starttime>0</starttime><endtime>1</endtime><rate>1000</rate>"
+									  "  <propagation><pointscatter/></propagation>"
+									  "</parameters>");
+
+	REQUIRE(p.propagation_model == params::PropagationModelKind::RcsPointScatter);
+}
+
+TEST_CASE("parseParameters rejects <propagation> with neither sub-element", "[serial][xml_parser_utils]")
+{
+	ParamGuard const guard;
+	REQUIRE_THROWS_AS(parseInvalidParametersXml("<parameters>"
+												"  <starttime>0</starttime><endtime>1</endtime><rate>1000</rate>"
+												"  <propagation/>"
+												"</parameters>"),
+					  XmlException);
+}
+
+TEST_CASE("parseParameters rejects <propagation> with both sub-elements", "[serial][xml_parser_utils]")
+{
+	ParamGuard const guard;
+	REQUIRE_THROWS_AS(parseInvalidParametersXml("<parameters>"
+												"  <starttime>0</starttime><endtime>1</endtime><rate>1000</rate>"
+												"  <propagation><pointscatter/><raytracing/></propagation>"
+												"</parameters>"),
+					  XmlException);
 }
 
 TEST_CASE("parseParameters defaults omitted origin altitude to zero", "[serial][xml_parser_utils]")
@@ -365,8 +513,8 @@ TEST_CASE("parseWaveform handles CW and delegates file loading", "[serial][xml_p
 		serial::xml_parser_utils::parseWaveform(doc.getRootElement(), ctx);
 		const auto* wave = world.getWaveforms().begin()->second.get();
 		REQUIRE(wave->isCw());
-		REQUIRE(wave->getFileSignal() != nullptr);
-		REQUIRE(wave->getFileSignal()->getKind() == fers_signal::FileWaveformKind::Cw);
+		REQUIRE(wave->getFileWaveform() != nullptr);
+		REQUIRE(wave->getFileWaveform()->getKind() == fers_signal::FileWaveformKind::Cw);
 	}
 
 	SECTION("FMCW from file")
@@ -376,8 +524,8 @@ TEST_CASE("parseWaveform handles CW and delegates file loading", "[serial][xml_p
 		serial::xml_parser_utils::parseWaveform(doc.getRootElement(), ctx);
 		const auto* wave = world.getWaveforms().begin()->second.get();
 		REQUIRE(wave->isFmcwFamily());
-		REQUIRE(wave->getFileSignal() != nullptr);
-		REQUIRE(wave->getFileSignal()->getKind() == fers_signal::FileWaveformKind::Fmcw);
+		REQUIRE(wave->getFileWaveform() != nullptr);
+		REQUIRE(wave->getFileWaveform()->getKind() == fers_signal::FileWaveformKind::Fmcw);
 	}
 }
 
@@ -448,10 +596,10 @@ TEST_CASE("parseWaveform validates FMCW chirp schema constraints", "[serial][xml
 		serial::xml_parser_utils::parseWaveform(doc.getRootElement(), ctx);
 		REQUIRE(world.getWaveforms().size() == 1);
 		const auto* wave = world.getWaveforms().begin()->second.get();
-		const auto* fmcw = wave->getFmcwChirpSignal();
+		const auto* fmcw = wave->getFmcwChirpWaveform();
 		REQUIRE(fmcw != nullptr);
 		REQUIRE(fmcw->isDownChirp());
-		REQUIRE_THAT(wave->getLength(), WithinAbs(1.0e-3, 1.0e-12));
+		REQUIRE_THAT(fmcw->getChirpDuration(), WithinAbs(1.0e-3, 1.0e-12));
 	}
 
 	SECTION("well-formed FMCW triangle waveform")
@@ -470,10 +618,10 @@ TEST_CASE("parseWaveform validates FMCW chirp schema constraints", "[serial][xml
 		serial::xml_parser_utils::parseWaveform(doc.getRootElement(), ctx);
 		REQUIRE(world.getWaveforms().size() == 1);
 		const auto* wave = world.getWaveforms().begin()->second.get();
-		const auto* triangle = wave->getFmcwTriangleSignal();
+		const auto* triangle = wave->getFmcwTriangleWaveform();
 		REQUIRE(triangle != nullptr);
 		REQUIRE(wave->isFmcwFamily());
-		REQUIRE_THAT(wave->getLength(), WithinAbs(2.0e-3, 1.0e-12));
+		REQUIRE_THAT(triangle->getTrianglePeriod(), WithinAbs(2.0e-3, 1.0e-12));
 		REQUIRE(triangle->getTriangleCount().has_value());
 		REQUIRE(triangle->getTriangleCount().value_or(0u) == 4u);
 	}
@@ -496,10 +644,10 @@ TEST_CASE("parseWaveform validates FMCW chirp schema constraints", "[serial][xml
 		serial::xml_parser_utils::parseWaveform(doc.getRootElement(), ctx);
 		REQUIRE(world.getWaveforms().size() == 1);
 		const auto* wave = world.getWaveforms().begin()->second.get();
-		const auto* sfcw = wave->getSteppedFrequencySignal();
+		const auto* sfcw = wave->getSfcwWaveform();
 		REQUIRE(sfcw != nullptr);
-		REQUIRE(wave->isSteppedFrequency());
-		REQUIRE_THAT(wave->getLength(), WithinAbs(1.0e-4, 1.0e-12));
+		REQUIRE(wave->isSfcw());
+		REQUIRE_THAT(sfcw->getDwellTime(), WithinAbs(1.0e-4, 1.0e-12));
 		REQUIRE_THAT(sfcw->getStartFrequencyOffset(), WithinAbs(-1.0e6, 1e-6));
 		REQUIRE_THAT(sfcw->getStepSize(), WithinAbs(2.0e5, 1e-9));
 		REQUIRE(sfcw->getStepCount() == 8u);
@@ -721,6 +869,59 @@ TEST_CASE("parseAntenna instantiates correct antenna types", "[serial][xml_parse
 	}
 }
 
+TEST_CASE("parseAntenna reads boresight_polarisation", "[serial][xml_parser_utils]")
+{
+	core::World world;
+	serial::xml_parser_utils::ParserContext ctx;
+	ctx.world = &world;
+	ctx.loaders = createMockLoaders();
+
+	SECTION("Explicit h and v")
+	{
+		auto doc = loadXml(
+			"<antenna name=\"a\" pattern=\"isotropic\"><boresight_polarisation h=\"0.6+0i\" "
+			"v=\"0.8i\"/></antenna>");
+		serial::xml_parser_utils::parseAntenna(doc.getRootElement(), ctx);
+		const auto pol = world.getAntennas().begin()->second->getPolarisation();
+		REQUIRE_THAT(pol.horizontal.real(), WithinAbs(0.6, 1e-9));
+		REQUIRE_THAT(pol.vertical.imag(), WithinAbs(0.8, 1e-9));
+	}
+
+	SECTION("Omitted v defaults to zero")
+	{
+		auto doc =
+			loadXml("<antenna name=\"a\" pattern=\"isotropic\"><boresight_polarisation h=\"1\"/></antenna>");
+		serial::xml_parser_utils::parseAntenna(doc.getRootElement(), ctx);
+		const auto pol = world.getAntennas().begin()->second->getPolarisation();
+		REQUIRE_THAT(pol.horizontal.real(), WithinAbs(1.0, 1e-9));
+		REQUIRE_THAT(pol.vertical.real(), WithinAbs(0.0, 1e-9));
+		REQUIRE_THAT(pol.vertical.imag(), WithinAbs(0.0, 1e-9));
+	}
+
+	SECTION("Omitted element defaults to pure horizontal")
+	{
+		auto doc = loadXml("<antenna name=\"a\" pattern=\"isotropic\"></antenna>");
+		serial::xml_parser_utils::parseAntenna(doc.getRootElement(), ctx);
+		const auto pol = world.getAntennas().begin()->second->getPolarisation();
+		REQUIRE_THAT(pol.horizontal.real(), WithinAbs(1.0, 1e-9));
+		REQUIRE_THAT(pol.vertical.real(), WithinAbs(0.0, 1e-9));
+	}
+
+	SECTION("Invalid literal warns and assumes zero for that axis")
+	{
+		LogLevelGuard const log_level(logging::Level::WARNING);
+		CerrCapture const capture;
+		auto doc = loadXml(
+			"<antenna name=\"a\" pattern=\"isotropic\"><boresight_polarisation h=\"nonsense\" "
+			"v=\"1\"/></antenna>");
+		serial::xml_parser_utils::parseAntenna(doc.getRootElement(), ctx);
+		const auto pol = world.getAntennas().begin()->second->getPolarisation();
+		REQUIRE_THAT(pol.horizontal.real(), WithinAbs(0.0, 1e-9));
+		REQUIRE_THAT(pol.vertical.real(), WithinAbs(1.0, 1e-9));
+		REQUIRE_THAT(capture.str(), ContainsSubstring("invalid"));
+	}
+}
+
 TEST_CASE("parseAntenna accepts omitted efficiency without warnings", "[serial][xml_parser_utils]")
 {
 	LogLevelGuard const log_level(logging::Level::WARNING);
@@ -876,8 +1077,7 @@ TEST_CASE("parseTransmitter resolves references and builds object with schedule"
 	ctx.master_seeder = &seeder;
 
 	// Populate dependencies
-	auto wave =
-		std::make_unique<fers_signal::RadarSignal>("w1", 1.0, 1e9, 1.0, std::make_unique<fers_signal::CwSignal>(), 10);
+	auto wave = std::make_unique<fers_signal::RadarSignal>("w1", 1.0, 1e9, fers_signal::CwWaveform{}, 10);
 	auto ant = std::make_unique<antenna::Isotropic>("a1", 20);
 	auto tim = std::make_unique<timing::PrototypeTiming>("t1", 30);
 	tim->setFrequency(1e6);
@@ -889,7 +1089,8 @@ TEST_CASE("parseTransmitter resolves references and builds object with schedule"
 	std::unordered_map<std::string, SimId> const w_refs = {{"w1", 10}};
 	std::unordered_map<std::string, SimId> const a_refs = {{"a1", 20}};
 	std::unordered_map<std::string, SimId> const t_refs = {{"t1", 30}};
-	serial::xml_parser_utils::ReferenceLookup const refs{&w_refs, &a_refs, &t_refs};
+	serial::xml_parser_utils::ReferenceLookup const refs{
+		.waveforms = &w_refs, .antennas = &a_refs, .timings = &t_refs, .meshes = nullptr, .materials = nullptr};
 
 	radar::Platform platform("plat");
 
@@ -920,8 +1121,8 @@ TEST_CASE("parseTransmitter rejects FMCW waveform and mode mismatches", "[serial
 	ctx.world = &world;
 	ctx.master_seeder = &seeder;
 
-	auto fmcw_signal = std::make_unique<fers_signal::FmcwChirpSignal>(1.0e6, 1.0e-3, 1.0e-3);
-	world.add(std::make_unique<fers_signal::RadarSignal>("fmcw_wave", 1.0, 1e9, 1.0e-3, std::move(fmcw_signal), 10));
+	world.add(std::make_unique<fers_signal::RadarSignal>("fmcw_wave", 1.0, 1e9,
+														 fers_signal::FmcwChirpWaveform(1.0e6, 1.0e-3, 1.0e-3), 10));
 	world.add(std::make_unique<antenna::Isotropic>("a1", 20));
 	auto timing_proto = std::make_unique<timing::PrototypeTiming>("t1", 30);
 	timing_proto->setFrequency(1e6);
@@ -930,7 +1131,8 @@ TEST_CASE("parseTransmitter rejects FMCW waveform and mode mismatches", "[serial
 	std::unordered_map<std::string, SimId> const w_refs = {{"fmcw_wave", 10}};
 	std::unordered_map<std::string, SimId> const a_refs = {{"a1", 20}};
 	std::unordered_map<std::string, SimId> const t_refs = {{"t1", 30}};
-	serial::xml_parser_utils::ReferenceLookup const refs{&w_refs, &a_refs, &t_refs};
+	serial::xml_parser_utils::ReferenceLookup const refs{
+		.waveforms = &w_refs, .antennas = &a_refs, .timings = &t_refs, .meshes = nullptr, .materials = nullptr};
 
 	radar::Platform platform("plat");
 
@@ -970,8 +1172,8 @@ TEST_CASE("parseTransmitter accepts native SFCW mode and rejects invalid SFCW bl
 	ctx.world = &world;
 	ctx.master_seeder = &seeder;
 
-	auto sfcw_signal = std::make_unique<fers_signal::SteppedFrequencySignal>(0.0, 1.0e5, 4, 1.0e-4, 2.0e-4);
-	world.add(std::make_unique<fers_signal::RadarSignal>("sfcw_wave", 1.0, 1e9, 1.0e-4, std::move(sfcw_signal), 10));
+	world.add(std::make_unique<fers_signal::RadarSignal>(
+		"sfcw_wave", 1.0, 1e9, fers_signal::SfcwWaveform(0.0, 1.0e5, 4, 1.0e-4, 2.0e-4), 10));
 	world.add(std::make_unique<antenna::Isotropic>("a1", 20));
 	auto timing_proto = std::make_unique<timing::PrototypeTiming>("t1", 30);
 	timing_proto->setFrequency(1e6);
@@ -980,7 +1182,8 @@ TEST_CASE("parseTransmitter accepts native SFCW mode and rejects invalid SFCW bl
 	std::unordered_map<std::string, SimId> const w_refs = {{"sfcw_wave", 10}};
 	std::unordered_map<std::string, SimId> const a_refs = {{"a1", 20}};
 	std::unordered_map<std::string, SimId> const t_refs = {{"t1", 30}};
-	serial::xml_parser_utils::ReferenceLookup const refs{&w_refs, &a_refs, &t_refs};
+	serial::xml_parser_utils::ReferenceLookup const refs{
+		.waveforms = &w_refs, .antennas = &a_refs, .timings = &t_refs, .meshes = nullptr, .materials = nullptr};
 	radar::Platform platform("plat");
 
 	auto sfcw_doc = loadXml("<transmitter name=\"tx_sfcw\" waveform=\"sfcw_wave\" antenna=\"a1\" timing=\"t1\">"
@@ -1018,8 +1221,8 @@ TEST_CASE("parseTransmitter validates FMCW schedule duration against chirp timin
 	ctx.world = &world;
 	ctx.master_seeder = &seeder;
 
-	auto fmcw_signal = std::make_unique<fers_signal::FmcwChirpSignal>(1.0e6, 1.0e-3, 2.0e-3);
-	world.add(std::make_unique<fers_signal::RadarSignal>("fmcw_wave", 1.0, 1e9, 1.0e-3, std::move(fmcw_signal), 10));
+	world.add(std::make_unique<fers_signal::RadarSignal>("fmcw_wave", 1.0, 1e9,
+														 fers_signal::FmcwChirpWaveform(1.0e6, 1.0e-3, 2.0e-3), 10));
 	world.add(std::make_unique<antenna::Isotropic>("a1", 20));
 	auto timing_proto = std::make_unique<timing::PrototypeTiming>("t1", 30);
 	timing_proto->setFrequency(1e6);
@@ -1028,7 +1231,8 @@ TEST_CASE("parseTransmitter validates FMCW schedule duration against chirp timin
 	std::unordered_map<std::string, SimId> const w_refs = {{"fmcw_wave", 10}};
 	std::unordered_map<std::string, SimId> const a_refs = {{"a1", 20}};
 	std::unordered_map<std::string, SimId> const t_refs = {{"t1", 30}};
-	serial::xml_parser_utils::ReferenceLookup const refs{&w_refs, &a_refs, &t_refs};
+	serial::xml_parser_utils::ReferenceLookup const refs{
+		.waveforms = &w_refs, .antennas = &a_refs, .timings = &t_refs, .meshes = nullptr, .materials = nullptr};
 
 	radar::Platform platform("plat");
 
@@ -1080,7 +1284,8 @@ TEST_CASE("parseReceiver resolves references and builds object with flags and sc
 	std::unordered_map<std::string, SimId> const w_refs;
 	std::unordered_map<std::string, SimId> const a_refs = {{"a1", 20}};
 	std::unordered_map<std::string, SimId> const t_refs = {{"t1", 30}};
-	serial::xml_parser_utils::ReferenceLookup const refs{&w_refs, &a_refs, &t_refs};
+	serial::xml_parser_utils::ReferenceLookup const refs{
+		.waveforms = &w_refs, .antennas = &a_refs, .timings = &t_refs, .meshes = nullptr, .materials = nullptr};
 
 	radar::Platform platform("plat");
 
@@ -1235,8 +1440,7 @@ TEST_CASE("parseMonostatic reuses one shared timing instance for a common timing
 	ctx.world = &world;
 	ctx.master_seeder = &seeder;
 
-	world.add(
-		std::make_unique<fers_signal::RadarSignal>("w1", 1.0, 1e9, 1.0, std::make_unique<fers_signal::CwSignal>(), 10));
+	world.add(std::make_unique<fers_signal::RadarSignal>("w1", 1.0, 1e9, fers_signal::CwWaveform{}, 10));
 	world.add(std::make_unique<antenna::Isotropic>("a1", 20));
 	auto timing_proto = std::make_unique<timing::PrototypeTiming>("t1", 30);
 	timing_proto->setFrequency(1e6);
@@ -1245,7 +1449,8 @@ TEST_CASE("parseMonostatic reuses one shared timing instance for a common timing
 	std::unordered_map<std::string, SimId> const w_refs = {{"w1", 10}};
 	std::unordered_map<std::string, SimId> const a_refs = {{"a1", 20}};
 	std::unordered_map<std::string, SimId> const t_refs = {{"t1", 30}};
-	serial::xml_parser_utils::ReferenceLookup const refs{&w_refs, &a_refs, &t_refs};
+	serial::xml_parser_utils::ReferenceLookup const refs{
+		.waveforms = &w_refs, .antennas = &a_refs, .timings = &t_refs, .meshes = nullptr, .materials = nullptr};
 
 	radar::Platform platform("plat");
 
@@ -1274,8 +1479,8 @@ TEST_CASE("parseMonostatic derives FMCW mode from the monostatic block without r
 	ctx.world = &world;
 	ctx.master_seeder = &seeder;
 
-	auto fmcw_signal = std::make_unique<fers_signal::FmcwChirpSignal>(1.0e6, 1.0e-3, 1.0e-3);
-	world.add(std::make_unique<fers_signal::RadarSignal>("w1", 1.0, 1e9, 1.0e-3, std::move(fmcw_signal), 10));
+	world.add(std::make_unique<fers_signal::RadarSignal>("w1", 1.0, 1e9,
+														 fers_signal::FmcwChirpWaveform(1.0e6, 1.0e-3, 1.0e-3), 10));
 	world.add(std::make_unique<antenna::Isotropic>("a1", 20));
 	auto timing_proto = std::make_unique<timing::PrototypeTiming>("t1", 30);
 	timing_proto->setFrequency(1e6);
@@ -1284,7 +1489,8 @@ TEST_CASE("parseMonostatic derives FMCW mode from the monostatic block without r
 	std::unordered_map<std::string, SimId> const w_refs = {{"w1", 10}};
 	std::unordered_map<std::string, SimId> const a_refs = {{"a1", 20}};
 	std::unordered_map<std::string, SimId> const t_refs = {{"t1", 30}};
-	serial::xml_parser_utils::ReferenceLookup const refs{&w_refs, &a_refs, &t_refs};
+	serial::xml_parser_utils::ReferenceLookup const refs{
+		.waveforms = &w_refs, .antennas = &a_refs, .timings = &t_refs, .meshes = nullptr, .materials = nullptr};
 
 	radar::Platform platform("plat");
 
@@ -1317,14 +1523,202 @@ TEST_CASE("parseTarget handles chisquare model", "[serial][xml_parser_utils]")
 					   "  <model type=\"chisquare\"><k>2.0</k></model>"
 					   "</target>");
 
-	serial::xml_parser_utils::parseTarget(doc.getRootElement(), &platform, ctx);
+	std::unordered_map<std::string, SimId> const w_refs;
+	std::unordered_map<std::string, SimId> const a_refs;
+	std::unordered_map<std::string, SimId> const t_refs;
+	std::unordered_map<std::string, SimId> const mesh_refs;
+	std::unordered_map<std::string, SimId> const material_refs;
+	serial::xml_parser_utils::ReferenceLookup const refs{&w_refs, &a_refs, &t_refs, &mesh_refs, &material_refs};
+
+	serial::xml_parser_utils::parseTarget(doc.getRootElement(), &platform, ctx, refs);
 	REQUIRE(world.getTargets().size() == 1);
 
 	auto* tgt = world.getTargets().front().get();
-	const auto* model = dynamic_cast<const radar::RcsChiSquare*>(tgt->getFluctuationModel());
+	const auto* model = dynamic_cast<const radar::RcsChiSquare*>(tgt->getRcsSpec()->getFluctuationModel());
 	REQUIRE(model != nullptr);
-	REQUIRE(tgt->getSeed() == expected_seed);
+	REQUIRE(tgt->getRcsSpec()->getSeed() == expected_seed);
 	REQUIRE_THAT(model->getK(), WithinAbs(2.0, 1e-5));
+}
+
+TEST_CASE("parseMesh resolves the path within the meshes/ directory", "[serial][xml_parser_utils]")
+{
+	core::World world;
+	serial::xml_parser_utils::ParserContext ctx;
+	ctx.world = &world;
+	ctx.base_dir = std::filesystem::path("/scenario/dir");
+
+	auto doc = loadXml("<mesh name=\"Cube\" filename=\"cube.obj\"/>");
+	serial::xml_parser_utils::parseMesh(doc.getRootElement(), ctx);
+
+	REQUIRE(world.getMeshes().size() == 1);
+	const auto& mesh = world.getMeshes().begin()->second;
+	REQUIRE(mesh.name == "Cube");
+	REQUIRE(mesh.path == std::filesystem::path("/scenario/dir/meshes/cube.obj"));
+}
+
+TEST_CASE("parseMaterial reads relative_permittivity/conductivity", "[serial][xml_parser_utils]")
+{
+	core::World world;
+	serial::xml_parser_utils::ParserContext ctx;
+	ctx.world = &world;
+
+	auto doc = loadXml("<material name=\"Aluminium\">"
+					   "  <relative_permittivity>0.9</relative_permittivity>"
+					   "  <conductivity>0.1</conductivity>"
+					   "</material>");
+	serial::xml_parser_utils::parseMaterial(doc.getRootElement(), ctx);
+
+	REQUIRE(world.getMaterials().size() == 1);
+	const auto& material = world.getMaterials().begin()->second;
+	REQUIRE(material.name == "Aluminium");
+	REQUIRE_THAT(material.relative_permittivity, WithinAbs(0.9, 1e-6));
+	REQUIRE_THAT(material.conductivity, WithinAbs(0.1, 1e-6));
+}
+
+TEST_CASE("parseMaterial rejects a material missing relative_permittivity or conductivity",
+		  "[serial][xml_parser_utils]")
+{
+	core::World world;
+	serial::xml_parser_utils::ParserContext ctx;
+	ctx.world = &world;
+
+	REQUIRE_THROWS_AS(
+		serial::xml_parser_utils::parseMaterial(loadXml("<material name=\"Aluminium\"/>").getRootElement(), ctx),
+		XmlException);
+	REQUIRE_THROWS_AS(
+		serial::xml_parser_utils::parseMaterial(
+			loadXml("<material name=\"Aluminium\"><relative_permittivity>0.9</relative_permittivity></material>")
+				.getRootElement(),
+			ctx),
+		XmlException);
+	REQUIRE_THROWS_AS(
+		serial::xml_parser_utils::parseMaterial(
+			loadXml("<material name=\"Aluminium\"><conductivity>0.9</conductivity></material>").getRootElement(),
+			ctx),
+		XmlException);
+}
+
+TEST_CASE("parseTarget resolves an optional geometry element", "[serial][xml_parser_utils]")
+{
+	core::World world;
+	std::mt19937 seeder(42);
+	serial::xml_parser_utils::ParserContext ctx;
+	ctx.world = &world;
+	ctx.master_seeder = &seeder;
+	radar::Platform platform("plat");
+
+	world.add(core::MeshAsset{.id = 10, .name = "Cube", .path = "/scenario/dir/meshes/cube.obj", .filename = ""});
+	world.add(
+		core::MaterialAsset{.id = 20, .name = "Aluminium", .relative_permittivity = 1.0, .conductivity = 0.0});
+
+	std::unordered_map<std::string, SimId> const w_refs;
+	std::unordered_map<std::string, SimId> const a_refs;
+	std::unordered_map<std::string, SimId> const t_refs;
+	std::unordered_map<std::string, SimId> const mesh_refs = {{"Cube", 10}};
+	std::unordered_map<std::string, SimId> const material_refs = {{"Aluminium", 20}};
+	serial::xml_parser_utils::ReferenceLookup const refs{&w_refs, &a_refs, &t_refs, &mesh_refs, &material_refs};
+
+	SECTION("Target with geometry resolves the mesh and material")
+	{
+		auto doc = loadXml("<target name=\"tgt1\">"
+						   "  <rcs type=\"isotropic\"><value>1.0</value></rcs>"
+						   "  <geometry mesh=\"Cube\" material=\"Aluminium\"/>"
+						   "</target>");
+
+		serial::xml_parser_utils::parseTarget(doc.getRootElement(), &platform, ctx, refs);
+		REQUIRE(world.getTargets().size() == 1);
+
+		auto* tgt = world.getTargets().front().get();
+		const auto& geometry = tgt->getGeometry();
+		REQUIRE(geometry.has_value());
+		REQUIRE(geometry.value().mesh->name == "Cube");
+		REQUIRE(geometry.value().material->name == "Aluminium");
+	}
+
+	SECTION("Target without geometry has no value")
+	{
+		auto doc = loadXml("<target name=\"tgt1\">"
+						   "  <rcs type=\"isotropic\"><value>1.0</value></rcs>"
+						   "</target>");
+
+		serial::xml_parser_utils::parseTarget(doc.getRootElement(), &platform, ctx, refs);
+		REQUIRE(world.getTargets().size() == 1);
+		REQUIRE_FALSE(world.getTargets().front()->getGeometry().has_value());
+	}
+
+	SECTION("Target with an unknown mesh reference throws")
+	{
+		auto doc = loadXml("<target name=\"tgt1\">"
+						   "  <rcs type=\"isotropic\"><value>1.0</value></rcs>"
+						   "  <geometry mesh=\"Missing\" material=\"Aluminium\"/>"
+						   "</target>");
+
+		REQUIRE_THROWS_AS(serial::xml_parser_utils::parseTarget(doc.getRootElement(), &platform, ctx, refs),
+						  XmlException);
+	}
+}
+
+TEST_CASE("parseTarget resolves an optional rcs element", "[serial][xml_parser_utils]")
+{
+	core::World world;
+	std::mt19937 seeder(42);
+	serial::xml_parser_utils::ParserContext ctx;
+	ctx.world = &world;
+	ctx.master_seeder = &seeder;
+	radar::Platform platform("plat");
+
+	world.add(core::MeshAsset{.id = 10, .name = "Cube", .path = "/scenario/dir/meshes/cube.obj", .filename = "cube.obj"});
+	world.add(
+		core::MaterialAsset{.id = 20, .name = "Aluminium", .relative_permittivity = 1.0, .conductivity = 0.0});
+
+	std::unordered_map<std::string, SimId> const w_refs;
+	std::unordered_map<std::string, SimId> const a_refs;
+	std::unordered_map<std::string, SimId> const t_refs;
+	std::unordered_map<std::string, SimId> const mesh_refs = {{"Cube", 10}};
+	std::unordered_map<std::string, SimId> const material_refs = {{"Aluminium", 20}};
+	serial::xml_parser_utils::ReferenceLookup const refs{&w_refs, &a_refs, &t_refs, &mesh_refs, &material_refs};
+
+	SECTION("Target with rcs has an RCS spec as before")
+	{
+		auto doc = loadXml("<target name=\"tgt1\"><rcs type=\"isotropic\"><value>1.0</value></rcs></target>");
+
+		serial::xml_parser_utils::parseTarget(doc.getRootElement(), &platform, ctx, refs);
+		REQUIRE(world.getTargets().size() == 1);
+		REQUIRE(world.getTargets().front()->getRcsSpec() != nullptr);
+	}
+
+	SECTION("Target without rcs has no RCS spec, but still gets added")
+	{
+		auto doc = loadXml("<target name=\"tgt1\">"
+						   "  <geometry mesh=\"Cube\" material=\"Aluminium\"/>"
+						   "</target>");
+
+		serial::xml_parser_utils::parseTarget(doc.getRootElement(), &platform, ctx, refs);
+		REQUIRE(world.getTargets().size() == 1);
+		REQUIRE(world.getTargets().front()->getRcsSpec() == nullptr);
+		REQUIRE(world.getTargets().front()->getGeometry().has_value());
+	}
+
+	SECTION("Target with model but no rcs throws")
+	{
+		auto doc = loadXml("<target name=\"tgt1\">"
+						   "  <model type=\"chisquare\"><k>2.0</k></model>"
+						   "  <geometry mesh=\"Cube\" material=\"Aluminium\"/>"
+						   "</target>");
+
+		REQUIRE_THROWS_AS(serial::xml_parser_utils::parseTarget(doc.getRootElement(), &platform, ctx, refs),
+						  XmlException);
+	}
+
+	SECTION("Target with neither rcs nor geometry doesn't throw")
+	{
+		auto doc = loadXml("<target name=\"tgt1\"/>");
+
+		REQUIRE_NOTHROW(serial::xml_parser_utils::parseTarget(doc.getRootElement(), &platform, ctx, refs));
+		REQUIRE(world.getTargets().size() == 1);
+		REQUIRE(world.getTargets().front()->getRcsSpec() == nullptr);
+		REQUIRE_FALSE(world.getTargets().front()->getGeometry().has_value());
+	}
 }
 
 TEST_CASE("parsePlatform prefers rotationpath over fixedrotation", "[serial][xml_parser_utils]")
@@ -1336,7 +1730,8 @@ TEST_CASE("parsePlatform prefers rotationpath over fixedrotation", "[serial][xml
 	std::unordered_map<std::string, SimId> const w_refs;
 	std::unordered_map<std::string, SimId> const a_refs;
 	std::unordered_map<std::string, SimId> const t_refs;
-	serial::xml_parser_utils::ReferenceLookup const refs{&w_refs, &a_refs, &t_refs};
+	serial::xml_parser_utils::ReferenceLookup const refs{
+		.waveforms = &w_refs, .antennas = &a_refs, .timings = &t_refs, .meshes = nullptr, .materials = nullptr};
 	auto register_name = [](const XmlElement&, std::string_view) {};
 	auto doc =
 		loadXml("<platform name=\"plat_both\">"
@@ -1367,7 +1762,8 @@ TEST_CASE("parsePlatform supports fixedrotation without rotationpath", "[serial]
 	std::unordered_map<std::string, SimId> const w_refs;
 	std::unordered_map<std::string, SimId> const a_refs;
 	std::unordered_map<std::string, SimId> const t_refs;
-	serial::xml_parser_utils::ReferenceLookup const refs{&w_refs, &a_refs, &t_refs};
+	serial::xml_parser_utils::ReferenceLookup const refs{
+		.waveforms = &w_refs, .antennas = &a_refs, .timings = &t_refs, .meshes = nullptr, .materials = nullptr};
 	auto register_name = [](const XmlElement&, std::string_view) {};
 	auto doc = loadXml("<platform name=\"plat_fixed\">"
 					   "  <fixedrotation>"

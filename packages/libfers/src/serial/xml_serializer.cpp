@@ -58,6 +58,16 @@ namespace serial
 			XmlElement const antenna_elem = root.addChild("antenna");
 			xml_serializer_utils::serializeAntenna(*antenna, antenna_elem);
 		}
+		for (const auto& mesh : world.getMeshes() | std::views::values)
+		{
+			XmlElement const mesh_elem = root.addChild("mesh");
+			xml_serializer_utils::serializeMesh(mesh, mesh_elem);
+		}
+		for (const auto& material : world.getMaterials() | std::views::values)
+		{
+			XmlElement const material_elem = root.addChild("material");
+			xml_serializer_utils::serializeMaterial(material, material_elem);
+		}
 		for (const auto& platform : world.getPlatforms())
 		{
 			XmlElement const plat_elem = root.addChild("platform");

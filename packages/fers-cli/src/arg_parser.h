@@ -44,6 +44,7 @@ namespace core
 		std::optional<uint64_t> vita49_epoch_unix_nanoseconds; ///< Optional deterministic VITA epoch.
 		std::optional<uint16_t> vita49_max_udp_payload; ///< Optional VITA UDP payload cap in bytes.
 		std::optional<uint32_t> vita49_queue_depth; ///< Optional VITA sender queue depth in packets.
+		fers_ray_tracing_engine_t ray_tracing_engine = FERS_RT_ENGINE_AUTO; ///< Ray-tracing engine preference.
 	};
 
 	/**

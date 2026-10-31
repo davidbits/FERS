@@ -517,9 +517,9 @@ namespace
 										  const RealType sample_rate, const RealType power = 1.0,
 										  const RealType carrier = 1.0)
 	{
-		auto signal = std::make_unique<fers_signal::Signal>();
+		auto signal = std::make_unique<fers_signal::SampledSignal>();
 		signal->load(samples, static_cast<unsigned>(samples.size()), sample_rate);
-		return {name, power, carrier, static_cast<RealType>(samples.size()) / sample_rate, std::move(signal)};
+		return {name, power, carrier, std::move(signal)};
 	}
 
 	SuiteResult runResamplerSuite(const CliOptions& options)
@@ -745,7 +745,7 @@ namespace
 		const RealType upsample_coeff_sum = std::accumulate(upsample_coeffs.begin(), upsample_coeffs.end(), 0.0);
 		const RealType upsample_dc_gain = upsample_coeff_sum / static_cast<RealType>(options.ratio);
 
-		fers_signal::Signal signal;
+		fers_signal::SampledSignal signal;
 		signal.load(input, sample_count, params::rate());
 
 		{
@@ -763,8 +763,7 @@ namespace
 			const RealType power = 4.0;
 			const RealType phase = PI / 4.0;
 			const std::vector<interp::InterpPoint> points = {{power, 0.0, 0.0, phase}};
-			unsigned size = 0;
-			const auto data = signal.render(points, size, 0.0);
+			const auto data = signal.render(points, points.front().rx_time, 0.0, 1.0);
 			const auto filter = interp_filter.getFilter(0.0);
 			const auto expected = expectedConstantRender(filter, std::sqrt(power), phase, upsample_dc_gain);
 
@@ -792,8 +791,7 @@ namespace
 			const std::vector<interp::InterpPoint> points = {{power_a, 0.0, 0.0, phase_a},
 															 {power_b, 2.0 * filter_length, 0.0, phase_b}};
 
-			unsigned size = 0;
-			const auto data = signal.render(points, size, 0.0);
+			const auto data = signal.render(points, points.front().rx_time, 0.0, 1.0);
 			const auto filter = interp_filter.getFilter(0.0);
 
 			std::vector<std::vector<std::string>> rows;
@@ -822,8 +820,7 @@ namespace
 			std::vector<std::vector<std::string>> rows;
 			for (const RealType frac_delay : {-0.95, -0.75, -0.5, -0.25, 0.0, 0.25, 0.5, 0.75, 0.95})
 			{
-				unsigned size = 0;
-				const auto data = signal.render(points, size, frac_delay);
+				const auto data = signal.render(points, points.front().rx_time, frac_delay, 1.0);
 				const RealType effective_delay = wrappedDelayFromFracWinDelay(frac_delay);
 				const auto filter = interp_filter.getFilter(effective_delay);
 				const auto expected = expectedConstantRender(filter, 1.0, 0.0, upsample_dc_gain);
@@ -839,17 +836,15 @@ namespace
 			params::setOversampleRatio(1);
 			params::setRate(64.0);
 			const auto reference_waveform = makeTone(256, 0.07);
-			fers_signal::Signal reference_signal;
+			fers_signal::SampledSignal reference_signal;
 			reference_signal.load(reference_waveform, static_cast<unsigned>(reference_waveform.size()), params::rate());
 			const std::vector<interp::InterpPoint> points = {{1.0, 0.0, 0.0, 0.0}};
-			unsigned reference_size = 0;
-			const auto reference_render = reference_signal.render(points, reference_size, 0.15);
+			const auto reference_render = reference_signal.render(points, points.front().rx_time, 0.15, 1.0);
 
 			params::setOversampleRatio(options.ratio);
-			fers_signal::Signal oversampled_signal;
+			fers_signal::SampledSignal oversampled_signal;
 			oversampled_signal.load(reference_waveform, static_cast<unsigned>(reference_waveform.size()), 64.0);
-			unsigned oversampled_size = 0;
-			auto oversampled_render = oversampled_signal.render(points, oversampled_size, 0.15);
+			auto oversampled_render = oversampled_signal.render(points, points.front().rx_time, 0.15, 1.0);
 			auto downsampled_render = fers_signal::downsample(oversampled_render);
 			const auto metrics = compareSignals(reference_render, downsampled_render, 16);
 
@@ -865,11 +860,10 @@ namespace
 
 		{
 			params::setOversampleRatio(options.ratio);
-			fers_signal::Signal edge_signal;
+			fers_signal::SampledSignal edge_signal;
 			edge_signal.load(input, sample_count, 64.0);
 			const std::vector<interp::InterpPoint> points = {{1.0, 0.0, 0.0, 0.0}};
-			unsigned size = 0;
-			const auto data = edge_signal.render(points, size, 0.0);
+			const auto data = edge_signal.render(points, points.front().rx_time, 0.0, 1.0);
 
 			std::vector<std::vector<std::string>> rows;
 			for (size_t i = 0; i < std::min<size_t>(16, data.size()); ++i)
@@ -916,7 +910,7 @@ namespace
 
 		result.source_mappings = {
 			{"pipeline", "packages/libfers/src/serial/response.cpp", "27-33", "src/serial/response.cpp",
-			 "Exact copy of renderBinary delegation."},
+			 "Exact copy of the render()/renderSlice() delegation."},
 			{"pipeline", "packages/libfers/src/processing/signal_processor.cpp", "59-154", "src/processing/signal_processor.cpp",
 			 "Source-faithful renderWindow, thermal noise, and quantization behavior."},
 			{"pipeline", "packages/libfers/src/processing/finalizer_pipeline.cpp", "113-120",
@@ -928,18 +922,15 @@ namespace
 
 		std::vector<std::unique_ptr<serial::Response>> responses;
 		{
-			auto before = std::make_unique<serial::Response>(&wave);
-			before->addInterpPoint({1.0, 0.875, 0.0, 0.0});
+			auto before = std::make_unique<serial::Response>(&wave, interp::InterpPoint{1.0, 0.875, 0.0, 0.0});
 			before->addInterpPoint({1.0, 1.125, 0.0, 0.0});
 			responses.push_back(std::move(before));
 
-			auto inside = std::make_unique<serial::Response>(&wave);
-			inside->addInterpPoint({0.5, 1.125, 0.0, PI / 8.0});
+			auto inside = std::make_unique<serial::Response>(&wave, interp::InterpPoint{0.5, 1.125, 0.0, PI / 8.0});
 			inside->addInterpPoint({0.5, 1.375, 0.0, PI / 8.0});
 			responses.push_back(std::move(inside));
 
-			auto after = std::make_unique<serial::Response>(&wave);
-			after->addInterpPoint({0.75, 1.375, 0.0, PI / 4.0});
+			auto after = std::make_unique<serial::Response>(&wave, interp::InterpPoint{0.75, 1.375, 0.0, PI / 4.0});
 			after->addInterpPoint({0.75, 1.625, 0.0, PI / 4.0});
 			responses.push_back(std::move(after));
 		}
@@ -954,9 +945,9 @@ namespace
 			std::vector<std::vector<std::string>> overlap_rows;
 			for (const auto& response : responses)
 			{
-				RealType rate = 0.0;
-				unsigned size = 0;
-				const auto rendered = response->renderBinary(rate, size, 0.0);
+				const auto rendered = response->render(0.0);
+				const RealType rate = response->sampleRate();
+				const auto size = rendered.size();
 				const int start_sample = static_cast<int>(std::round(params::rate() * params::oversampleRatio() *
 																 (response->startTime() - window_start)));
 				const unsigned clipped_prefix = start_sample < 0 ? static_cast<unsigned>(-start_sample) : 0u;

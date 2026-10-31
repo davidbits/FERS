@@ -4,6 +4,7 @@
     "version-semver": "0.1.0",
     "builtin-baseline": "9942fb5f996ea431c5ed8fb8d2a53f31d08df62e",
     "dependencies": [
+        "assimp",
         "catch2",
         "geographiclib",
         "highfive",
@@ -13,5 +14,11 @@
         },
         "libxml2",
         "nlohmann-json"
-    ]
+    ],
+    "features": {
+        "embree": {
+            "description": "Embree CPU ray tracing backend for the SBR propagation model",
+            "dependencies": ["embree"]
+        }
+    }
 }

@@ -15,14 +15,15 @@
 #include <algorithm>
 #include <cmath>
 #include <complex>
-#include <iterator>
 #include <limits>
+#include <optional>
 #include <stdexcept>
 #include <utility>
+#include <variant>
 
+#include "core/config.h"
 #include "core/parameters.h"
 #include "dsp_filters.h"
-#include "interpolation/interpolation_filter.h"
 #include "interpolation/interpolation_point.h"
 
 namespace fers_signal
@@ -45,27 +46,119 @@ namespace fers_signal
 		throw std::runtime_error("Unsupported FMCW chirp direction '" + std::string(direction) + "'.");
 	}
 
-	std::vector<ComplexType> CwSignal::render(const std::vector<interp::InterpPoint>& /*points*/, unsigned& size,
-											  const RealType /*fracWinDelay*/) const
+	void WaveformSampleBuffer::clear() noexcept
 	{
-		size = 0;
-		return {};
+		_data.clear();
+		_rate = 0;
 	}
 
-	SteppedFrequencySignal::SteppedFrequencySignal(const RealType start_frequency_offset, const RealType step_size,
-												   const std::size_t step_count, const RealType dwell_time,
-												   const RealType step_period, std::optional<std::size_t> sweep_count) :
+	void WaveformSampleBuffer::load(std::span<const ComplexType> inData, const unsigned samples,
+									const RealType sampleRate)
+	{
+		clear();
+		const unsigned ratio = params::oversampleRatio();
+		const auto oversampled_samples = static_cast<std::size_t>(samples) * static_cast<std::size_t>(ratio);
+		if (oversampled_samples > std::numeric_limits<unsigned>::max())
+		{
+			throw std::overflow_error("Oversampled signal sample count exceeds unsigned range");
+		}
+		_data.resize(oversampled_samples);
+		_rate = sampleRate * static_cast<RealType>(ratio);
+
+		if (ratio == 1)
+		{
+			std::ranges::copy(inData, _data.begin());
+		}
+		else
+		{
+			upsample(inData, samples, _data);
+		}
+	}
+
+	ComplexType WaveformSampleBuffer::sampleAt(const RealType time_since_start) const noexcept
+	{
+		if (_data.empty() || _rate <= 0.0 || !std::isfinite(time_since_start) || time_since_start < 0.0 ||
+			time_since_start >= getDuration())
+		{
+			return {0.0, 0.0};
+		}
+
+		const RealType position = time_since_start * _rate;
+		const auto center = static_cast<long long>(std::floor(position));
+		const RealType fraction = position - std::floor(position);
+		const auto& filter = interp::InterpFilter::getInstance().getFilter(fraction);
+		const auto filter_length = static_cast<long long>(filter.size());
+		const auto sample_count = static_cast<long long>(_data.size());
+		ComplexType value{0.0, 0.0};
+		for (long long tap = 0; tap < filter_length; ++tap)
+		{
+			const long long sample_index = center + tap - filter_length / 2;
+			if (sample_index >= 0 && sample_index < sample_count)
+			{
+				value += _data[static_cast<std::size_t>(sample_index)] * filter[static_cast<std::size_t>(tap)];
+			}
+		}
+		return value;
+	}
+
+	std::tuple<RealType, RealType, RealType, long>
+	PulseWaveform::calculateWeightsAndDelays(const interp::InterpPoint& iter, const interp::InterpPoint& next,
+											 const RealType sampleTime, const RealType idelay,
+											 const RealType fracWinDelay, const RealType amplitudeScale) const noexcept
+	{
+		const RealType bw =
+			iter.rx_time < next.rx_time ? (sampleTime - iter.rx_time) / (next.rx_time - iter.rx_time) : 0.0;
+
+		const RealType amplitude = amplitudeScale * std::lerp(iter.gain, next.gain, bw);
+		const RealType phase = std::lerp(iter.phase_delay, next.phase_delay, bw);
+		RealType fdelay = -(std::lerp(iter.delay, next.delay, bw) * _buffer.getRate() - idelay + fracWinDelay);
+		const RealType int_part = std::floor(fdelay);
+		fdelay -= int_part;
+
+		const long i_sample_unwrap = static_cast<long>(int_part);
+
+		return {amplitude, phase, fdelay, i_sample_unwrap};
+	}
+
+	ComplexType PulseWaveform::performConvolution(const long i, const RealType* filt, const long filtLength,
+												  const RealType amplitude, const long iSampleUnwrap) const noexcept
+	{
+		// The convolution is centered on the delay-unwrapped sample index (i + iSampleUnwrap).
+		const long center = i + iSampleUnwrap;
+		const long start = std::max(-filtLength / 2, -center);
+		const long end = std::min(filtLength / 2, static_cast<int>(getSampleCount()) - center);
+
+		ComplexType accum(0.0, 0.0);
+
+		const auto data = _buffer.data();
+		for (long j = start; j < end; ++j)
+		{
+			const long sample_idx = i + j + iSampleUnwrap;
+			const long filt_idx = j + filtLength / 2;
+			if (sample_idx >= 0 && sample_idx < static_cast<long>(getSampleCount()) && filt_idx >= 0 &&
+				filt_idx < filtLength)
+			{
+				accum += amplitude * data[static_cast<std::size_t>(sample_idx)] * filt[filt_idx];
+			}
+		}
+
+		return accum;
+	}
+
+	SfcwWaveform::SfcwWaveform(const RealType start_frequency_offset, const RealType step_size,
+							   const std::size_t step_count, const RealType dwell_time, const RealType step_period,
+							   std::optional<std::size_t> sweep_count) :
 		_start_frequency_offset(start_frequency_offset), _step_size(step_size), _step_count(step_count),
 		_dwell_time(dwell_time), _step_period(step_period), _sweep_count(sweep_count)
 	{
 	}
 
-	RealType SteppedFrequencySignal::firstFrequency(const RealType carrier_frequency) const noexcept
+	RealType SfcwWaveform::firstFrequency(const RealType carrier_frequency) const noexcept
 	{
 		return carrier_frequency + _start_frequency_offset;
 	}
 
-	RealType SteppedFrequencySignal::lastFrequency(const RealType carrier_frequency) const noexcept
+	RealType SfcwWaveform::lastFrequency(const RealType carrier_frequency) const noexcept
 	{
 		if (_step_count == 0)
 		{
@@ -74,7 +167,7 @@ namespace fers_signal
 		return firstFrequency(carrier_frequency) + static_cast<RealType>(_step_count - 1U) * _step_size;
 	}
 
-	RealType SteppedFrequencySignal::frequencySpan() const noexcept
+	RealType SfcwWaveform::frequencySpan() const noexcept
 	{
 		if (_step_count == 0)
 		{
@@ -83,12 +176,12 @@ namespace fers_signal
 		return std::abs(static_cast<RealType>(_step_count - 1U) * _step_size);
 	}
 
-	RealType SteppedFrequencySignal::effectiveBandwidth() const noexcept
+	RealType SfcwWaveform::effectiveBandwidth() const noexcept
 	{
 		return static_cast<RealType>(_step_count) * std::abs(_step_size);
 	}
 
-	std::optional<RealType> SteppedFrequencySignal::totalDuration() const noexcept
+	std::optional<RealType> SfcwWaveform::totalDuration() const noexcept
 	{
 		if (!_sweep_count.has_value())
 		{
@@ -97,9 +190,8 @@ namespace fers_signal
 		return static_cast<RealType>(*_sweep_count) * getSweepPeriod();
 	}
 
-	std::optional<SteppedFrequencySignal::StepState>
-	SteppedFrequencySignal::activeStepAt(const RealType time_since_segment_start,
-										 const RealType carrier_frequency) const noexcept
+	std::optional<SfcwWaveform::StepState> SfcwWaveform::activeStepAt(const RealType time_since_segment_start,
+																	  const RealType carrier_frequency) const noexcept
 	{
 		if (time_since_segment_start < 0.0 || _step_count == 0 || _step_period <= 0.0 || _dwell_time <= 0.0)
 		{
@@ -137,16 +229,9 @@ namespace fers_signal
 							 firstFrequency(carrier_frequency) + static_cast<RealType>(step_index) * _step_size};
 	}
 
-	std::vector<ComplexType> SteppedFrequencySignal::render(const std::vector<interp::InterpPoint>& /*points*/,
-															unsigned& size, const RealType /*fracWinDelay*/) const
-	{
-		size = 0;
-		return {};
-	}
-
-	FmcwChirpSignal::FmcwChirpSignal(const RealType chirp_bandwidth, const RealType chirp_duration,
-									 const RealType chirp_period, const RealType start_frequency_offset,
-									 std::optional<std::size_t> chirp_count, const FmcwChirpDirection direction) :
+	FmcwChirpWaveform::FmcwChirpWaveform(const RealType chirp_bandwidth, const RealType chirp_duration,
+										 const RealType chirp_period, const RealType start_frequency_offset,
+										 std::optional<std::size_t> chirp_count, const FmcwChirpDirection direction) :
 		_chirp_bandwidth(chirp_bandwidth), _chirp_duration(chirp_duration), _chirp_period(chirp_period),
 		_start_frequency_offset(start_frequency_offset), _chirp_count(chirp_count),
 		_chirp_rate(chirp_bandwidth / chirp_duration), _direction(direction)
@@ -154,7 +239,7 @@ namespace fers_signal
 	}
 
 	std::optional<std::size_t>
-	FmcwChirpSignal::activeChirpIndexAt(const RealType time_since_segment_start) const noexcept
+	FmcwChirpWaveform::activeChirpIndexAt(const RealType time_since_segment_start) const noexcept
 	{
 		if (time_since_segment_start < 0.0)
 		{
@@ -178,7 +263,7 @@ namespace fers_signal
 	}
 
 	std::optional<RealType>
-	FmcwChirpSignal::instantaneousBasebandPhase(const RealType time_since_segment_start) const noexcept
+	FmcwChirpWaveform::instantaneousBasebandPhase(const RealType time_since_segment_start) const noexcept
 	{
 		const auto chirp_index = activeChirpIndexAt(time_since_segment_start);
 		if (!chirp_index.has_value())
@@ -190,21 +275,14 @@ namespace fers_signal
 		return basebandPhaseForChirpTime(chirp_time);
 	}
 
-	RealType FmcwChirpSignal::basebandPhaseForChirpTime(const RealType chirp_time) const noexcept
+	RealType FmcwChirpWaveform::basebandPhaseForChirpTime(const RealType chirp_time) const noexcept
 	{
 		return 2.0 * PI * _start_frequency_offset * chirp_time + PI * getSignedChirpRate() * chirp_time * chirp_time;
 	}
 
-	std::vector<ComplexType> FmcwChirpSignal::render(const std::vector<interp::InterpPoint>& /*points*/, unsigned& size,
-													 const RealType /*fracWinDelay*/) const
-	{
-		size = 0;
-		return {};
-	}
-
-	FmcwTriangleSignal::FmcwTriangleSignal(const RealType chirp_bandwidth, const RealType chirp_duration,
-										   const RealType start_frequency_offset,
-										   std::optional<std::size_t> triangle_count) :
+	FmcwTriangleWaveform::FmcwTriangleWaveform(const RealType chirp_bandwidth, const RealType chirp_duration,
+											   const RealType start_frequency_offset,
+											   std::optional<std::size_t> triangle_count) :
 		_chirp_bandwidth(chirp_bandwidth), _chirp_duration(chirp_duration),
 		_start_frequency_offset(start_frequency_offset), _triangle_count(triangle_count),
 		_chirp_rate(chirp_bandwidth / chirp_duration), _triangle_period(2.0 * chirp_duration),
@@ -213,7 +291,7 @@ namespace fers_signal
 	{
 	}
 
-	RealType FmcwTriangleSignal::basebandPhaseForTriangleTime(const RealType triangle_time) const noexcept
+	RealType FmcwTriangleWaveform::basebandPhaseForTriangleTime(const RealType triangle_time) const noexcept
 	{
 		if (triangle_time <= 0.0)
 		{
@@ -234,7 +312,7 @@ namespace fers_signal
 	}
 
 	std::optional<RealType>
-	FmcwTriangleSignal::instantaneousBasebandPhase(const RealType time_since_segment_start) const noexcept
+	FmcwTriangleWaveform::instantaneousBasebandPhase(const RealType time_since_segment_start) const noexcept
 	{
 		if (time_since_segment_start < 0.0)
 		{
@@ -256,256 +334,54 @@ namespace fers_signal
 		return basebandPhaseForTriangleTime(time_since_segment_start);
 	}
 
-	std::vector<ComplexType> FmcwTriangleSignal::render(const std::vector<interp::InterpPoint>& /*points*/,
-														unsigned& size, const RealType /*fracWinDelay*/) const
-	{
-		size = 0;
-		return {};
-	}
-
-	RadarSignal::RadarSignal(std::string name, const RealType power, const RealType carrierfreq, const RealType length,
-							 std::unique_ptr<Signal> signal, const SimId id) :
+	RadarSignal::RadarSignal(std::string name, const RealType power, const RealType carrierfreq, Waveform wave,
+							 const SimId id) :
 		_name(std::move(name)), _id(id == 0 ? SimIdGenerator::instance().generateId(ObjectType::Waveform) : id),
-		_power(power), _carrierfreq(carrierfreq), _length(length), _signal(std::move(signal))
+		_power(power), _carrierfreq(carrierfreq), _wave(std::move(wave))
 	{
-		if (!_signal)
-		{
-			throw std::runtime_error("Signal is empty");
-		}
 	}
 
-	std::vector<ComplexType> RadarSignal::render(const std::vector<interp::InterpPoint>& points, unsigned& size,
-												 const RealType fracWinDelay) const
+	bool RadarSignal::isPulsed() const noexcept { return std::holds_alternative<PulseWaveform>(_wave); }
+
+	bool RadarSignal::isFileWaveform() const noexcept { return std::holds_alternative<FileWaveform>(_wave); }
+
+	bool RadarSignal::isFileCw() const noexcept
 	{
-		auto data = _signal->render(points, size, fracWinDelay);
-		const RealType scale = std::sqrt(_power);
-
-		std::ranges::for_each(data, [scale](auto& value) { value *= scale; });
-
-		return data;
+		const auto* file = std::get_if<FileWaveform>(&_wave);
+		return file != nullptr && file->isCw();
 	}
 
-	std::vector<ComplexType> RadarSignal::renderSlice(const std::vector<interp::InterpPoint>& points,
-													  const RealType outputStartTime, const RealType outputSampleRate,
-													  const std::size_t sampleCount, const RealType fracWinDelay) const
+	bool RadarSignal::isFileFmcw() const noexcept
 	{
-		auto data = _signal->renderSlice(points, outputStartTime, outputSampleRate, sampleCount, fracWinDelay);
-		const RealType scale = std::sqrt(_power);
-
-		std::ranges::for_each(data, [scale](auto& value) { value *= scale; });
-
-		return data;
+		const auto* file = std::get_if<FileWaveform>(&_wave);
+		return file != nullptr && file->isFmcw();
 	}
 
-	bool RadarSignal::isCw() const noexcept
+	bool RadarSignal::isCw() const noexcept { return std::holds_alternative<CwWaveform>(_wave) || isFileCw(); }
+
+	bool RadarSignal::isFmcwChirp() const noexcept { return std::holds_alternative<FmcwChirpWaveform>(_wave); }
+
+	bool RadarSignal::isFmcwTriangle() const noexcept { return std::holds_alternative<FmcwTriangleWaveform>(_wave); }
+
+	bool RadarSignal::isFmcwFamily() const noexcept { return isFmcwChirp() || isFmcwTriangle() || isFileFmcw(); }
+
+	bool RadarSignal::isSfcw() const noexcept { return std::holds_alternative<SfcwWaveform>(_wave); }
+
+	const PulseWaveform* RadarSignal::getPulseWaveform() const noexcept { return std::get_if<PulseWaveform>(&_wave); }
+
+	const FmcwChirpWaveform* RadarSignal::getFmcwChirpWaveform() const noexcept
 	{
-		if (dynamic_cast<const CwSignal*>(_signal.get()) != nullptr)
-		{
-			return true;
-		}
-		const auto* file = getFileSignal();
-		return file != nullptr && file->getKind() == FileWaveformKind::Cw;
+		return std::get_if<FmcwChirpWaveform>(&_wave);
 	}
 
-	bool RadarSignal::isFmcwChirp() const noexcept
+	const FmcwTriangleWaveform* RadarSignal::getFmcwTriangleWaveform() const noexcept
 	{
-		return dynamic_cast<const FmcwChirpSignal*>(_signal.get()) != nullptr;
+		return std::get_if<FmcwTriangleWaveform>(&_wave);
 	}
 
-	bool RadarSignal::isFmcwTriangle() const noexcept
-	{
-		return dynamic_cast<const FmcwTriangleSignal*>(_signal.get()) != nullptr;
-	}
+	const SfcwWaveform* RadarSignal::getSfcwWaveform() const noexcept  {  return std::get_if<SfcwWaveform>(&_wave);  }
 
-	bool RadarSignal::isFmcwFamily() const noexcept { return _signal->isFmcwFamily(); }
+	const FileWaveform* RadarSignal::getFileWaveform() const noexcept { return std::get_if<FileWaveform>(&_wave); }
 
-	bool RadarSignal::isSteppedFrequency() const noexcept
-	{
-		return dynamic_cast<const SteppedFrequencySignal*>(_signal.get()) != nullptr;
-	}
-
-	const FmcwChirpSignal* RadarSignal::getFmcwChirpSignal() const noexcept
-	{
-		return dynamic_cast<const FmcwChirpSignal*>(_signal.get());
-	}
-
-	const FmcwTriangleSignal* RadarSignal::getFmcwTriangleSignal() const noexcept
-	{
-		return dynamic_cast<const FmcwTriangleSignal*>(_signal.get());
-	}
-
-	const SteppedFrequencySignal* RadarSignal::getSteppedFrequencySignal() const noexcept
-	{
-		return dynamic_cast<const SteppedFrequencySignal*>(_signal.get());
-	}
-
-	const FileSignal* RadarSignal::getFileSignal() const noexcept
-	{
-		return dynamic_cast<const FileSignal*>(_signal.get());
-	}
-
-	void Signal::clear() noexcept
-	{
-		_size = 0;
-		_rate = 0;
-	}
-
-	void Signal::load(std::span<const ComplexType> inData, const unsigned samples, const RealType sampleRate)
-	{
-		clear();
-		const unsigned ratio = params::oversampleRatio();
-		const auto oversampled_samples = static_cast<std::size_t>(samples) * static_cast<std::size_t>(ratio);
-		if (oversampled_samples > std::numeric_limits<unsigned>::max())
-		{
-			throw std::overflow_error("Oversampled signal sample count exceeds unsigned range");
-		}
-		_data.resize(oversampled_samples);
-		_size = static_cast<unsigned>(oversampled_samples);
-		_rate = sampleRate * static_cast<RealType>(ratio);
-
-		if (ratio == 1)
-		{
-			std::ranges::copy(inData, _data.begin());
-		}
-		else
-		{
-			upsample(inData, samples, _data);
-		}
-	}
-
-	ComplexType Signal::sampleAt(const RealType time_since_start) const noexcept
-	{
-		if (_data.empty() || _rate <= 0.0 || !std::isfinite(time_since_start) || time_since_start < 0.0 ||
-			time_since_start >= static_cast<RealType>(_size) / _rate)
-		{
-			return {0.0, 0.0};
-		}
-
-		const RealType position = time_since_start * _rate;
-		const auto center = static_cast<long long>(std::floor(position));
-		const RealType fraction = position - std::floor(position);
-		const auto& filter = interp::InterpFilter::getInstance().getFilter(fraction);
-		const auto filter_length = static_cast<long long>(filter.size());
-		const auto sample_count = static_cast<long long>(_data.size());
-		ComplexType value{0.0, 0.0};
-		for (long long tap = 0; tap < filter_length; ++tap)
-		{
-			const long long sample_index = center + tap - filter_length / 2;
-			if (sample_index >= 0 && sample_index < sample_count)
-			{
-				value += _data[static_cast<std::size_t>(sample_index)] * filter[static_cast<std::size_t>(tap)];
-			}
-		}
-		return value;
-	}
-
-	std::vector<ComplexType> Signal::render(const std::vector<interp::InterpPoint>& points, unsigned& size,
-											const double fracWinDelay) const
-	{
-		size = _size;
-		if (points.empty())
-		{
-			return std::vector<ComplexType>(_size);
-		}
-		return renderSlice(points, points.front().time, _rate, _size, fracWinDelay);
-	}
-
-	std::vector<ComplexType> Signal::renderSlice(const std::vector<interp::InterpPoint>& points,
-												 const RealType outputStartTime, const RealType outputSampleRate,
-												 const std::size_t sampleCount, const RealType fracWinDelay) const
-	{
-		auto out = std::vector<ComplexType>(sampleCount);
-		if (_size == 0 || _rate <= 0.0 || outputSampleRate <= 0.0 || points.empty())
-		{
-			return out;
-		}
-
-		const RealType timestep = 1.0 / outputSampleRate;
-		const int filt_length = static_cast<int>(params::renderFilterLength());
-		const auto& interp = interp::InterpFilter::getInstance();
-
-		auto iter = points.begin();
-		auto next = points.size() > 1 ? std::next(iter) : iter;
-		const RealType idelay = std::round(_rate * iter->delay);
-		RealType sample_time = outputStartTime;
-
-		for (std::size_t i = 0; i < sampleCount; ++i)
-		{
-			while (sample_time > next->time && next != iter)
-			{
-				iter = next;
-				if (std::next(next) != points.end())
-				{
-					++next;
-				}
-				else
-				{
-					break;
-				}
-			}
-
-			auto [amplitude, phase, fdelay, i_sample_unwrap] =
-				calculateWeightsAndDelays(iter, next, sample_time, idelay, fracWinDelay);
-			const RealType native_position = (sample_time - points.front().time) * _rate;
-			const auto source_index = static_cast<int>(std::floor(native_position));
-			RealType source_fraction = native_position - static_cast<RealType>(source_index);
-			if (source_fraction < 0.0 && source_fraction > -1.0e-12)
-			{
-				source_fraction = 0.0;
-			}
-
-			const RealType combined_delay = fdelay + source_fraction;
-			const auto delay_unwrap = static_cast<int>(std::floor(combined_delay));
-			fdelay = combined_delay - static_cast<RealType>(delay_unwrap);
-			i_sample_unwrap += delay_unwrap;
-
-			const auto& filt = interp.getFilter(fdelay);
-			const ComplexType accum =
-				performConvolution(source_index, filt.data(), filt_length, amplitude, i_sample_unwrap);
-			out[i] = std::exp(ComplexType(0.0, 1.0) * phase) * accum;
-
-			sample_time += timestep;
-		}
-
-		return out;
-	}
-
-	std::tuple<RealType, RealType, RealType, int>
-	Signal::calculateWeightsAndDelays(const std::vector<interp::InterpPoint>::const_iterator iter,
-									  const std::vector<interp::InterpPoint>::const_iterator next,
-									  const RealType sampleTime, const RealType idelay,
-									  const RealType fracWinDelay) const noexcept
-	{
-		const RealType bw = iter < next ? (sampleTime - iter->time) / (next->time - iter->time) : 0.0;
-
-		const RealType amplitude = std::lerp(std::sqrt(iter->power), std::sqrt(next->power), bw);
-		const RealType phase = std::lerp(iter->phase, next->phase, bw);
-		RealType fdelay = -(std::lerp(iter->delay, next->delay, bw) * _rate - idelay + fracWinDelay);
-
-		const int i_sample_unwrap = static_cast<int>(std::floor(fdelay));
-		fdelay -= i_sample_unwrap;
-
-		return {amplitude, phase, fdelay, i_sample_unwrap};
-	}
-
-	ComplexType Signal::performConvolution(const int i, const RealType* filt, const int filtLength,
-										   const RealType amplitude, const int iSampleUnwrap) const noexcept
-	{
-		const int start = std::max(-filtLength / 2, -i);
-		const int end = std::min(filtLength / 2, static_cast<int>(_size) - i);
-
-		ComplexType accum(0.0, 0.0);
-
-		for (int j = start; j < end; ++j)
-		{
-			const int sample_idx = i + j + iSampleUnwrap;
-			const int filt_idx = j + filtLength / 2;
-			if (sample_idx >= 0 && sample_idx < static_cast<int>(_size) && filt_idx >= 0 && filt_idx < filtLength)
-			{
-				accum += amplitude * _data[static_cast<std::size_t>(sample_idx)] * filt[filt_idx];
-			}
-		}
-
-		return accum;
-	}
+	const Waveform& RadarSignal::getWaveform() const noexcept { return _wave; }
 }

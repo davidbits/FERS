@@ -6,6 +6,7 @@
 set(LIBFERS_PRIVATE_HEADERS
 	${CMAKE_CURRENT_LIST_DIR}/radar/schedule_period.h
 	${CMAKE_CURRENT_LIST_DIR}/antenna/antenna_factory.h
+	${CMAKE_CURRENT_LIST_DIR}/core/assets.h
 	${CMAKE_CURRENT_LIST_DIR}/core/config.h
 	${CMAKE_CURRENT_LIST_DIR}/math/coord.h
 	${CMAKE_CURRENT_LIST_DIR}/math/geometry_ops.h
@@ -27,6 +28,17 @@ set(LIBFERS_PRIVATE_HEADERS
 	${CMAKE_CURRENT_LIST_DIR}/core/world.h
 	${CMAKE_CURRENT_LIST_DIR}/processing/finalizer.h
 	${CMAKE_CURRENT_LIST_DIR}/processing/finalizer_pipeline.h
+	${CMAKE_CURRENT_LIST_DIR}/propagation/propagation_model.h
+	${CMAKE_CURRENT_LIST_DIR}/propagation/pointscatter/pointscatter.h
+	${CMAKE_CURRENT_LIST_DIR}/propagation/common.h
+	${CMAKE_CURRENT_LIST_DIR}/propagation/common_defs.h
+	${CMAKE_CURRENT_LIST_DIR}/propagation/math.h
+	${CMAKE_CURRENT_LIST_DIR}/propagation/utils.h
+	${CMAKE_CURRENT_LIST_DIR}/propagation/raytracing/mesh_importer.h
+	${CMAKE_CURRENT_LIST_DIR}/propagation/raytracing/antenna_model.h
+	${CMAKE_CURRENT_LIST_DIR}/propagation/raytracing/sbr_shared.h
+	${CMAKE_CURRENT_LIST_DIR}/propagation/raytracing/sbr_impl.h
+	${CMAKE_CURRENT_LIST_DIR}/propagation/raytracing/raytracing_model.h
 	${CMAKE_CURRENT_LIST_DIR}/core/rendering_job.h
 	${CMAKE_CURRENT_LIST_DIR}/core/receiver_output.h
 	${CMAKE_CURRENT_LIST_DIR}/core/simulation_state.h
@@ -98,6 +110,11 @@ set(LIBFERS_SOURCES
 	${CMAKE_CURRENT_LIST_DIR}/radar/receiver.cpp
 	${CMAKE_CURRENT_LIST_DIR}/radar/target.cpp
 	${CMAKE_CURRENT_LIST_DIR}/radar/transmitter.cpp
+	${CMAKE_CURRENT_LIST_DIR}/propagation/propagation_model.cpp
+	${CMAKE_CURRENT_LIST_DIR}/propagation/pointscatter/pointscatter.cpp
+	${CMAKE_CURRENT_LIST_DIR}/propagation/raytracing/raytracing_model.cpp
+	${CMAKE_CURRENT_LIST_DIR}/propagation/raytracing/mesh_importer.cpp
+	${CMAKE_CURRENT_LIST_DIR}/propagation/raytracing/antenna_model.cpp
 	${CMAKE_CURRENT_LIST_DIR}/serial/json_serializer.cpp
 	${CMAKE_CURRENT_LIST_DIR}/serial/fmcw_validation.cpp
 	${CMAKE_CURRENT_LIST_DIR}/serial/hdf5_output_sink.cpp
@@ -126,3 +143,17 @@ set(LIBFERS_SOURCES
 	${CMAKE_CURRENT_LIST_DIR}/timing/prototype_timing.cpp
 	${CMAKE_CURRENT_LIST_DIR}/timing/timing.cpp
 )
+
+# --- Optional Ray Tracing Backends ---
+
+if (FERS_ENABLE_OPTIX)
+	include(FersOptiX)
+	list(APPEND LIBFERS_PRIVATE_HEADERS ${FERS_OPTIX_PRIVATE_HEADERS})
+	list(APPEND LIBFERS_SOURCES ${FERS_OPTIX_SOURCES})
+endif ()
+
+if (FERS_ENABLE_EMBREE)
+	include(FersEmbree)
+	list(APPEND LIBFERS_PRIVATE_HEADERS ${FERS_EMBREE_PRIVATE_HEADERS})
+	list(APPEND LIBFERS_SOURCES ${FERS_EMBREE_SOURCES})
+endif ()

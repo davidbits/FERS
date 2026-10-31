@@ -47,6 +47,7 @@ namespace
 	{
 		CHECK(config.script_file == "scenario.fersxml");
 		CHECK(config.log_level == FERS_LOG_DEBUG);
+		CHECK(config.ray_tracing_engine == FERS_RT_ENGINE_EMBREE);
 		CHECK(config.log_file == std::optional<std::string>{"runner.log"});
 		CHECK(config.num_threads == requested_threads);
 		CHECK_FALSE(config.validate);
@@ -71,6 +72,7 @@ TEST_CASE("parseArguments accepts a script file and preserves defaults", "[fers-
 	REQUIRE(result);
 	CHECK(result->script_file == "scenario.fersxml");
 	CHECK(result->log_level == FERS_LOG_INFO);
+	CHECK(result->ray_tracing_engine == FERS_RT_ENGINE_AUTO);
 	CHECK(result->num_threads == std::thread::hardware_concurrency());
 	CHECK(result->validate);
 	CHECK_FALSE(result->log_file.has_value());
@@ -94,9 +96,10 @@ TEST_CASE("parseArguments applies recognized options", "[fers-cli][arg-parser]")
 	const auto n_arg = std::string{"-n="} + std::to_string(requested_threads);
 
 	const auto result = parseArgs(
-		{"scenario.fersxml", "--log-level=DEBUG", "--log-file=runner.log", n_arg, "--out-dir=results", "--no-validate",
-		 "--kml=preview.kml", "--vita49", "localhost:4991", "--vita49-fullscale", "2.5", "--vita49-epoch",
-		 "1700000000123456789", "--vita49-max-udp-payload", "900", "--vita49-queue-depth", "17"});
+		{"scenario.fersxml", "--log-level=DEBUG", "--rt-engine=embree", "--log-file=runner.log", n_arg,
+		 "--out-dir=results", "--no-validate", "--kml=preview.kml", "--vita49", "localhost:4991",
+		 "--vita49-fullscale", "2.5", "--vita49-epoch", "1700000000123456789", "--vita49-max-udp-payload", "900",
+		 "--vita49-queue-depth", "17"});
 
 	REQUIRE(result);
 	requireRecognizedOptions(*result, requested_threads);
@@ -154,6 +157,33 @@ TEST_CASE("parseArguments rejects an invalid log level", "[fers-cli][arg-parser]
 
 	REQUIRE_FALSE(result);
 	CHECK(result.error() == "Invalid log level: VERBOSE");
+}
+
+TEST_CASE("parseArguments accepts ray tracing engine selection case-insensitively", "[fers-cli][arg-parser]")
+{
+	{
+		const auto result = parseArgs({"scenario.fersxml", "--rt-engine=optix"});
+		REQUIRE(result);
+		CHECK(result->ray_tracing_engine == FERS_RT_ENGINE_OPTIX);
+	}
+	{
+		const auto result = parseArgs({"scenario.fersxml", "--rt-engine=EMBREE"});
+		REQUIRE(result);
+		CHECK(result->ray_tracing_engine == FERS_RT_ENGINE_EMBREE);
+	}
+	{
+		const auto result = parseArgs({"scenario.fersxml", "--rt-engine=Auto"});
+		REQUIRE(result);
+		CHECK(result->ray_tracing_engine == FERS_RT_ENGINE_AUTO);
+	}
+}
+
+TEST_CASE("parseArguments rejects an invalid ray tracing engine", "[fers-cli][arg-parser]")
+{
+	const auto result = parseArgs({"scenario.fersxml", "--rt-engine=vulkan"});
+
+	REQUIRE_FALSE(result);
+	CHECK(result.error() == "Invalid ray tracing engine: vulkan");
 }
 
 TEST_CASE("parseArguments rejects an invalid log file extension", "[fers-cli][arg-parser]")

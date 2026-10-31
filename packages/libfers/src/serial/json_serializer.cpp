@@ -15,7 +15,6 @@
 
 #include "serial/json_serializer.h"
 
-#include <algorithm>
 #include <cmath>
 #include <format>
 #include <initializer_list>
@@ -348,7 +347,7 @@ namespace
 			mode = radar::parseDechirpModeToken(mode_json.at("dechirp_mode").get<std::string>());
 		}
 
-		radar::Receiver::FmcwIfChainRequest if_chain{
+		const radar::Receiver::FmcwIfChainRequest if_chain{
 			.sample_rate_hz = get_optional_positive_real(mode_json, "if_sample_rate", owner),
 			.filter_bandwidth_hz = get_optional_positive_real(mode_json, "if_filter_bandwidth", owner),
 			.filter_transition_width_hz = get_optional_positive_real(mode_json, "if_filter_transition_width", owner)};
@@ -613,83 +612,77 @@ namespace fers_signal
 						   {"name", rs.getName()},
 						   {"power", rs.getPower()},
 						   {"carrier_frequency", rs.getCarrier()}};
-		if (const auto* file = rs.getFileSignal(); file != nullptr)
-		{
-			std::string_view key = "pulsed_from_file";
-			if (file->getKind() == FileWaveformKind::Cw)
-			{
-				key = "cw_from_file";
-			}
-			else if (file->getKind() == FileWaveformKind::Fmcw)
-			{
-				key = "fmcw_from_file";
-			}
-			if (const auto& filename = rs.getFilename(); filename.has_value())
-			{
-				j[key] = {{"filename", *filename}};
-			}
-			else
-			{
-				throw std::logic_error("Attempted to serialize a file-based waveform named '" + rs.getName() +
-									   "' without a source filename.");
-			}
-		}
-		else if (dynamic_cast<const CwSignal*>(rs.getSignal()) != nullptr)
-		{
-			j["cw"] = nlohmann::json::object();
-		}
-		else if (const auto* sfcw = rs.getSteppedFrequencySignal(); sfcw != nullptr)
-		{
-			j["stepped_frequency"] = {{"start_frequency_offset", sfcw->getStartFrequencyOffset()},
-									  {"step_size", sfcw->getStepSize()},
-									  {"step_count", sfcw->getStepCount()},
-									  {"dwell_time", sfcw->getDwellTime()},
-									  {"step_period", sfcw->getStepPeriod()}};
-			if (sfcw->getSweepCount().has_value())
-			{
-				j["stepped_frequency"]["sweep_count"] = *sfcw->getSweepCount();
-			}
-		}
-		else if (const auto* fmcw = rs.getFmcwChirpSignal(); fmcw != nullptr)
-		{
-			j["fmcw_linear_chirp"] = {{"direction", std::string(fmcwChirpDirectionToken(fmcw->getDirection()))},
-									  {"chirp_bandwidth", fmcw->getChirpBandwidth()},
-									  {"chirp_duration", fmcw->getChirpDuration()},
-									  {"chirp_period", fmcw->getChirpPeriod()}};
-			if (std::abs(fmcw->getStartFrequencyOffset()) > EPSILON)
-			{
-				j["fmcw_linear_chirp"]["start_frequency_offset"] = fmcw->getStartFrequencyOffset();
-			}
-			if (fmcw->getChirpCount().has_value())
-			{
-				j["fmcw_linear_chirp"]["chirp_count"] = *fmcw->getChirpCount();
-			}
-		}
-		else if (const auto* triangle = rs.getFmcwTriangleSignal(); triangle != nullptr)
-		{
-			j["fmcw_triangle"] = {{"chirp_bandwidth", triangle->getChirpBandwidth()},
-								  {"chirp_duration", triangle->getChirpDuration()}};
-			if (std::abs(triangle->getStartFrequencyOffset()) > EPSILON)
-			{
-				j["fmcw_triangle"]["start_frequency_offset"] = triangle->getStartFrequencyOffset();
-			}
-			if (triangle->getTriangleCount().has_value())
-			{
-				j["fmcw_triangle"]["triangle_count"] = *triangle->getTriangleCount();
-			}
-		}
-		else
-		{
-			if (const auto& filename = rs.getFilename(); filename.has_value())
-			{
-				j["pulsed_from_file"] = {{"filename", *filename}};
-			}
-			else
-			{
-				throw std::logic_error("Attempted to serialize a file-based waveform named '" + rs.getName() +
-									   "' without a source filename.");
-			}
-		}
+
+		std::visit(
+			util::Overloaded{
+				[&](const CwWaveform&) { j["cw"] = nlohmann::json::object(); },
+				[&](const FmcwChirpWaveform& fmcw)
+				{
+					j["fmcw_linear_chirp"] = {{"direction", std::string(fmcwChirpDirectionToken(fmcw.getDirection()))},
+											  {"chirp_bandwidth", fmcw.getChirpBandwidth()},
+											  {"chirp_duration", fmcw.getChirpDuration()},
+											  {"chirp_period", fmcw.getChirpPeriod()}};
+					if (std::abs(fmcw.getStartFrequencyOffset()) > EPSILON)
+					{
+						j["fmcw_linear_chirp"]["start_frequency_offset"] = fmcw.getStartFrequencyOffset();
+					}
+					if (fmcw.getChirpCount().has_value())
+					{
+						j["fmcw_linear_chirp"]["chirp_count"] = *fmcw.getChirpCount();
+					}
+				},
+				[&](const SfcwWaveform& sfcw)
+				{
+					j["stepped_frequency"] = {{"start_frequency_offset", sfcw.getStartFrequencyOffset()},
+											  {"step_size", sfcw.getStepSize()},
+											  {"step_count", sfcw.getStepCount()},
+											  {"dwell_time", sfcw.getDwellTime()},
+											  {"step_period", sfcw.getStepPeriod()}};
+					if (sfcw.getSweepCount().has_value())
+					{
+						j["stepped_frequency"]["sweep_count"] = *sfcw.getSweepCount();
+					}
+				},
+				[&](const FmcwTriangleWaveform& triangle)
+				{
+					j["fmcw_triangle"] = {{"chirp_bandwidth", triangle.getChirpBandwidth()},
+										  {"chirp_duration", triangle.getChirpDuration()}};
+					if (std::abs(triangle.getStartFrequencyOffset()) > EPSILON)
+					{
+						j["fmcw_triangle"]["start_frequency_offset"] = triangle.getStartFrequencyOffset();
+					}
+					if (triangle.getTriangleCount().has_value())
+					{
+						j["fmcw_triangle"]["triangle_count"] = *triangle.getTriangleCount();
+					}
+				},
+				[&](const PulseWaveform& sampled)
+				{
+					if (const auto& filename = sampled.getFilename(); filename.has_value())
+					{
+						j["pulsed_from_file"] = {{"filename", *filename}};
+					}
+					else
+					{
+						throw std::logic_error("Attempted to serialize a file-based waveform named '" + rs.getName() +
+											   "' without a source filename.");
+					}
+				},
+				[&](const FileWaveform& file)
+				{
+					const char* key = file.isCw() ? "cw_from_file" : "fmcw_from_file";
+					if (const auto& filename = file.getFilename(); filename.has_value())
+					{
+						j[key] = {{"filename", *filename}};
+					}
+					else
+					{
+						throw std::logic_error("Attempted to serialize a file-based waveform named '" + rs.getName() +
+											   "' without a source filename.");
+					}
+				},
+			},
+			rs.getWaveform());
 	}
 
 	void from_json(const nlohmann::json& j, std::unique_ptr<RadarSignal>& rs) // NOLINT(*-use-internal-linkage)
@@ -701,9 +694,7 @@ namespace fers_signal
 
 		if (j.contains("cw"))
 		{
-			auto cw_signal = std::make_unique<CwSignal>();
-			rs = std::make_unique<RadarSignal>(name, power, carrier, params::endTime() - params::startTime(),
-											   std::move(cw_signal), id);
+			rs = std::make_unique<RadarSignal>(name, power, carrier, CwWaveform(), id);
 		}
 		else if (j.contains("stepped_frequency"))
 		{
@@ -723,12 +714,11 @@ namespace fers_signal
 				}
 				sweep_count = static_cast<std::size_t>(parsed_count);
 			}
-			auto sfcw_signal = std::make_unique<SteppedFrequencySignal>(
+			auto sfcw_signal = SfcwWaveform(
 				sfcw_json.at("start_frequency_offset").get<RealType>(), sfcw_json.at("step_size").get<RealType>(),
 				static_cast<std::size_t>(step_count), sfcw_json.at("dwell_time").get<RealType>(),
 				sfcw_json.at("step_period").get<RealType>(), sweep_count);
-			rs = std::make_unique<RadarSignal>(name, power, carrier, sfcw_signal->getDwellTime(),
-											   std::move(sfcw_signal), id);
+			rs = std::make_unique<RadarSignal>(name, power, carrier, sfcw_signal, id);
 			validate_fmcw_waveform(*rs, "Waveform '" + name + "'");
 		}
 		else if (j.contains("fmcw_linear_chirp"))
@@ -746,12 +736,11 @@ namespace fers_signal
 				chirp_count = static_cast<std::size_t>(parsed_count);
 			}
 
-			auto fmcw_signal = std::make_unique<FmcwChirpSignal>(
+			auto fmcw_signal = FmcwChirpWaveform(
 				fmcw_json.at("chirp_bandwidth").get<RealType>(), fmcw_json.at("chirp_duration").get<RealType>(),
 				fmcw_json.at("chirp_period").get<RealType>(), fmcw_json.value("start_frequency_offset", 0.0),
 				chirp_count, direction);
-			rs = std::make_unique<RadarSignal>(name, power, carrier, fmcw_signal->getChirpDuration(),
-											   std::move(fmcw_signal), id);
+			rs = std::make_unique<RadarSignal>(name, power, carrier, fmcw_signal, id);
 			validate_fmcw_waveform(*rs, "Waveform '" + name + "'");
 		}
 		else if (j.contains("fmcw_triangle"))
@@ -773,11 +762,10 @@ namespace fers_signal
 				triangle_count = static_cast<std::size_t>(parsed_count);
 			}
 
-			auto fmcw_signal = std::make_unique<FmcwTriangleSignal>(
-				fmcw_json.at("chirp_bandwidth").get<RealType>(), fmcw_json.at("chirp_duration").get<RealType>(),
-				fmcw_json.value("start_frequency_offset", 0.0), triangle_count);
-			rs = std::make_unique<RadarSignal>(name, power, carrier, fmcw_signal->getTrianglePeriod(),
-											   std::move(fmcw_signal), id);
+			auto fmcw_signal = FmcwTriangleWaveform(fmcw_json.at("chirp_bandwidth").get<RealType>(),
+													fmcw_json.at("chirp_duration").get<RealType>(),
+													fmcw_json.value("start_frequency_offset", 0.0), triangle_count);
+			rs = std::make_unique<RadarSignal>(name, power, carrier, fmcw_signal, id);
 			validate_fmcw_waveform(*rs, "Waveform '" + name + "'");
 		}
 		else if (j.contains("pulsed_from_file"))
@@ -799,7 +787,7 @@ namespace fers_signal
 				LOG(logging::Level::WARNING, "Skipping load of file-based waveform '{}': filename is empty.", name);
 				return;
 			}
-			rs = serial::loadWaveformFromFile(name, filename, power, carrier, id, FileWaveformKind::Cw);
+			rs = serial::loadWaveformFromFile(name, filename, power, carrier, id, serial::FileWaveformRequestKind::Cw);
 		}
 		else if (j.contains("fmcw_from_file"))
 		{
@@ -809,7 +797,8 @@ namespace fers_signal
 				LOG(logging::Level::WARNING, "Skipping load of file-based waveform '{}': filename is empty.", name);
 				return;
 			}
-			rs = serial::loadWaveformFromFile(name, filename, power, carrier, id, FileWaveformKind::Fmcw);
+			rs =
+				serial::loadWaveformFromFile(name, filename, power, carrier, id, serial::FileWaveformRequestKind::Fmcw);
 		}
 		else
 		{
@@ -860,6 +849,13 @@ namespace antenna
 		else
 		{
 			j["pattern"] = "isotropic";
+		}
+
+		const auto pol = a.getPolarisation();
+		if (pol.horizontal != ComplexType(1.0, 0.0) || pol.vertical != ComplexType(0.0, 0.0))
+		{
+			j["boresight_polarisation"] = {{"h", {{"re", pol.horizontal.real()}, {"im", pol.horizontal.imag()}}},
+										   {"v", {{"re", pol.vertical.real()}, {"im", pol.vertical.imag()}}}};
 		}
 	}
 
@@ -917,6 +913,29 @@ namespace antenna
 		}
 
 		ant->setEfficiencyFactor(j.value("efficiency", 1.0));
+
+		if (const auto pol_it = j.find("boresight_polarisation"); pol_it != j.end())
+		{
+			const auto component = [&](const char* axis_name)
+			{
+				const auto axis_it = pol_it->find(axis_name);
+				if (axis_it == pol_it->end())
+				{
+					return ComplexType(0.0, 0.0);
+				}
+				return ComplexType{axis_it->value("re", 0.0), axis_it->value("im", 0.0)};
+			};
+
+			try
+			{
+				ant->setPolarisation(JonesPolarisation{.horizontal = component("h"), .vertical = component("v")});
+			}
+			catch (const std::runtime_error& e)
+			{
+				LOG(logging::Level::WARNING, "Antenna '{}' has an invalid polarisation ({}), assuming horizontal.",
+					name, e.what());
+			}
+		}
 	}
 }
 
@@ -1000,33 +1019,37 @@ namespace radar
 	{
 		j["id"] = sim_id_to_json(t.getId());
 		j["name"] = t.getName();
-		nlohmann::json rcs_json;
-		if (const auto* iso = dynamic_cast<const IsoTarget*>(&t))
-		{
-			rcs_json["type"] = "isotropic";
-			rcs_json["value"] = iso->getConstRcs();
-		}
-		else if (const auto* file = dynamic_cast<const FileTarget*>(&t))
-		{
-			rcs_json["type"] = "file";
-			rcs_json["filename"] = file->getFilename();
-		}
-		j["rcs"] = rcs_json;
 
-		// Serialize the fluctuation model if it exists.
-		if (const auto* model_base = t.getFluctuationModel())
+		if (const auto* rcs = t.getRcsSpec())
 		{
-			nlohmann::json model_json;
-			if (const auto* chi_model = dynamic_cast<const RcsChiSquare*>(model_base))
+			nlohmann::json rcs_json;
+			if (const auto* iso = dynamic_cast<const IsoTargetRcs*>(rcs))
 			{
-				model_json["type"] = "chisquare";
-				model_json["k"] = chi_model->getK();
+				rcs_json["type"] = "isotropic";
+				rcs_json["value"] = iso->getConstRcs();
 			}
-			else // Default to constant if it's not a recognized type (e.g., RcsConst)
+			else if (const auto* file = dynamic_cast<const FileTargetRcs*>(rcs))
 			{
-				model_json["type"] = "constant";
+				rcs_json["type"] = "file";
+				rcs_json["filename"] = file->getFilename();
 			}
-			j["model"] = model_json;
+			j["rcs"] = rcs_json;
+
+			// Serialize the fluctuation model if it exists.
+			if (const auto* model_base = rcs->getFluctuationModel())
+			{
+				nlohmann::json model_json;
+				if (const auto* chi_model = dynamic_cast<const RcsChiSquare*>(model_base))
+				{
+					model_json["type"] = "chisquare";
+					model_json["k"] = chi_model->getK();
+				}
+				else // Default to constant if it's not a recognized type (e.g., RcsConst)
+				{
+					model_json["type"] = "constant";
+				}
+				j["model"] = model_json;
+			}
 		}
 	}
 
@@ -1071,6 +1094,11 @@ namespace params
 			j["randomseed"] = p.random_seed.value();
 		}
 
+		if (p.cw_coarse_sample_rate.has_value())
+		{
+			j["cwSimSamplingRate"] = p.cw_coarse_sample_rate.value();
+		}
+
 		j["origin"] = {
 			{"latitude", p.origin_latitude}, {"longitude", p.origin_longitude}, {"altitude", p.origin_altitude}};
 
@@ -1080,6 +1108,8 @@ namespace params
 			j["coordinatesystem"]["zone"] = p.utm_zone;
 			j["coordinatesystem"]["hemisphere"] = p.utm_north_hemisphere ? "N" : "S";
 		}
+
+		j["pointscatter"] = {{"polarimetric", p.point_scatterer_params.polarimetric}};
 	}
 
 	void from_json(const nlohmann::json& j, Parameters& p) // NOLINT(*-use-internal-linkage)
@@ -1089,6 +1119,7 @@ namespace params
 		p.rate = j.at("rate").get<RealType>();
 		p.c = j.value("c", Parameters::DEFAULT_C);
 		p.sim_sampling_rate = j.value("simSamplingRate", 1000.0);
+		p.cw_coarse_sample_rate = j.value<std::optional<RealType>>("cwSimSamplingRate", std::nullopt);
 		p.adc_bits = j.value("adc_bits", 0u);
 		p.oversample_ratio = j.value("oversample", 1u);
 		params::validateOversampleRatio(p.oversample_ratio);
@@ -1107,6 +1138,9 @@ namespace params
 			p.utm_zone = cs.at("zone").get<int>();
 			p.utm_north_hemisphere = cs.at("hemisphere").get<std::string>() == "N";
 		}
+
+		p.point_scatterer_params.polarimetric =
+			j.value("pointscatter", nlohmann::json::object()).value("polarimetric", false);
 	}
 }
 
@@ -1474,13 +1508,13 @@ namespace
 			}
 			auto schedule =
 				radar::processRawSchedule(raw, trans->getName(), mode == radar::OperationMode::PULSED_MODE, pri);
-			if (waveform->isFmcwFamily() || waveform->isSteppedFrequency())
+			if (waveform->isFmcwFamily() || waveform->isSfcw())
 			{
 				validate_fmcw_schedule(schedule, *waveform, "Transmitter component '" + trans->getName() + "'");
 			}
 			trans->setSchedule(std::move(schedule));
 		}
-		else if (waveform->isFmcwFamily() || waveform->isSteppedFrequency())
+		else if (waveform->isFmcwFamily() || waveform->isSfcw())
 		{
 			validate_fmcw_schedule(trans->getSchedule(), *waveform, "Transmitter component '" + trans->getName() + "'");
 		}
@@ -1564,51 +1598,65 @@ namespace
 	void parse_target(const nlohmann::json& comp_json, radar::Platform* plat, core::World& world,
 					  std::mt19937& masterSeeder)
 	{
-		const auto& rcs_json = comp_json.at("rcs");
-		const auto rcs_type = rcs_json.at("type").get<std::string>();
 		std::unique_ptr<radar::Target> target_obj;
+		const auto target_id = parse_json_id(comp_json, "id", "Target");
 
-		if (rcs_type == "isotropic")
+		if (!comp_json.contains("rcs"))
 		{
-			const auto target_id = parse_json_id(comp_json, "id", "Target");
-			target_obj = radar::createIsoTarget(plat, comp_json.at("name").get<std::string>(),
-												rcs_json.at("value").get<RealType>(),
-												static_cast<unsigned>(masterSeeder()), target_id);
-		}
-		else if (rcs_type == "file")
-		{
-			const auto filename = rcs_json.value("filename", "");
-			if (filename.empty())
-			{
-				LOG(logging::Level::WARNING, "Skipping load of file target '{}': RCS filename is empty.",
-					comp_json.value("name", "Unknown"));
-				return;
-			}
-			const auto target_id = parse_json_id(comp_json, "id", "Target");
-			target_obj = radar::createFileTarget(plat, comp_json.at("name").get<std::string>(), filename,
-												 static_cast<unsigned>(masterSeeder()), target_id);
+			target_obj = std::make_unique<radar::Target>(plat, comp_json.at("name").get<std::string>(), target_id);
 		}
 		else
 		{
-			throw std::runtime_error("Unsupported target RCS type: " + rcs_type);
+			const auto& rcs_json = comp_json.at("rcs");
+			const auto rcs_type = rcs_json.at("type").get<std::string>();
+
+			if (rcs_type == "isotropic")
+			{
+				target_obj = radar::createIsoTarget(plat, comp_json.at("name").get<std::string>(),
+													rcs_json.at("value").get<RealType>(),
+													static_cast<unsigned>(masterSeeder()), target_id);
+			}
+			else if (rcs_type == "file")
+			{
+				const auto filename = rcs_json.value("filename", "");
+				if (filename.empty())
+				{
+					LOG(logging::Level::WARNING, "Skipping load of file target '{}': RCS filename is empty.",
+						comp_json.value("name", "Unknown"));
+					return;
+				}
+				target_obj = radar::createFileTarget(plat, comp_json.at("name").get<std::string>(), filename,
+													 static_cast<unsigned>(masterSeeder()), target_id);
+			}
+			else
+			{
+				throw std::runtime_error("Unsupported target RCS type: " + rcs_type);
+			}
 		}
 		world.add(std::move(target_obj));
 
 		// After creating the target, check for and apply the fluctuation model.
 		if (comp_json.contains("model"))
 		{
+			auto* rcs = world.getTargets().back()->getRcsSpec();
+			if (rcs == nullptr)
+			{
+				throw std::runtime_error("Target '" + comp_json.value("name", "Unknown") +
+										 "' has a 'model' but no 'rcs' to fluctuate.");
+			}
+
 			const auto& model_json = comp_json.at("model");
 			const auto model_type = model_json.at("type").get<std::string>();
 
 			if (model_type == "chisquare" || model_type == "gamma")
 			{
-				auto model = std::make_unique<radar::RcsChiSquare>(world.getTargets().back()->getRngEngine(),
-																   model_json.at("k").get<RealType>());
-				world.getTargets().back()->setFluctuationModel(std::move(model));
+				auto model =
+					std::make_unique<radar::RcsChiSquare>(rcs->getRngEngine(), model_json.at("k").get<RealType>());
+				rcs->setFluctuationModel(std::move(model));
 			}
 			else if (model_type == "constant")
 			{
-				world.getTargets().back()->setFluctuationModel(std::make_unique<radar::RcsConst>());
+				rcs->setFluctuationModel(std::make_unique<radar::RcsConst>());
 			}
 			else
 			{
@@ -1710,7 +1758,7 @@ namespace
 			// Process once, apply to both
 			auto processed_schedule =
 				radar::processRawSchedule(raw, trans->getName(), mode == radar::OperationMode::PULSED_MODE, pri);
-			if (waveform->isFmcwFamily() || waveform->isSteppedFrequency())
+			if (waveform->isFmcwFamily() || waveform->isSfcw())
 			{
 				validate_fmcw_schedule(processed_schedule, *waveform,
 									   "Monostatic component '" + comp_json.value("name", "Unnamed") + "'");
@@ -1719,7 +1767,7 @@ namespace
 			trans->setSchedule(processed_schedule);
 			recv->setSchedule(processed_schedule);
 		}
-		else if (waveform->isFmcwFamily() || waveform->isSteppedFrequency())
+		else if (waveform->isFmcwFamily() || waveform->isSfcw())
 		{
 			validate_fmcw_schedule(trans->getSchedule(), *waveform,
 								   "Monostatic component '" + comp_json.value("name", "Unnamed") + "'");
@@ -2079,7 +2127,7 @@ namespace serial
 		}
 		validate_fmcw_waveform(*tx.getSignal(), "Waveform '" + tx.getSignal()->getName() + "'");
 		validate_waveform_mode_match(*tx.getSignal(), tx.getMode(), owner);
-		if (tx.getSignal()->isFmcwFamily() || tx.getSignal()->isSteppedFrequency())
+		if (tx.getSignal()->isFmcwFamily() || tx.getSignal()->isSfcw())
 		{
 			validate_fmcw_schedule(tx.getSchedule(), *tx.getSignal(), owner);
 		}
@@ -2096,7 +2144,7 @@ namespace serial
 		const bool pulsed = tx.getMode() == radar::OperationMode::PULSED_MODE;
 		const RealType pri = pulsed ? 1.0 / tx.getPrf() : 0.0;
 		auto schedule = radar::processRawSchedule(raw, tx.getName(), pulsed, pri);
-		if (tx.getSignal() != nullptr && (tx.getSignal()->isFmcwFamily() || tx.getSignal()->isSteppedFrequency()))
+		if (tx.getSignal() != nullptr && (tx.getSignal()->isFmcwFamily() || tx.getSignal()->isSfcw()))
 		{
 			validate_fmcw_schedule(schedule, *tx.getSignal(), owner);
 		}
@@ -2290,7 +2338,7 @@ namespace serial
 		const bool pulsed = tx.getMode() == radar::OperationMode::PULSED_MODE;
 		const RealType pri = pulsed ? 1.0 / tx.getPrf() : 0.0;
 		auto processed_schedule = radar::processRawSchedule(raw, tx.getName(), pulsed, pri);
-		if (tx.getSignal() != nullptr && (tx.getSignal()->isFmcwFamily() || tx.getSignal()->isSteppedFrequency()))
+		if (tx.getSignal() != nullptr && (tx.getSignal()->isFmcwFamily() || tx.getSignal()->isSfcw()))
 		{
 			validate_fmcw_schedule(processed_schedule, *tx.getSignal(), "Monostatic '" + tx.getName() + "'");
 		}
@@ -2316,44 +2364,60 @@ namespace serial
 	}
 
 	void update_target_from_json(const nlohmann::json& j, radar::Target* existing_tgt, core::World& world,
-								 std::mt19937& /*masterSeeder*/)
+								 std::mt19937& masterSeeder)
 	{
 		auto* plat = existing_tgt->getPlatform();
-		const auto& rcs_json = j.at("rcs");
-		const auto rcs_type = rcs_json.at("type").get<std::string>();
 		std::unique_ptr<radar::Target> target_obj;
 
 		const auto target_id = existing_tgt->getId();
 		const auto name = j.value("name", existing_tgt->getName());
-		unsigned const seed = existing_tgt->getSeed();
+		// Reuse the existing RCS's seed if there was one, so re-posting the same RCS type keeps
+		// its fluctuation-sampling RNG stream; otherwise draw a fresh seed.
+		const auto* existing_rcs = existing_tgt->getRcsSpec();
+		const unsigned seed = existing_rcs != nullptr ? existing_rcs->getSeed() : static_cast<unsigned>(masterSeeder());
 
-		if (rcs_type == "isotropic")
+		if (!j.contains("rcs"))
 		{
-			target_obj = radar::createIsoTarget(plat, name, rcs_json.value("value", 1.0), seed, target_id);
-		}
-		else if (rcs_type == "file")
-		{
-			const auto filename = rcs_json.value("filename", "");
-			target_obj = radar::createFileTarget(plat, name, filename, seed, target_id);
+			target_obj = std::make_unique<radar::Target>(plat, name, target_id);
 		}
 		else
 		{
-			throw std::runtime_error("Unsupported target RCS type: " + rcs_type);
+			const auto& rcs_json = j.at("rcs");
+			const auto rcs_type = rcs_json.at("type").get<std::string>();
+
+			if (rcs_type == "isotropic")
+			{
+				target_obj = radar::createIsoTarget(plat, name, rcs_json.value("value", 1.0), seed, target_id);
+			}
+			else if (rcs_type == "file")
+			{
+				const auto filename = rcs_json.value("filename", "");
+				target_obj = radar::createFileTarget(plat, name, filename, seed, target_id);
+			}
+			else
+			{
+				throw std::runtime_error("Unsupported target RCS type: " + rcs_type);
+			}
 		}
 
 		if (j.contains("model"))
 		{
+			auto* rcs = target_obj->getRcsSpec();
+			if (rcs == nullptr)
+			{
+				throw std::runtime_error("Target '" + name + "' has a 'model' but no 'rcs' to fluctuate.");
+			}
+
 			const auto& model_json = j.at("model");
 			const auto model_type = model_json.at("type").get<std::string>();
 			if (model_type == "chisquare" || model_type == "gamma")
 			{
-				auto model =
-					std::make_unique<radar::RcsChiSquare>(target_obj->getRngEngine(), model_json.value("k", 1.0));
-				target_obj->setFluctuationModel(std::move(model));
+				auto model = std::make_unique<radar::RcsChiSquare>(rcs->getRngEngine(), model_json.value("k", 1.0));
+				rcs->setFluctuationModel(std::move(model));
 			}
 			else if (model_type == "constant")
 			{
-				target_obj->setFluctuationModel(std::make_unique<radar::RcsConst>());
+				rcs->setFluctuationModel(std::make_unique<radar::RcsConst>());
 			}
 		}
 

@@ -29,10 +29,10 @@
 #include "core/config.h"
 #include "core/output_config.h"
 #include "core/output_metadata.h"
-#include "core/parameters.h"
 #include "core/receiver_output.h"
 #include "core/sim_events.h"
 #include "core/simulation_state.h"
+#include "propagation/propagation_model.h"
 #include "signal/dsp_filters.h"
 #include "simulation/channel_model.h"
 
@@ -44,7 +44,6 @@ namespace pool
 namespace radar
 {
 	class Receiver;
-	class Target;
 	class Transmitter;
 }
 
@@ -188,24 +187,50 @@ namespace core
 
 	private:
 		/// Calculates one streaming I/Q sample for the receiver at the specified time step.
-		[[nodiscard]] ComplexType calculateStreamingSample(radar::Receiver* rx, RealType t_step,
+		///
+		/// Any source whose returned path still delivers in-window signal this sample has
+		/// its flag set in `source_live_this_sample` to prevent the more aggressive pruning
+		/// strategy by `pruneConfirmedDeadStreamingSources`.
+		[[nodiscard]] ComplexType calculateStreamingSample(radar::Receiver* rx, const RealType rx_time,
 														   const std::vector<ActiveStreamingSource>& streaming_sources,
-														   ReceiverTrackerCache& tracker_cache) const;
+														   const std::vector<propagation::PropagationPath>& paths,
+														   ReceiverTrackerCache& tracker_cache,
+														   std::vector<bool>& source_live_this_sample) const;
+
 
 		/// Adds tracker storage for a newly active streaming source.
+
 		void appendStreamingTrackerSource();
 
 		/// Removes tracker storage for a streaming source that has ended.
 		void eraseStreamingTrackerSource(std::size_t source_index);
 
-		/// Removes ended streaming sources once no future receiver sample can observe their in-flight energy.
+		/// Conservative upper bound on the distance between any two platforms over the
+		/// simulation's whole time span.
+		///
+		/// Cached at construction and reused by `streamingSourceCoarseCleanupDeadline`.
+		[[nodiscard]] RealType computeWorldBoundingDiameter() const;
+
+		/// Coarse, cheap upper bound on the receive time at which an ended source's tail could still
+		/// arrive anywhere in the world. Used by `cleanupInactiveStreamingSources`.
+		[[nodiscard]] RealType streamingSourceCoarseCleanupDeadline(const ActiveStreamingSource& source) const;
+
+		/// True if some streaming-mode receiver's schedule could still open a listening window in
+		/// `[from_time, coarse_deadline)`.
+		[[nodiscard]] bool mightAnyReceiverStillObserve(RealType from_time, RealType coarse_deadline) const;
+
+		/// This uses a world bounding diameter and propagation model leg count to place an
+		/// upper bound on propagation path time. This method is course but cheap and analytic,
+		/// and handles the case where `pruneConfirmedDeadStreamingSources` can't quickly prove
+		/// all receivers are unreachable by a streaming source
+		/// (typically when a receiver off and not simulated).
 		void cleanupInactiveStreamingSources(RealType from_time);
 
-		/// Returns the next time at which ended streaming sources can be cleaned up.
-		[[nodiscard]] std::optional<RealType> nextStreamingCleanupDeadline(RealType from_time);
-
-		/// Returns the next streaming chunk boundary before the target event time.
-		[[nodiscard]] RealType streamingChunkEnd(RealType from_time, RealType event_time);
+		/// Removes ended streaming sources that delivered no in-window contribution to any
+		/// receiver this sample. Proof only applies when every streaming-mode receiver was actually
+		/// queried this sample (see appendActiveReceiverStreamingSamples). Thus it is not
+		/// called when there are inactive streaming-mode receivers.
+		void pruneConfirmedDeadStreamingSources(RealType t_step);
 
 		/// Returns true when cooperative cancellation should stop the current streaming chunk.
 		[[nodiscard]] bool shouldStopStreamingChunk(std::size_t sample_index, std::size_t chunk_start_index);
@@ -217,8 +242,19 @@ namespace core
 		/// Adds one sample to every active streaming receiver.
 		void appendActiveReceiverStreamingSamples(std::size_t sample_index, RealType t_step);
 
-		/// Adds one sample to a single active streaming receiver.
-		void appendReceiverStreamingSample(std::size_t receiver_index, std::size_t sample_index, RealType t_step);
+		/// Traces every entry in `live_receivers` (whose indices into `_streaming_tracker_caches`
+		/// are the parallel `live_receiver_indices`) at `t_step`, either exactly (default) or, when
+		/// CW coarse sampling is enabled, by re-querying the scene only once per coarse tick and
+		/// linearly interpolating each receiver's cached paths between the two bracketing coarse
+		/// samples for every sample in between.
+		[[nodiscard]] std::unordered_map<radar::Receiver*, std::vector<propagation::PropagationPath>>
+		tracePathsByReceiver(const std::vector<radar::Receiver*>& live_receivers,
+							const std::vector<std::size_t>& live_receiver_indices,
+							const std::vector<ActiveStreamingSource>& sources, RealType t_step);
+
+		/// Adds one sample to a single active streaming receiver, from propagation paths.
+		void appendReceiverStreamingSample(std::size_t receiver_index, std::size_t sample_index, RealType t_step,
+										   const std::vector<propagation::PropagationPath>& paths);
 
 		/// Builds and attaches IF resampling sinks for configured FMCW receivers.
 		void initializeFmcwIfResamplers();
@@ -268,20 +304,11 @@ namespace core
 		/// Emits sink heartbeats on the continuous simulation clock up to the given time.
 		void emitContextHeartbeatsThrough(RealType simulation_time);
 
-		/// Returns the latest conservative receive time at which an ended source must still be retained.
-		[[nodiscard]] std::optional<RealType> streamingSourceCleanupDeadline(const ActiveStreamingSource& source,
-																			 RealType from_time) const;
-
-		/// Returns the latest conservative receive time at which one receiver may still observe a source.
-		[[nodiscard]] std::optional<RealType> receiverCleanupDeadline(const ActiveStreamingSource& source,
-																	  const radar::Receiver* rx,
-																	  RealType from_time) const;
-
 		/// Creates the CW phase-noise lookup if any active timing source needs it.
 		void ensureCwPhaseNoiseLookup();
 
 		/// Returns the dechirp reference mixer for a receiver at one sample time.
-		[[nodiscard]] std::optional<ComplexType> calculateDechirpMixer(radar::Receiver* rx, RealType t_step,
+		[[nodiscard]] std::optional<ComplexType> calculateDechirpMixer(radar::Receiver* rx, RealType rx_time,
 																	   ReceiverTrackerCache& tracker_cache) const;
 
 		/// Adds pulsed interference into a completed high-rate IF block before resampling.
@@ -307,13 +334,6 @@ namespace core
 		void initializeFinalizers();
 
 		/**
-		 * @brief Routes a calculated radar response to the appropriate receiver inbox or log.
-		 * @param rx Pointer to the receiving radar object.
-		 * @param response The calculated response to route.
-		 */
-		void routeResponse(radar::Receiver* rx, std::unique_ptr<serial::Response> response) const;
-
-		/**
 		 * @brief Throttles and emits progress updates to the reporter.
 		 */
 		void updateProgress();
@@ -337,6 +357,9 @@ namespace core
 
 		World* _world; ///< Pointer to the simulation world state.
 		pool::ThreadPool& _pool; ///< Reference to the global thread pool.
+		std::shared_ptr<propagation::PropagationModel> _propagation; ///< Shared thread-safe propagation model instance.
+		// Note: _main_prop_ctx after _propagation so _main_prop_ctx gets destructed first.
+		std::unique_ptr<propagation::ThreadContext> _main_prop_ctx; ///< Prop model context for the main sim thread.
 		std::shared_ptr<ProgressReporter> _reporter; ///< Shared progress reporter instance.
 		std::vector<std::jthread> _finalizer_threads; ///< Collection of dedicated pulsed finalizer threads.
 		std::shared_ptr<OutputMetadataCollector> _metadata_collector; ///< Collector for generated output metadata.
@@ -352,6 +375,8 @@ namespace core
 		std::string _output_dir; ///< Output directory for the simulation files.
 		std::unique_ptr<simulation::CwPhaseNoiseLookup> _cw_phase_noise_lookup; ///< Cached CW phase-noise lookup.
 		std::vector<ReceiverTrackerCache> _streaming_tracker_caches; ///< Per-receiver streaming tracker caches.
+		std::optional<RealType> _coarse_hi_time; ///< CW coarse sampling: end time of the currently-cached bracket.
+		RealType _coarse_chunk_end_time = 0.0; ///< CW coarse sampling: current event horizon (set per `processStreamingPhysics` call); lookahead queries never cross it, since the active source/receiver set is only guaranteed stable up to this time.
 		std::vector<ReceiverTrackerCache> _if_pulse_tracker_caches; ///< Per-receiver dechirp trackers for pulse blocks.
 		std::vector<std::vector<ComplexType>> _fmcw_if_block_buffers; ///< Pending high-rate IF blocks.
 		std::vector<RealType> _fmcw_if_block_start_times; ///< Start time for each pending IF block.
@@ -369,6 +394,10 @@ namespace core
 		std::vector<std::shared_ptr<const OutputFileMetadata>>
 			_streaming_output_file_metadata; ///< Per-receiver metadata attached to sink blocks.
 		RealType _internal_stop_time = 0.0; ///< Physics stop time including IF over-render margin.
+
+		RealType _world_bounding_diameter = 0.0; ///< Cached once at construction; see computeWorldBoundingDiameter().
+		std::vector<bool>
+			_streaming_source_live_this_sample; ///< Tier-2 scratch: per-source "contributed this sample" flags.
 	};
 
 	/**

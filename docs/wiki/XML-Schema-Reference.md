@@ -68,12 +68,14 @@ Optional children, in order:
 | --- | --- | --- | --- |
 | `<c>` | m/s | `299792458` | Propagation speed. Use the default for free-space radio propagation. |
 | `<simSamplingRate>` | Hz | `1000` | Geometry interpolation rate used while building pulsed responses. Increase it when fast platform motion needs finer geometry sampling. |
+| `<cwSimSamplingRate>` | Hz | disabled | Geometry interpolation rate used while simulating CW/streaming propagation, instead of every output sample (default). Increase for past motion, decrease for expensive propagation modelling, e.g. high density ray tracing. |
 | `<randomseed>` | integer | random | Seed for repeatable noise and random models. Set this when you want repeatable runs. |
 | `<adc_bits>` | bits | `0` | ADC quantization depth. `0` disables quantization and stores normalized floating-point samples. |
 | `<oversample>` | multiplier | `1` | Internal oversampling factor. Valid range is `1` to `8`. FMCW waveform aliasing checks use `<rate> * <oversample>`. Most final output is still written at `<rate>`, but legacy dechirped FMCW output without `<if_sample_rate>` is written at `<rate> * <oversample>`. |
 | `<rotationangleunit>` | `deg` or `rad` | `deg` | Unit used by platform rotation values. |
 | `<origin>` | attributes | built-in KML default | Geodetic reference used only by ENU KML/geospatial export. It does not affect signal simulation geometry. |
 | `<coordinatesystem>` | attributes | `ENU` | Coordinate frame used when converting platform coordinates to geodetic coordinates for KML/geospatial export. It does not transform positions during simulation. |
+| `<propagation>` | `<pointscatter>` or `<raytracing>` sub-element | `pointscatter` model | Selects the propagation model and its model-specific parameters. |
 
 ### `<origin>`
 
@@ -118,6 +120,46 @@ Frames:
 | `ECEF` | KML export treats platform `x`, `y`, and `altitude` as Earth-centered, Earth-fixed Cartesian coordinates in meters. In this frame, the XML element name `altitude` represents ECEF Z, not geodetic altitude. |
 
 FERS does not accept platform latitude/longitude waypoints. Latitude and longitude appear only in `<origin>`, where they define the geodetic reference used by ENU KML export.
+
+### `<propagation>`
+
+`<propagation>` selects the propagation model as a choice of exactly one sub-element: `<pointscatter>`, carrying its polarimetric-transport flag, or `<raytracing>`, carrying its ray-sampling parameters. Omitting `<propagation>` entirely defaults to `pointscatter` with polarimetric transport disabled.
+
+```xml
+<propagation>
+    <pointscatter polarimetric="true"/>
+</propagation>
+```
+
+```xml
+<propagation>
+    <raytracing scatter_limit="4" boresight_width="10"
+                boresight_tube_solid_angle="2e-8" off_boresight_tube_solid_angle="1e-5"
+                prune_below_max_db="60"/>
+</propagation>
+```
+
+`<pointscatter>` attributes:
+
+| Attribute | Required | Unit | Default | Meaning |
+| --- | --- | --- | --- | --- |
+| `polarimetric` | No | boolean | `false` | Enables full polarimetric transport: antenna Jones-vector polarisation coupling and target scattering matrices on reflected paths. When `false`, direct and reflected paths compute scalar amplitudes. |
+
+`<raytracing>` attributes:
+
+| Attribute | Required | Unit | Default | Meaning |
+| --- | --- | --- | --- | --- |
+| `scatter_limit` | No | integer bounces | `4` | Maximum number of GO bounces per ray path (max ray depth is `scatter_limit + 1`). |
+| `boresight_width` | No | `<rotationangleunit>` | `0.3` rad (~17.2°) | Full angular width of the ray-sampling cone centered on each source antenna's boresight. The cone's half-angle is `boresight_width / 2`. Must be less than a full turn (360°/2π rad). |
+| `boresight_tube_solid_angle` | No | steradians | `2e-8` | Target ray-tube solid angle for rays sampled within the boresight cone. |
+| `off_boresight_tube_solid_angle` | No | steradians | `1e-5` | Target ray-tube solid angle for rays sampled outside the boresight cone. |
+| `prune_below_max_db` | No | dB (power, positive magnitude) | unset (no pruning) | For each receiver at a given time, drops paths more than this many dB weaker than that group's strongest path, for performance. No pruning if disabled. |
+
+`rays_per_source` and the cone's ray count are not set directly - they're derived from `boresight_width` and the two tube-solid-angle attributes and logged at the start of the simulation.
+
+`prune_below_max_db` culls paths to a receiver below the maximum dB path. It's generally safe to set this to something like "60" depending on your SNR. Dropped paths are individually below the kept power by at least that many dB, but enough of them summing in phase could in principle raise the dropped total above the per-path floor. Pick a threshold with enough margin over your expected noise floor/dynamic range that this isn't a concern for your scenario.
+
+Each ray tube's footprint on a hit facet is approximately `R^2 * S / cos(theta)`, where `R` is the range to the facet, `S` is the tube's solid angle, and `theta` is the incidence angle off the facet normal. A tube whose footprint exceeds a facet's area does not fully resolve that facet. To choose `boresight_tube_solid_angle` or `off_boresight_tube_solid_angle`, pick the smallest facet area `A_facet` that regime needs to resolve, and the shortest range and most oblique incidence angle targets in that regime will be seen at, then solve for the tube solid angle: `S <= A_facet * cos(theta) / R^2`. A smaller `S` resolves finer detail at the cost of more rays (and compute).
 
 ## `<waveform>`
 
@@ -369,6 +411,27 @@ Optional child parameters:
 | `<azscale>` | `gaussian` | Azimuth spread for Gaussian pattern. |
 | `<elscale>` | `gaussian` | Elevation spread for Gaussian pattern. |
 | `<efficiency>` | `isotropic`, `sinc`, `squarehorn`, `parabolic`, `xml`, `file` | Linear gain multiplier applied to the computed antenna gain. Defaults to `1`. |
+| `<boresight_polarisation>` | all | Boresight polarisation Jones vector (Ludwig-3). See below. Defaults to purely horizontal if omitted. |
+
+### `<boresight_polarisation>`
+
+```xml
+<antenna name="Iso" pattern="isotropic">
+    <boresight_polarisation h="1.0+0.0i" v="0.0+0.0i"/>
+</antenna>
+```
+
+| Attribute | Required | Meaning |
+| --- | --- | --- |
+| `h` | No | Horizontal component of the Jones vector, as a complex number literal. Defaults to `0+0i`. |
+| `v` | No | Vertical component of the Jones vector, as a complex number literal. Defaults to `0+0i`. |
+
+The vector is normalised on load, so only the ratio between `h` and `v` matters.
+
+A complex number literal is a real term, an imaginary term, or both (real first). An
+imaginary term's unit marker (`i` or `j`, case-insensitive) may come before or after its
+magnitude, and whitespace around signs and units is ignored. For example, all of
+`1.0+0.0i`, `1.0 + j0.5`, `-0.5 - i2`, `0.5j`, and `1e-3+2e-4i` are valid.
 
 Pattern notes:
 
@@ -484,7 +547,7 @@ Contains one or more `<rotationwaypoint>` elements.
 
 | Element | Unit | Meaning |
 | --- | --- | --- |
-| `<azimuth>` | `<rotationangleunit>` | Platform azimuth. |
+| `<azimuth>` | `<rotationangleunit>` | Platform compass azimuth (left-handed angle from north). |
 | `<elevation>` | `<rotationangleunit>` | Platform elevation. |
 | `<time>` | seconds | Time for this pointing waypoint. |
 
@@ -860,6 +923,7 @@ The XML schema is intentionally simple, so some important checks happen when FER
 - FMCW count fields must be positive integers when present.
 - FMCW sweep edges, including `start_frequency_offset`, must fit the effective sample rate `<rate> * <oversample>`.
 - FMCW receiver IF-chain fields are allowed only when dechirping is enabled.
+- `<raytracing>`'s `prune_below_max_db`, when present, must be a finite positive number.
 - SFCW `step_size` must be nonzero, count fields must be positive integers, `dwell_time` must be no greater than `step_period`, and every emitted RF step must be positive.
 - Receiver noise temperature must not be negative.
 - UTM KML/geospatial export needs a valid zone and hemisphere.

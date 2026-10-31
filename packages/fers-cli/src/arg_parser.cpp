@@ -59,6 +59,49 @@ namespace
 		return std::nullopt;
 	}
 
+	/**
+	 * @brief Parses the ray-tracing engine preference from a string representation.
+	 *
+	 * Matched case-insensitively, unlike parseLogLevel() above.
+	 *
+	 * @param value The string representation of the engine preference.
+	 * @return std::optional<fers_ray_tracing_engine_t> The corresponding engine, or `std::nullopt` if invalid.
+	 */
+	std::optional<fers_ray_tracing_engine_t> parseRayTracingEngine(const std::string& value) noexcept
+	{
+		static const std::unordered_map<std::string, fers_ray_tracing_engine_t> ENGINE_MAP = {
+			{"auto", FERS_RT_ENGINE_AUTO}, {"optix", FERS_RT_ENGINE_OPTIX}, {"embree", FERS_RT_ENGINE_EMBREE}};
+
+		std::string lower = value;
+		std::ranges::transform(lower, lower.begin(), tolower);
+
+		if (const auto it = ENGINE_MAP.find(lower); it != ENGINE_MAP.end())
+		{
+			return it->second;
+		}
+		return std::nullopt;
+	}
+
+	/**
+	 * @brief Handles the ray-tracing engine argument and sets the engine preference.
+	 *
+	 * @param arg The ray-tracing engine argument string.
+	 * @param config The configuration object to update.
+	 * @return std::expected<void, std::string> An expected object with an error message if the engine is invalid.
+	 */
+	std::expected<void, std::string> handleRayTracingEngine(const std::string& arg, core::Config& config) noexcept
+	{
+		const std::string value = arg.substr(12); // length of "--rt-engine="
+		if (const auto engine = parseRayTracingEngine(value))
+		{
+			config.ray_tracing_engine = *engine;
+			return {};
+		}
+
+		std::cerr << "[ERROR] Invalid ray tracing engine '" << value << "'\n";
+		return std::unexpected("Invalid ray tracing engine: " + value);
+	}
+
 	bool isUnsignedDecimal(const std::string& value) noexcept
 	{
 		return !value.empty() &&
@@ -358,6 +401,10 @@ namespace
 		{
 			return handleLogFile(arg, config);
 		}
+		if (arg.rfind("--rt-engine=", 0) == 0)
+		{
+			return handleRayTracingEngine(arg, config);
+		}
 		if (arg.rfind("-n=", 0) == 0)
 		{
 			return handleNumThreads(arg, config);
@@ -425,6 +472,8 @@ Options:
                           Set optional VITA sender queue depth, greater than zero.
   --log-level=<level>     Set the logging level (TRACE, DEBUG, INFO, WARNING, ERROR, FATAL)
   --log-file=<file>       Log output to the specified .log or .txt file as well as the console.
+  --rt-engine=<engine>    Force the ray-tracing engine for the SBR propagation model
+                          (auto, optix, embree; case-insensitive). Defaults to auto-detect.
   -n=<threads>            Number of threads to use
 
 Arguments:

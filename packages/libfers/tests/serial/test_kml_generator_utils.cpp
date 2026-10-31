@@ -349,9 +349,8 @@ TEST_CASE("KML Generation: Antenna Wavelength and Dispatch", "[serial][kml][gene
 	plat.getRotationPath()->addCoord({0.0, 0.0, 0.0});
 	plat.getRotationPath()->finalize();
 
-	auto sig = std::make_unique<fers_signal::CwSignal>();
 	// Carrier = 3e8 Hz -> Wavelength = 1.0 m
-	fers_signal::RadarSignal wave("wave", 1.0, 3e8, 1.0, std::move(sig), 1);
+	fers_signal::RadarSignal wave("wave", 1.0, 3e8, fers_signal::CwWaveform{}, 1);
 
 	radar::Transmitter tx(&plat, "tx", radar::OperationMode::CW_MODE);
 	tx.setSignal(&wave);

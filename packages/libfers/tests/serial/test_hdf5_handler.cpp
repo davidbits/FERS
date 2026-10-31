@@ -337,7 +337,7 @@ TEST_CASE("HDF5 writer preserves finite file FMCW sample metadata", "[serial][hd
 {
 	const std::string path = tempFilePath(uniqueFileName("file_fmcw_metadata"));
 	removeIfExists(path);
-	core::OutputFileMetadata metadata{
+	const core::OutputFileMetadata metadata{
 		.receiver_id = 9,
 		.receiver_name = "FileFmcwRx",
 		.mode = "fmcw",

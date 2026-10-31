@@ -1,6 +1,6 @@
 #include <atomic>
 #include <catch2/catch_test_macros.hpp>
-#include <chrono>
+#include <functional>
 #include <future>
 #include <stdexcept>
 #include <thread>
@@ -23,6 +23,21 @@ TEST_CASE("ThreadPool executes tasks and returns results", "[core][thread_pool]"
 	auto future_void = pool.enqueue([&sum] { sum.fetch_add(3); });
 
 	REQUIRE(future_value.get() == 7);
+	future_void.get();
+	pool.wait();
+
+	REQUIRE(sum.load() == 5);
+}
+
+TEST_CASE("ThreadPool forwards enqueue arguments to the task", "[core][thread_pool]")
+{
+	pool::ThreadPool pool(2);
+
+	auto future_value = pool.enqueue([](int a, int b) { return a + b; }, 3, 4);
+	REQUIRE(future_value.get() == 7);
+
+	std::atomic<int> sum{0};
+	auto future_void = pool.enqueue([](std::atomic<int>& acc, int delta) { acc.fetch_add(delta); }, std::ref(sum), 5);
 	future_void.get();
 	pool.wait();
 

@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: GPL-2.0-only
 // Copyright (c) 2025-present FERS Contributors (see AUTHORS.md).
 
-import { useEffect, useMemo, useState } from 'react';
 import { Line } from '@react-three/drei';
-import { Vector3 } from 'three';
 import { invoke } from '@tauri-apps/api/core';
-import { useScenarioStore, Platform } from '@/stores/scenarioStore';
+import { useEffect, useMemo, useState } from 'react';
+import { Vector3 } from 'three';
+import { Platform, useScenarioStore } from '@/stores/scenarioStore';
 import { fersColors } from '@/theme';
 
 const NUM_PATH_POINTS = 100; // The resolution of the rendered path line.

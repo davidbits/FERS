@@ -33,7 +33,11 @@ namespace radar
 			}
 			const RealType raw_index = (time - params::startTime()) * sample_rate;
 			const RealType nearest = std::round(raw_index);
-			const RealType tolerance = 1.0e-12 * std::max<RealType>(1.0, std::abs(nearest));
+			// Timestamps can come from the coarse-sampling interpolation path now, not just startTime + k/rate
+			// arithmetic. A 1e-5-of-a-sample tolerance stays about five orders of magnitude below an exact sample, so
+			// it cannot conflate two distinct samples, while absorbing interpolation noise. Without it, consecutive
+			// FMCW IF blocks round to adjacent integers inconsistently, tripping the chronological-order check below.
+			const RealType tolerance = 1.0e-5 * std::max<RealType>(1.0, std::abs(nearest));
 			if (std::abs(raw_index - nearest) <= tolerance)
 			{
 				return static_cast<std::size_t>(nearest);

@@ -179,6 +179,17 @@ namespace
 		fers_free_string(err);
 	}
 
+	void configureRayTracingEngine(const core::Config& config)
+	{
+		if (fers_set_ray_tracing_engine(config.ray_tracing_engine) == 0)
+		{
+			return;
+		}
+		char* err = fers_get_last_error_message();
+		log(FERS_LOG_ERROR, "Failed to set ray tracing engine: {}", (err != nullptr) ? err : "Unknown error");
+		fers_free_string(err);
+	}
+
 	int runSimulation(fers_context_t* context)
 	{
 		log(FERS_LOG_INFO, "Starting simulation...");
@@ -222,7 +233,7 @@ namespace core
 
 		const std::filesystem::path final_out_dir = resolveOutputDir(config.script_file, config.output_dir);
 
-		ContextHandle context(fers_context_create());
+		const ContextHandle context(fers_context_create());
 		if (context.get() == nullptr)
 		{
 			log(FERS_LOG_FATAL, "Failed to create FERS simulation context.");
@@ -250,6 +261,7 @@ namespace core
 		}
 
 		configureThreadCount(config);
+		configureRayTracingEngine(config);
 
 		return runSimulation(context.get());
 	}

@@ -1,10 +1,11 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 #include <catch2/matchers/catch_matchers_string.hpp>
+#include <cmath>
 #include <string>
 
-#include "core/logging.h"
 #include "core/parameters.h"
+#include "core/portable_utils.h"
 
 using Catch::Matchers::ContainsSubstring;
 using Catch::Matchers::WithinAbs;
@@ -37,12 +38,43 @@ TEST_CASE("Parameters default values are consistent", "[core][parameters]")
 	REQUIRE(params::randomSeed() == 0u);
 	REQUIRE(params::adcBits() == 0u);
 	REQUIRE(params::renderFilterLength() == 33u);
-	REQUIRE(params::renderThreads() == 1u);
+	REQUIRE(params::workerThreads() == core::countProcessors());
 	REQUIRE(params::oversampleRatio() == 1u);
 	REQUIRE(params::coordinateFrame() == params::CoordinateFrame::ENU);
 	REQUIRE(params::rotationAngleUnit() == params::RotationAngleUnit::Degrees);
 	REQUIRE(params::utmZone() == 0);
 	REQUIRE(params::utmNorthHemisphere());
+}
+
+TEST_CASE("RayTracingParameters derives ray counts and solid angles from boresight width and tube weights",
+		  "[core][parameters]")
+{
+	params::RayTracingParameters rt;
+	rt.boresight_width = PI / 2.0; // 90 degree full-width cone -> 45 degree half-angle.
+	rt.boresight_tube_solid_angle = 1e-3;
+	rt.off_boresight_tube_solid_angle = 1e-2;
+
+	const double expected_cone_sr = 2.0 * PI * (1.0 - std::cos(PI / 4.0));
+	REQUIRE_THAT(rt.boresightSolidAngle(), WithinAbs(expected_cone_sr, 1e-9));
+
+	const auto expected_boresight_rays = static_cast<unsigned>(std::llround(expected_cone_sr / 1e-3));
+	REQUIRE(rt.boresightDirections() == expected_boresight_rays);
+
+	const double expected_off_sr = 4.0 * PI - expected_cone_sr;
+	const auto expected_off_rays = static_cast<unsigned>(std::llround(expected_off_sr / 1e-2));
+	REQUIRE(rt.offBoresightDirections() == expected_off_rays);
+
+	REQUIRE(rt.directionsPerSource() == expected_boresight_rays + expected_off_rays);
+}
+
+TEST_CASE("RayTracingParameters treats a full-turn boresight width as covering the whole sphere", "[core][parameters]")
+{
+	params::RayTracingParameters rt;
+	rt.boresight_width = 2.0 * PI;
+	rt.boresight_tube_solid_angle = 1e-3;
+
+	REQUIRE_THAT(rt.boresightSolidAngle(), WithinAbs(4.0 * PI, 1e-9));
+	REQUIRE(rt.offBoresightDirections() == 0u);
 }
 
 TEST_CASE("Parameters setters update getters", "[core][parameters]")
@@ -114,7 +146,7 @@ TEST_CASE("Parameters setThreads returns expected", "[core][parameters]")
 
 	const auto ok = params::setThreads(4);
 	REQUIRE(ok.has_value());
-	REQUIRE(params::renderThreads() == 4u);
+	REQUIRE(params::workerThreads() == 4u);
 }
 
 TEST_CASE("Parameters reset restores defaults", "[core][parameters]")

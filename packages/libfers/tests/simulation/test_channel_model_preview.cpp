@@ -89,8 +89,7 @@ namespace
 			tx->setAntenna(&antenna);
 			tx->setTiming(timing);
 
-			auto sig = std::make_unique<fers_signal::CwSignal>();
-			auto wave = std::make_unique<fers_signal::RadarSignal>("sig", 1000.0, 1e9, 1e-3, std::move(sig), 300);
+			auto wave = std::make_unique<fers_signal::RadarSignal>("sig", 1000.0, 1e9, fers_signal::CwWaveform{}, 300);
 			tx->setSignal(wave.get());
 
 			auto rx =
@@ -207,8 +206,7 @@ TEST_CASE("calculatePreviewLinks monostatic produces Monostatic and BistaticTxTg
 	tx->setAntenna(&iso_ant);
 	tx->setTiming(timing);
 
-	auto sig = std::make_unique<fers_signal::CwSignal>();
-	auto wave = std::make_unique<fers_signal::RadarSignal>("sig", 1000.0, 1e9, 1e-3, std::move(sig), 300);
+	auto wave = std::make_unique<fers_signal::RadarSignal>("sig", 1000.0, 1e9, fers_signal::CwWaveform{}, 300);
 	tx->setSignal(wave.get());
 
 	auto rx = std::make_unique<radar::Receiver>(tx_plat_ptr, "rx", 42, radar::OperationMode::PULSED_MODE, 200);
@@ -249,7 +247,7 @@ TEST_CASE("calculatePreviewLinks monostatic link references correct IDs", "[simu
 	const SimId tx_id = 100;
 	const SimId rx_id = 200;
 	const SimId tgt_id = 400;
-	MonostaticPreviewFixture fixture(tx_id, rx_id, tgt_id);
+	const MonostaticPreviewFixture fixture(tx_id, rx_id, tgt_id);
 
 	const auto links = simulation::calculatePreviewLinks(fixture.world, 0.0);
 	requireMonostaticPreviewLinkIds(links, tx_id, tgt_id);
@@ -284,8 +282,7 @@ TEST_CASE("calculatePreviewLinks bistatic produces correct link types", "[simula
 	tx->setAntenna(&iso_ant);
 	tx->setTiming(timing);
 
-	auto sig = std::make_unique<fers_signal::CwSignal>();
-	auto wave = std::make_unique<fers_signal::RadarSignal>("sig", 1000.0, 1e9, 1e-3, std::move(sig), 300);
+	auto wave = std::make_unique<fers_signal::RadarSignal>("sig", 1000.0, 1e9, fers_signal::CwWaveform{}, 300);
 	tx->setSignal(wave.get());
 
 	auto rx = std::make_unique<radar::Receiver>(rx_plat_ptr, "rx", 42, radar::OperationMode::PULSED_MODE, 200);
@@ -347,8 +344,7 @@ TEST_CASE("calculatePreviewLinks bistatic with NODIRECT flag omits direct link",
 	tx->setAntenna(&iso_ant);
 	tx->setTiming(timing);
 
-	auto sig = std::make_unique<fers_signal::CwSignal>();
-	auto wave = std::make_unique<fers_signal::RadarSignal>("sig", 1000.0, 1e9, 1e-3, std::move(sig), 300);
+	auto wave = std::make_unique<fers_signal::RadarSignal>("sig", 1000.0, 1e9, fers_signal::CwWaveform{}, 300);
 	tx->setSignal(wave.get());
 
 	auto rx = std::make_unique<radar::Receiver>(rx_plat_ptr, "rx", 42, radar::OperationMode::PULSED_MODE, 200);
@@ -408,8 +404,7 @@ TEST_CASE("calculatePreviewLinks respects transmitter schedule", "[simulation][c
 	// Schedule: active from 1.0 to 5.0 seconds only
 	tx->setSchedule({radar::SchedulePeriod{1.0, 5.0}});
 
-	auto sig = std::make_unique<fers_signal::CwSignal>();
-	auto wave = std::make_unique<fers_signal::RadarSignal>("sig", 1000.0, 1e9, 1e-3, std::move(sig), 300);
+	auto wave = std::make_unique<fers_signal::RadarSignal>("sig", 1000.0, 1e9, fers_signal::CwWaveform{}, 300);
 	tx->setSignal(wave.get());
 
 	auto rx = std::make_unique<radar::Receiver>(rx_plat_ptr, "rx", 42, radar::OperationMode::PULSED_MODE, 200);
@@ -448,7 +443,7 @@ TEST_CASE("calculatePreviewLinks respects receiver schedule", "[simulation][chan
 	auto* tx_plat_ptr = tx_plat.get();
 
 	auto rx_plat = std::make_unique<radar::Platform>("rx_plat");
-	setupPlatform(*rx_plat, math::Vec3{1000.0, 0.0, 0.0});
+	setupPlatform(*rx_plat, math::Vec3{1000.0, 500.0, 0.0});
 	auto* rx_plat_ptr = rx_plat.get();
 
 	auto tgt_plat = std::make_unique<radar::Platform>("tgt_plat");
@@ -463,8 +458,7 @@ TEST_CASE("calculatePreviewLinks respects receiver schedule", "[simulation][chan
 	tx->setTiming(timing);
 	// Tx always active (no schedule)
 
-	auto sig = std::make_unique<fers_signal::CwSignal>();
-	auto wave = std::make_unique<fers_signal::RadarSignal>("sig", 1000.0, 1e9, 1e-3, std::move(sig), 300);
+	auto wave = std::make_unique<fers_signal::RadarSignal>("sig", 1000.0, 1e9, fers_signal::CwWaveform{}, 300);
 	tx->setSignal(wave.get());
 
 	auto rx = std::make_unique<radar::Receiver>(rx_plat_ptr, "rx", 42, radar::OperationMode::PULSED_MODE, 200);
@@ -529,8 +523,7 @@ TEST_CASE("calculatePreviewLinks scales link count with number of targets", "[si
 	tx->setAntenna(&iso_ant);
 	tx->setTiming(timing);
 
-	auto sig = std::make_unique<fers_signal::CwSignal>();
-	auto wave = std::make_unique<fers_signal::RadarSignal>("sig", 1000.0, 1e9, 1e-3, std::move(sig), 300);
+	auto wave = std::make_unique<fers_signal::RadarSignal>("sig", 1000.0, 1e9, fers_signal::CwWaveform{}, 300);
 	tx->setSignal(wave.get());
 
 	auto rx = std::make_unique<radar::Receiver>(tx_plat_ptr, "rx", 42, radar::OperationMode::PULSED_MODE, 200);
@@ -587,9 +580,8 @@ TEST_CASE("calculatePreviewLinks classifies very weak signals as Weak", "[simula
 	tx->setAntenna(&iso_ant);
 	tx->setTiming(timing);
 
-	auto sig = std::make_unique<fers_signal::CwSignal>();
 	// Very low transmit power: 1e-6 W (1 uW)
-	auto wave = std::make_unique<fers_signal::RadarSignal>("sig", 1e-6, 1e9, 1e-3, std::move(sig), 300);
+	auto wave = std::make_unique<fers_signal::RadarSignal>("sig", 1e-6, 1e9, fers_signal::CwWaveform{}, 300);
 	tx->setSignal(wave.get());
 
 	auto rx = std::make_unique<radar::Receiver>(tx_plat_ptr, "rx", 42, radar::OperationMode::PULSED_MODE, 200);
@@ -647,8 +639,7 @@ TEST_CASE("calculatePreviewLinks classifies strong signals as Strong", "[simulat
 	tx->setAntenna(&iso_ant);
 	tx->setTiming(timing);
 
-	auto sig = std::make_unique<fers_signal::CwSignal>();
-	auto wave = std::make_unique<fers_signal::RadarSignal>("sig", 1e6, 1e9, 1e-3, std::move(sig), 300);
+	auto wave = std::make_unique<fers_signal::RadarSignal>("sig", 1e6, 1e9, fers_signal::CwWaveform{}, 300);
 	tx->setSignal(wave.get());
 
 	auto rx = std::make_unique<radar::Receiver>(tx_plat_ptr, "rx", 42, radar::OperationMode::PULSED_MODE, 200);
@@ -740,7 +731,7 @@ TEST_CASE("calculatePreviewLinks monostatic label contains dBm", "[simulation][c
 	ParamGuard const guard;
 	params::params.reset();
 	params::setRate(1e6);
-	MonostaticPreviewFixture fixture(100, 200, 400);
+	const MonostaticPreviewFixture fixture(100, 200, 400);
 
 	const auto links = simulation::calculatePreviewLinks(fixture.world, 0.0);
 	requireMonostaticLabelSummary(links);
@@ -767,8 +758,8 @@ TEST_CASE("calculatePreviewLinks FMCW labels use single-value preview style", "[
 	tx->setAntenna(&iso_ant);
 	tx->setTiming(timing);
 
-	auto sig = std::make_unique<fers_signal::FmcwChirpSignal>(1.0e6, 1.0e-4, 4.0e-4);
-	auto wave = std::make_unique<fers_signal::RadarSignal>("sig", 1000.0, 1e9, 1.0e-4, std::move(sig), 300);
+	auto wave = std::make_unique<fers_signal::RadarSignal>("sig", 1000.0, 1e9,
+														   fers_signal::FmcwChirpWaveform(1.0e6, 1.0e-4, 4.0e-4), 300);
 	tx->setSignal(wave.get());
 
 	auto rx = std::make_unique<radar::Receiver>(tx_plat_ptr, "rx", 42, radar::OperationMode::FMCW_MODE, 200);
@@ -808,4 +799,36 @@ TEST_CASE("calculatePreviewLinks FMCW labels use single-value preview style", "[
 	}
 
 	REQUIRE(saw_fmcw_power_label);
+}
+
+TEST_CASE("LinkType enum values are distinct", "[simulation][channel_model][preview]")
+{
+	REQUIRE(simulation::LinkType::Monostatic != simulation::LinkType::BistaticTxTgt);
+	REQUIRE(simulation::LinkType::BistaticTxTgt != simulation::LinkType::BistaticTgtRx);
+	REQUIRE(simulation::LinkType::BistaticTgtRx != simulation::LinkType::DirectTxRx);
+	REQUIRE(simulation::LinkType::Monostatic != simulation::LinkType::DirectTxRx);
+}
+
+TEST_CASE("LinkQuality enum values are distinct", "[simulation][channel_model][preview]")
+{
+	REQUIRE(simulation::LinkQuality::Strong != simulation::LinkQuality::Weak);
+}
+
+TEST_CASE("PreviewLink holds assigned values", "[simulation][channel_model][preview]")
+{
+	simulation::PreviewLink link{.type = simulation::LinkType::Monostatic,
+								 .quality = simulation::LinkQuality::Strong,
+								 .label = "Test Label",
+								 .display_value = -42.0,
+								 .source_id = 100,
+								 .dest_id = 200,
+								 .origin_id = 100};
+
+	REQUIRE(link.type == simulation::LinkType::Monostatic);
+	REQUIRE(link.quality == simulation::LinkQuality::Strong);
+	REQUIRE(link.label == "Test Label");
+	REQUIRE(link.display_value == -42.0);
+	REQUIRE(link.source_id == 100);
+	REQUIRE(link.dest_id == 200);
+	REQUIRE(link.origin_id == 100);
 }

@@ -59,7 +59,8 @@ namespace pool
 			using ReturnType = std::invoke_result_t<F, Args...>;
 
 			auto task = std::make_shared<std::packaged_task<ReturnType()>>(
-				std::bind(std::forward<F>(f), std::forward<Args>(args)...));
+				[Func = std::forward<F>(f), ...capturedArgs = std::forward<Args>(args)]() mutable
+				{ return Func(std::move(capturedArgs)...); });
 
 			std::future<ReturnType> res = task->get_future();
 			{

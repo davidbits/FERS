@@ -74,7 +74,7 @@ TEST_CASE("World stores and retrieves added objects", "[core][world]")
 	core::World world;
 
 	auto platform = std::make_unique<radar::Platform>("Platform-A", 11);
-	auto target = std::make_unique<radar::IsoTarget>(platform.get(), "Target-A", 1.5, 9, 22);
+	auto target = radar::createIsoTarget(platform.get(), "Target-A", 1.5, 9, 22);
 	world.add(std::move(platform));
 	world.add(std::move(target));
 
@@ -87,8 +87,7 @@ TEST_CASE("World stores and retrieves added objects", "[core][world]")
 	world.add(std::move(tx));
 	world.add(std::move(rx));
 
-	auto signal = std::make_unique<fers_signal::RadarSignal>("Wave-A", 2.0, 1.0e9, 0.2,
-															 std::make_unique<fers_signal::CwSignal>(), 301);
+	auto signal = std::make_unique<fers_signal::RadarSignal>("Wave-A", 2.0, 1.0e9, fers_signal::CwWaveform{}, 301);
 	world.add(std::move(signal));
 
 	auto antenna = std::make_unique<antenna::Isotropic>("Ant-A", 401);
@@ -97,6 +96,9 @@ TEST_CASE("World stores and retrieves added objects", "[core][world]")
 	auto timing = std::make_unique<timing::PrototypeTiming>("Timing-A", 501);
 	world.add(std::move(timing));
 
+	world.add(core::MeshAsset{.id = 601, .name = "Mesh-A", .path = "/scenario/meshes/mesh-a.obj", .filename = ""});
+	world.add(core::MaterialAsset{.id = 701, .name = "Material-A", .relative_permittivity = 0.5, .conductivity = 0.0});
+
 	REQUIRE(world.getPlatforms().size() == 3);
 	REQUIRE(world.getTargets().size() == 1);
 	REQUIRE(world.getTransmitters().size() == 1);
@@ -104,16 +106,22 @@ TEST_CASE("World stores and retrieves added objects", "[core][world]")
 	REQUIRE(world.getWaveforms().size() == 1);
 	REQUIRE(world.getAntennas().size() == 1);
 	REQUIRE(world.getTimings().size() == 1);
+	REQUIRE(world.getMeshes().size() == 1);
+	REQUIRE(world.getMaterials().size() == 1);
 
 	REQUIRE(world.findWaveform(301) != nullptr);
 	REQUIRE(world.findAntenna(401) != nullptr);
 	REQUIRE(world.findTiming(501) != nullptr);
+	REQUIRE(world.findMesh(601) != nullptr);
+	REQUIRE(world.findMaterial(701) != nullptr);
 	REQUIRE(world.findTransmitterByName("Tx-A") == world.getTransmitters().front().get());
 	REQUIRE(world.findWaveformByName("Wave-A") == world.findWaveform(301));
 
 	REQUIRE(world.findWaveform(9999) == nullptr);
 	REQUIRE(world.findAntenna(9999) == nullptr);
 	REQUIRE(world.findTiming(9999) == nullptr);
+	REQUIRE(world.findMesh(9999) == nullptr);
+	REQUIRE(world.findMaterial(9999) == nullptr);
 	REQUIRE(world.findTransmitterByName("missing") == nullptr);
 	REQUIRE(world.findWaveformByName("missing") == nullptr);
 }
@@ -138,7 +146,7 @@ TEST_CASE("World finds radar components by ID", "[core][world]")
 
 	auto tx = std::make_unique<radar::Transmitter>(plat_ptr, "Tx", radar::OperationMode::PULSED_MODE, 101);
 	auto rx = std::make_unique<radar::Receiver>(plat_ptr, "Rx", 42, radar::OperationMode::PULSED_MODE, 202);
-	auto tgt = std::make_unique<radar::IsoTarget>(plat_ptr, "Tgt", 1.0, 42, 303);
+	auto tgt = radar::createIsoTarget(plat_ptr, "Tgt", 1.0, 42, 303);
 
 	auto* tx_ptr = tx.get();
 	auto* rx_ptr = rx.get();
@@ -165,14 +173,14 @@ TEST_CASE("World replaces target", "[core][world]")
 	world.add(std::move(platform));
 
 	// 1. Add initial target
-	auto old_tgt = std::make_unique<radar::IsoTarget>(plat_ptr, "OldTgt", 1.0, 42, 100);
+	auto old_tgt = radar::createIsoTarget(plat_ptr, "OldTgt", 1.0, 42, 100);
 	world.add(std::move(old_tgt));
 
 	REQUIRE(world.getTargets().size() == 1);
 	REQUIRE(world.findTarget(100)->getName() == "OldTgt");
 
 	// 2. Replace existing target
-	auto new_tgt = std::make_unique<radar::IsoTarget>(plat_ptr, "NewTgt", 5.0, 42, 100);
+	auto new_tgt = radar::createIsoTarget(plat_ptr, "NewTgt", 5.0, 42, 100);
 	auto* new_tgt_ptr = new_tgt.get();
 	world.replace(std::move(new_tgt));
 
@@ -181,7 +189,7 @@ TEST_CASE("World replaces target", "[core][world]")
 	REQUIRE(world.findTarget(100)->getName() == "NewTgt");
 
 	// 3. Replace (add) non-existent target
-	auto another_tgt = std::make_unique<radar::IsoTarget>(plat_ptr, "AnotherTgt", 10.0, 42, 200);
+	auto another_tgt = radar::createIsoTarget(plat_ptr, "AnotherTgt", 10.0, 42, 200);
 	auto* another_tgt_ptr = another_tgt.get();
 	world.replace(std::move(another_tgt));
 
@@ -233,8 +241,7 @@ TEST_CASE("World replaces waveform and updates dependent components", "[core][wo
 	core::World world;
 
 	// 1. Setup initial waveform
-	auto old_wf = std::make_unique<fers_signal::RadarSignal>("OldWf", 1.0, 1e9, 1.0,
-															 std::make_unique<fers_signal::CwSignal>(), 200);
+	auto old_wf = std::make_unique<fers_signal::RadarSignal>("OldWf", 1.0, 1e9, fers_signal::CwWaveform{}, 200);
 	auto* old_wf_ptr = old_wf.get();
 	world.add(std::move(old_wf));
 
@@ -251,8 +258,8 @@ TEST_CASE("World replaces waveform and updates dependent components", "[core][wo
 	REQUIRE(tx_ptr->getSignal() == old_wf_ptr);
 
 	// 3. Replace the waveform
-	auto new_wf = std::make_unique<fers_signal::RadarSignal>("NewWf", 2.0, 2e9, 1.0,
-															 std::make_unique<fers_signal::CwSignal>(), 200); // Same ID
+	auto new_wf =
+		std::make_unique<fers_signal::RadarSignal>("NewWf", 2.0, 2e9, fers_signal::CwWaveform{}, 200); // Same ID
 	auto* new_wf_ptr = new_wf.get();
 	world.replace(std::move(new_wf));
 
@@ -363,11 +370,10 @@ TEST_CASE("World enforces unique ids for assets", "[core][world]")
 
 	SECTION("Waveform ids are unique")
 	{
-		world.add(std::make_unique<fers_signal::RadarSignal>("Wave-1", 1.0, 1.0e9, 0.1,
-															 std::make_unique<fers_signal::CwSignal>(), 77));
-		REQUIRE_THROWS_AS(world.add(std::make_unique<fers_signal::RadarSignal>(
-							  "Wave-2", 2.0, 2.0e9, 0.2, std::make_unique<fers_signal::CwSignal>(), 77)),
-						  std::runtime_error);
+		world.add(std::make_unique<fers_signal::RadarSignal>("Wave-1", 1.0, 1.0e9, fers_signal::CwWaveform{}, 77));
+		REQUIRE_THROWS_AS(
+			world.add(std::make_unique<fers_signal::RadarSignal>("Wave-2", 2.0, 2.0e9, fers_signal::CwWaveform{}, 77)),
+			std::runtime_error);
 	}
 
 	SECTION("Antenna ids are unique")
@@ -381,6 +387,22 @@ TEST_CASE("World enforces unique ids for assets", "[core][world]")
 		world.add(std::make_unique<timing::PrototypeTiming>("Timing-1", 99));
 		REQUIRE_THROWS_AS(world.add(std::make_unique<timing::PrototypeTiming>("Timing-2", 99)), std::runtime_error);
 	}
+
+	SECTION("Mesh ids are unique")
+	{
+		world.add(core::MeshAsset{.id = 111, .name = "Mesh-1", .path = "mesh-1.obj", .filename = ""});
+		REQUIRE_THROWS_AS(world.add(core::MeshAsset{.id = 111, .name = "Mesh-2", .path = "mesh-2.obj", .filename = ""}),
+						  std::runtime_error);
+	}
+
+	SECTION("Material ids are unique")
+	{
+		world.add(
+			core::MaterialAsset{.id = 222, .name = "Material-1", .relative_permittivity = 0.9f, .conductivity = 0.0f});
+		REQUIRE_THROWS_AS(world.add(core::MaterialAsset{
+							  .id = 222, .name = "Material-2", .relative_permittivity = 0.8f, .conductivity = 0.0f}),
+						  std::runtime_error);
+	}
 }
 
 TEST_CASE("World clear resets storage and state", "[core][world]")
@@ -392,11 +414,12 @@ TEST_CASE("World clear resets storage and state", "[core][world]")
 												   radar::OperationMode::CW_MODE, 101));
 	world.add(std::make_unique<radar::Receiver>(world.getPlatforms().front().get(), "Rx-A", 1,
 												radar::OperationMode::CW_MODE, 202));
-	world.add(std::make_unique<radar::IsoTarget>(world.getPlatforms().front().get(), "Target-A", 1.0, 5, 303));
-	world.add(std::make_unique<fers_signal::RadarSignal>("Wave-A", 1.0, 1.0e9, 0.1,
-														 std::make_unique<fers_signal::CwSignal>(), 404));
+	world.add(radar::createIsoTarget(world.getPlatforms().front().get(), "Target-A", 1.0, 5, 303));
+	world.add(std::make_unique<fers_signal::RadarSignal>("Wave-A", 1.0, 1.0e9, fers_signal::CwWaveform{}, 404));
 	world.add(std::make_unique<antenna::Isotropic>("Ant-A", 505));
 	world.add(std::make_unique<timing::PrototypeTiming>("Timing-A", 606));
+	world.add(core::MeshAsset{.id = 707, .name = "Mesh-A", .path = "mesh-a.obj", .filename = ""});
+	world.add(core::MaterialAsset{.id = 808, .name = "Material-A", .relative_permittivity = 0.5, .conductivity = 0.0});
 
 	world.getEventQueue().push({1.0, core::EventType::TX_STREAMING_START, world.getTransmitters().front().get()});
 	world.getSimulationState().t_current = 42.0;
@@ -413,6 +436,8 @@ TEST_CASE("World clear resets storage and state", "[core][world]")
 	REQUIRE(world.getWaveforms().empty());
 	REQUIRE(world.getAntennas().empty());
 	REQUIRE(world.getTimings().empty());
+	REQUIRE(world.getMeshes().empty());
+	REQUIRE(world.getMaterials().empty());
 	REQUIRE(world.getEventQueue().empty());
 	REQUIRE(world.findTransmitterByName("Tx-A") == nullptr);
 	REQUIRE(world.findWaveformByName("Wave-A") == nullptr);

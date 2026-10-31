@@ -250,6 +250,28 @@ void fers_log(fers_log_level_t level, const char* message);
  */
 int fers_set_thread_count(unsigned num_threads);
 
+/**
+ * @brief Ray-tracing engine selection for the SBR propagation model.
+ */
+typedef enum // NOLINT(*-use-using,performance-enum-size)
+{
+	FERS_RT_ENGINE_AUTO, ///< Auto-select: prefer OptiX, fall back to Embree (default).
+	FERS_RT_ENGINE_OPTIX, ///< Require the OptiX engine.
+	FERS_RT_ENGINE_EMBREE ///< Require the Embree engine.
+} fers_ray_tracing_engine_t;
+
+/**
+ * @brief Sets which ray-tracing engine the SBR propagation model should use.
+ *
+ * Set the desired ray-tracing engine for the ray-tracing propagation model to use.
+ *
+ * @param engine The engine preference.
+ * @return 0 on success, non-zero on error (e.g. an unrecognized enum value). This function
+ *         clears any previous thread-local error message at entry, like the other fallible
+ *         API calls.
+ */
+int fers_set_ray_tracing_engine(fers_ray_tracing_engine_t engine);
+
 // --- Scenario Loading & Serialization ---
 
 /**

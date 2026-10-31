@@ -26,6 +26,7 @@
 
 #include "core/config.h"
 #include "core/simulation_state.h"
+#include "propagation/propagation_model.h"
 
 namespace timing
 {
@@ -108,9 +109,9 @@ namespace processing::pipeline
 	 * @param tracker_cache Caller-owned reusable tracker storage for FMCW path boundary state.
 	 */
 	void applyStreamingInterference(std::span<ComplexType> window, RealType actual_start, RealType dt,
-									const radar::Receiver* receiver,
+									const propagation::PropagationModel& prop, propagation::ThreadContext* ctx,
+									radar::Receiver* receiver,
 									const std::vector<core::ActiveStreamingSource>& streaming_sources,
-									const std::vector<std::unique_ptr<radar::Target>>* targets,
 									core::ReceiverTrackerCache& tracker_cache,
 									const simulation::CwPhaseNoiseLookup* phase_noise_lookup = nullptr);
 

@@ -45,7 +45,6 @@
 #include "serial/rotation_warning_utils.h"
 #include "serial/xml_parser.h"
 #include "serial/xml_serializer.h"
-#include "signal/radar_signal.h"
 #include "simulation/channel_model.h"
 
 // The fers_context struct is defined here as an alias for our C++ class.
@@ -413,6 +412,34 @@ int fers_set_thread_count(unsigned num_threads)
 	catch (const std::exception& e)
 	{
 		handle_api_exception(e, "fers_set_thread_count");
+		return 1;
+	}
+}
+
+int fers_set_ray_tracing_engine(fers_ray_tracing_engine_t engine)
+{
+	last_error_message.clear();
+	try
+	{
+		switch (engine)
+		{
+		case FERS_RT_ENGINE_AUTO:
+			params::setRayTracingEnginePreference(params::RayTracingEnginePreference::Auto);
+			return 0;
+		case FERS_RT_ENGINE_OPTIX:
+			params::setRayTracingEnginePreference(params::RayTracingEnginePreference::OptiX);
+			return 0;
+		case FERS_RT_ENGINE_EMBREE:
+			params::setRayTracingEnginePreference(params::RayTracingEnginePreference::Embree);
+			return 0;
+		default:
+			set_api_error("Invalid ray tracing engine value.");
+			return 1;
+		}
+	}
+	catch (const std::exception& e)
+	{
+		handle_api_exception(e, "fers_set_ray_tracing_engine");
 		return 1;
 	}
 }
@@ -1111,7 +1138,8 @@ void fers_free_string(char* str)
 {
 	if (str != nullptr)
 	{
-		// NOLINTNEXTLINE(cppcoreguidelines-owning-memory): Public C API frees strings returned by this library.
+		// Public C API frees strings returned by this library.
+		// NOLINTNEXTLINE(cppcoreguidelines-owning-memory,cppcoreguidelines-no-malloc)
 		free(str);
 	}
 }
@@ -1190,7 +1218,7 @@ namespace
 				return 1;
 			}
 
-			pool::ThreadPool pool(params::renderThreads());
+			pool::ThreadPool pool(params::workerThreads());
 
 			ctx->clearLastOutputMetadata();
 			bool cancelled = false;
@@ -1383,8 +1411,9 @@ void fers_free_interpolated_motion_path(fers_interpolated_path_t* path)
 	{
 		// NOLINTNEXTLINE(cppcoreguidelines-owning-memory): Frees arrays owned by C API path structs.
 		delete[] path->points;
-		// NOLINTNEXTLINE(cppcoreguidelines-owning-memory): Frees structs allocated by
-		// `fers_get_interpolated_motion_path`.
+
+		// Frees structs allocated by `fers_get_interpolated_motion_path`.
+		// NOLINTNEXTLINE(cppcoreguidelines-owning-memory)
 		delete path;
 	}
 }
@@ -1484,8 +1513,8 @@ void fers_free_interpolated_rotation_path(fers_interpolated_rotation_path_t* pat
 	{
 		// NOLINTNEXTLINE(cppcoreguidelines-owning-memory): Frees arrays owned by C API path structs.
 		delete[] path->points;
-		// NOLINTNEXTLINE(cppcoreguidelines-owning-memory): Frees structs allocated by
-		// `fers_get_interpolated_rotation_path`.
+		// Frees structs allocated by `fers_get_interpolated_rotation_path`.
+		// NOLINTNEXTLINE(cppcoreguidelines-owning-memory)
 		delete path;
 	}
 }
